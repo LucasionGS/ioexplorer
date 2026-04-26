@@ -89,7 +89,7 @@ fn register_file_chooser(connection: &gio::DBusConnection) -> Result<(), glib::E
              parameters,
              invocation| {
                 let (response, results) = handle_file_chooser_call(method_name, &parameters);
-                invocation.return_value(Some(&(response, results).to_variant()));
+                invocation.return_value(Some(&response_variant(response, results)));
             },
         )
         .build()?;
@@ -98,7 +98,8 @@ fn register_file_chooser(connection: &gio::DBusConnection) -> Result<(), glib::E
 
 fn handle_file_chooser_call(method_name: &str, parameters: &glib::Variant) -> (u32, glib::Variant) {
     let title = parameters.child_get::<String>(3);
-    let options = glib::VariantDict::new(Some(&parameters.child_get::<glib::Variant>(4)));
+    let options_variant = parameters.child_value(4);
+    let options = glib::VariantDict::new(Some(&options_variant));
     let mut args = vec!["--chooser".to_string()];
 
     match method_name {
@@ -232,6 +233,10 @@ fn empty_results() -> glib::Variant {
     glib::VariantDict::new(None).to_variant()
 }
 
+fn response_variant(response: u32, results: glib::Variant) -> glib::Variant {
+    glib::Variant::tuple_from_iter([response.to_variant(), results])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,5 +252,35 @@ mod tests {
     #[test]
     fn rejects_empty_byte_paths() {
         assert_eq!(bytes_to_path(b"\0".to_vec()), None);
+    }
+
+    #[test]
+    fn reads_options_dict_from_method_parameters() {
+        let options = glib::VariantDict::new(None);
+        options.insert_value("multiple", &true.to_variant());
+
+        let parameters = glib::Variant::tuple_from_iter([
+            glib::variant::ObjectPath::try_from(
+                "/org/freedesktop/portal/desktop/request/test",
+            )
+            .unwrap()
+            .to_variant(),
+            "app.id".to_variant(),
+            "".to_variant(),
+            "Open File".to_variant(),
+            options.to_variant(),
+        ]);
+
+        let options_variant = parameters.child_value(4);
+        let options = glib::VariantDict::new(Some(&options_variant));
+
+        assert!(lookup_bool(&options, "multiple"));
+    }
+
+    #[test]
+    fn response_variant_matches_dbus_signature() {
+        let response = response_variant(RESPONSE_CANCELLED, empty_results());
+
+        assert_eq!(response.type_().as_str(), "(ua{sv})");
     }
 }
