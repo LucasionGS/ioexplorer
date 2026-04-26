@@ -1,10 +1,10 @@
 pkgname=ioexplorer
 pkgver=0.1.0
 pkgrel=1
-pkgdesc='Wayland-native provider-oriented file manager for Hyprland desktops'
+pkgdesc='Wayland-native provider-oriented file manager for Wayland desktops'
 arch=('x86_64')
 url='https://github.com/LucasionGS/ioexplorer'
-license=('LicenseRef-Unknown')
+license=('MIT')
 depends=('gtk4' 'glib2')
 makedepends=('cargo')
 source=("$pkgname-$pkgver.tar.gz")
