@@ -42,6 +42,16 @@ window {
   border-right: 1px solid rgba(255, 255, 255, 0.12);
 }
 
+.sidebar-computer-button {
+  margin: 6px;
+  border-radius: 6px;
+}
+
+.sidebar-separator {
+  margin: 0 8px 4px;
+  background: rgba(255, 255, 255, 0.12);
+}
+
 .sidebar-list row {
   border-radius: 6px;
   margin: 2px 6px;
@@ -122,6 +132,48 @@ window {
 .content-list,
 .content-grid {
   background: transparent;
+}
+
+.computer-page-scroll,
+.computer-page-scroll > viewport {
+  background: rgba(10, 12, 16, 0.54);
+}
+
+.computer-page-title {
+  font-size: 1.15em;
+  font-weight: 700;
+}
+
+.computer-volume-list {
+  background: transparent;
+}
+
+.computer-volume-list row {
+  border-radius: 6px;
+  margin: 2px 0;
+}
+
+.computer-volume-list row:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.computer-volume-name {
+  font-weight: 700;
+}
+
+.computer-volume-progress trough {
+  min-height: 8px;
+  border-radius: 999px;
+}
+
+.computer-volume-progress progress {
+  min-height: 8px;
+  border-radius: 999px;
+  background: rgb(82, 145, 238);
+}
+
+.computer-volume-usage {
+  font-size: 0.92em;
 }
 
 .content-grid flowboxchild {

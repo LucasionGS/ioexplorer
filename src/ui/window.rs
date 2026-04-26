@@ -17,12 +17,18 @@ use crate::{
     bookmarks,
     config::{AppConfig, ViewMode},
     providers::{FileItem, FileKind, Provider, ProviderError, ProviderUri, local::LocalProvider},
-    ui::{context_menu, dnd, sidebar::Sidebar, topbar::TopBar, views},
+    ui::{computer::ComputerPage, context_menu, dnd, sidebar::Sidebar, topbar::TopBar, views},
 };
 
 const MOUSE_BUTTON_BACK: u32 = 8;
 const MOUSE_BUTTON_FORWARD: u32 = 9;
 const FOLDER_MONITOR_DEBOUNCE_MS: u64 = 250;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AppPage {
+    Files,
+    Computer,
+}
 
 pub struct AppWindow {
     window: gtk::ApplicationWindow,
@@ -36,6 +42,7 @@ pub struct AppWindow {
     topbar: TopBar,
     sidebar: Sidebar,
     stack: gtk::Stack,
+    computer_page: ComputerPage,
     list_box: gtk::ListBox,
     flow_box: gtk::FlowBox,
     grid_scroll: gtk::ScrolledWindow,
@@ -52,6 +59,8 @@ pub struct AppWindow {
     clipboard_operation: Cell<Option<FileClipboardOperation>>,
     folder_monitor: RefCell<Option<gio::FileMonitor>>,
     pending_folder_reload: RefCell<Option<glib::SourceId>>,
+    mount_monitor: gio::UnixMountMonitor,
+    active_page: Cell<AppPage>,
     bookmarks: RefCell<Vec<PathBuf>>,
     thumbnail_cache: views::icon::ThumbnailCache,
     pending_visible_thumbnail_load: Cell<bool>,
@@ -64,6 +73,7 @@ impl AppWindow {
         let topbar = TopBar::new(config.default_view);
         let bookmarks = bookmarks::load();
         let sidebar = Sidebar::new(config.sidebar_width, &bookmarks);
+        let computer_page = ComputerPage::new();
         let selected_indices = Rc::new(RefCell::new(BTreeSet::new()));
         let anchor_index = Rc::new(Cell::new(None::<usize>));
         let list_box = gtk::ListBox::builder()
@@ -122,6 +132,7 @@ impl AppWindow {
         stack.set_focusable(true);
         stack.add_named(&list_overlay, Some("list"));
         stack.add_named(&grid_overlay, Some("icon"));
+        stack.add_named(&computer_page.root, Some("computer"));
 
         let status_label = gtk::Label::builder()
             .xalign(0.0)
@@ -188,6 +199,7 @@ impl AppWindow {
             topbar,
             sidebar,
             stack,
+            computer_page,
             list_box,
             flow_box,
             grid_scroll,
@@ -204,6 +216,8 @@ impl AppWindow {
             clipboard_operation: Cell::new(None),
             folder_monitor: RefCell::new(None),
             pending_folder_reload: RefCell::new(None),
+            mount_monitor: gio::UnixMountMonitor::get(),
+            active_page: Cell::new(AppPage::Files),
             bookmarks: RefCell::new(bookmarks),
             thumbnail_cache: views::icon::new_thumbnail_cache(),
             pending_visible_thumbnail_load: Cell::new(false),
@@ -279,6 +293,31 @@ impl AppWindow {
                 this.apply_view_mode(ViewMode::Icon);
             }
         });
+
+        let this = Rc::clone(self);
+        self.sidebar
+            .computer_button
+            .connect_clicked(move |_| this.show_computer_page());
+
+        let this = Rc::clone(self);
+        self.computer_page
+            .list
+            .connect_row_activated(move |_, row| {
+                if let Some(path) = this
+                    .computer_page
+                    .mount_path_at(row.index().max(0) as usize)
+                {
+                    this.load_uri(ProviderUri::local(path), true);
+                }
+            });
+
+        let this = Rc::clone(self);
+        self.mount_monitor
+            .connect_mounts_changed(move |_| this.refresh_computer_page_if_visible());
+
+        let this = Rc::clone(self);
+        self.mount_monitor
+            .connect_mountpoints_changed(move |_| this.refresh_computer_page_if_visible());
 
         let this = Rc::clone(self);
         self.sidebar.list.connect_row_activated(move |_, row| {
@@ -358,6 +397,10 @@ impl AppWindow {
         let stack = self.stack.clone();
         let this = Rc::clone(self);
         right_click.connect_pressed(move |_, _, x, y| {
+            if this.active_page.get() != AppPage::Files {
+                return;
+            }
+
             if hit_widget_type(&stack, x, y, gtk::ListBoxRow::static_type())
                 || hit_widget_type(&stack, x, y, gtk::FlowBoxChild::static_type())
             {
@@ -476,7 +519,7 @@ impl AppWindow {
                     this.paste_from_clipboard();
                     glib::Propagation::Stop
                 }
-                gtk::gdk::Key::l if ctrl => {
+                gtk::gdk::Key::l if ctrl && this.active_page.get() == AppPage::Files => {
                     this.show_location_entry();
                     glib::Propagation::Stop
                 }
@@ -527,7 +570,7 @@ impl AppWindow {
     }
 
     fn file_shortcuts_enabled(&self) -> bool {
-        !self.topbar.path_entry.has_focus()
+        self.active_page.get() == AppPage::Files && !self.topbar.path_entry.has_focus()
     }
 
     fn is_filtering(&self) -> bool {
@@ -602,14 +645,18 @@ impl AppWindow {
     }
 
     fn clear_filter(self: &Rc<Self>) {
+        self.cancel_pending_filter();
+        *self.filter_text.borrow_mut() = String::new();
+        self.apply_filter_to_entries();
+        self.update_full_status();
+    }
+
+    fn cancel_pending_filter(&self) {
         if let Ok(mut pending) = self.pending_filter.try_borrow_mut()
             && let Some(id) = pending.take()
         {
             id.remove();
         }
-        *self.filter_text.borrow_mut() = String::new();
-        self.apply_filter_to_entries();
-        self.update_full_status();
     }
 
     fn update_full_status(&self) {
@@ -658,6 +705,11 @@ impl AppWindow {
 
         match self.list_visible_items(&uri) {
             Ok(items) => {
+                self.active_page.set(AppPage::Files);
+                self.sidebar.set_computer_active(false);
+                self.set_file_topbar_state();
+                self.apply_view_mode(self.view_mode.get());
+
                 if push_history {
                     self.back_stack
                         .borrow_mut()
@@ -668,11 +720,7 @@ impl AppWindow {
                 *self.current_uri.borrow_mut() = uri.clone();
                 self.watch_current_folder(&uri);
                 // Cancel any pending debounce timer and clear filter on navigation
-                if let Ok(mut pending) = self.pending_filter.try_borrow_mut()
-                    && let Some(id) = pending.take()
-                {
-                    id.remove();
-                }
+                self.cancel_pending_filter();
                 *self.filter_text.borrow_mut() = String::new();
                 self.anchor_index.set(None);
                 *self.all_entries.borrow_mut() = items;
@@ -697,6 +745,74 @@ impl AppWindow {
             }
             Err(error) => self.show_error(error),
         }
+    }
+
+    fn show_computer_page(self: &Rc<Self>) {
+        self.active_page.set(AppPage::Computer);
+        self.sidebar.set_computer_active(true);
+        self.cancel_pending_filter();
+        self.cancel_pending_folder_reload();
+        if let Some(monitor) = self.folder_monitor.borrow_mut().take() {
+            monitor.cancel();
+        }
+        *self.filter_text.borrow_mut() = String::new();
+        self.update_filter_bar();
+        clear_entry_selection(&self.selected_indices, &self.list_box, &self.flow_box);
+
+        self.computer_page.refresh();
+        self.render_computer_breadcrumb();
+        self.topbar.path_entry.set_text("This PC");
+        self.show_breadcrumbs();
+        self.stack.set_visible_child_name("computer");
+        self.set_computer_topbar_state();
+        self.update_computer_status();
+        self.focus_content();
+    }
+
+    fn refresh_computer_page_if_visible(&self) {
+        if self.active_page.get() == AppPage::Computer {
+            self.computer_page.refresh();
+            self.update_computer_status();
+        }
+    }
+
+    fn update_computer_status(&self) {
+        let count = self.computer_page.volume_count();
+        self.status_label
+            .set_text(&format!("{count} mounted volume(s) - This PC"));
+    }
+
+    fn render_computer_breadcrumb(&self) {
+        views::clear_box_children(&self.topbar.breadcrumbs);
+
+        let button = gtk::Button::builder()
+            .css_classes(["breadcrumb-button"])
+            .sensitive(false)
+            .build();
+        button.set_child(Some(&breadcrumb_content_with_icon(
+            "This PC",
+            "computer-symbolic",
+        )));
+        self.topbar.breadcrumbs.append(&button);
+    }
+
+    fn set_file_topbar_state(&self) {
+        self.topbar.new_folder_button.set_sensitive(true);
+        self.topbar.location_button.set_sensitive(true);
+        self.topbar.list_button.set_sensitive(true);
+        self.topbar.icon_button.set_sensitive(true);
+        self.update_navigation_buttons();
+    }
+
+    fn set_computer_topbar_state(&self) {
+        self.topbar.back_button.set_sensitive(false);
+        self.topbar.forward_button.set_sensitive(false);
+        self.topbar.up_button.set_sensitive(false);
+        self.topbar.refresh_button.set_sensitive(true);
+        self.topbar.new_folder_button.set_sensitive(false);
+        self.topbar.location_button.set_sensitive(false);
+        self.topbar.list_button.set_sensitive(false);
+        self.topbar.icon_button.set_sensitive(false);
     }
 
     fn list_visible_items(&self, uri: &ProviderUri) -> Result<Vec<FileItem>, ProviderError> {
@@ -971,6 +1087,10 @@ impl AppWindow {
     }
 
     fn go_back(self: &Rc<Self>) {
+        if self.active_page.get() != AppPage::Files {
+            return;
+        }
+
         let previous = self.back_stack.borrow_mut().pop();
         let Some(previous) = previous else {
             return;
@@ -982,6 +1102,10 @@ impl AppWindow {
     }
 
     fn go_forward(self: &Rc<Self>) {
+        if self.active_page.get() != AppPage::Files {
+            return;
+        }
+
         let next = self.forward_stack.borrow_mut().pop();
         let Some(next) = next else {
             return;
@@ -993,6 +1117,10 @@ impl AppWindow {
     }
 
     fn go_up(self: &Rc<Self>) {
+        if self.active_page.get() != AppPage::Files {
+            return;
+        }
+
         let parent = self.current_uri.borrow().parent();
         if let Some(parent) = parent {
             self.load_uri(parent, true);
@@ -1000,11 +1128,24 @@ impl AppWindow {
     }
 
     fn refresh(self: &Rc<Self>) {
+        if self.active_page.get() == AppPage::Computer {
+            self.computer_page.refresh();
+            self.update_computer_status();
+            return;
+        }
+
         let uri = self.current_uri.borrow().clone();
         self.load_uri(uri, false);
     }
 
     fn update_navigation_buttons(&self) {
+        if self.active_page.get() != AppPage::Files {
+            self.topbar.back_button.set_sensitive(false);
+            self.topbar.forward_button.set_sensitive(false);
+            self.topbar.up_button.set_sensitive(false);
+            return;
+        }
+
         self.topbar
             .back_button
             .set_sensitive(!self.back_stack.borrow().is_empty());
@@ -1721,6 +1862,12 @@ impl AppWindow {
     }
 
     fn transfer_dropped_payload(self: &Rc<Self>, payload: dnd::DropPayload) {
+        if self.active_page.get() != AppPage::Files {
+            self.status_label
+                .set_text("Open a folder before dropping files");
+            return;
+        }
+
         let target_dir = {
             let current_uri = self.current_uri.borrow();
             match current_uri.local_path() {
@@ -2870,36 +3017,33 @@ impl dnd::DropOperation {
 }
 
 fn breadcrumb_content(label: &str) -> gtk::Box {
+    if label == "/" {
+        return breadcrumb_content_with_icon("", "drive-harddisk-symbolic");
+    }
+
+    let icon_name = if label == "home" {
+        "user-home-symbolic"
+    } else {
+        "folder-symbolic"
+    };
+    breadcrumb_content_with_icon(label, icon_name)
+}
+
+fn breadcrumb_content_with_icon(label: &str, icon_name: &str) -> gtk::Box {
     let content = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(6)
         .valign(gtk::Align::Center)
         .build();
 
-    if label == "/" {
-        content.append(
-            &gtk::Image::builder()
-                .icon_name("drive-harddisk-symbolic")
-                .pixel_size(16)
-                .build(),
-        );
-    } else {
-        if label == "home" {
-            content.append(
-                &gtk::Image::builder()
-                    .icon_name("user-home-symbolic")
-                    .pixel_size(16)
-                    .build(),
-            );
-        } else if !label.is_empty() {
-            content.append(
-                &gtk::Image::builder()
-                    .icon_name("folder-symbolic")
-                    .pixel_size(16)
-                    .build(),
-            );
-        }
+    content.append(
+        &gtk::Image::builder()
+            .icon_name(icon_name)
+            .pixel_size(16)
+            .build(),
+    );
 
+    if !label.is_empty() {
         content.append(
             &gtk::Label::builder()
                 .label(label)
