@@ -19,8 +19,16 @@ pub struct SidebarPlace {
 pub struct Sidebar {
     pub root: gtk::Box,
     pub computer_button: gtk::ToggleButton,
+    pub settings_button: gtk::ToggleButton,
     pub list: gtk::ListBox,
     places: RefCell<Vec<SidebarPlace>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SidebarSection {
+    Files,
+    Computer,
+    Settings,
 }
 
 impl Sidebar {
@@ -33,10 +41,21 @@ impl Sidebar {
 
         let computer_button = gtk::ToggleButton::builder()
             .tooltip_text("This PC")
-            .css_classes(["sidebar-computer-button"])
+            .css_classes(["sidebar-nav-button"])
             .build();
         computer_button.set_focusable(false);
         computer_button.set_child(Some(&place_content("This PC", "computer-symbolic", 18)));
+
+        let settings_button = gtk::ToggleButton::builder()
+            .tooltip_text("Settings")
+            .css_classes(["sidebar-nav-button"])
+            .build();
+        settings_button.set_focusable(false);
+        settings_button.set_child(Some(&place_content(
+            "Settings",
+            "preferences-system-symbolic",
+            18,
+        )));
 
         let separator = gtk::Separator::builder()
             .orientation(gtk::Orientation::Horizontal)
@@ -56,12 +75,14 @@ impl Sidebar {
             .build();
         root.set_size_request(width, -1);
         root.append(&computer_button);
+        root.append(&settings_button);
         root.append(&separator);
         root.append(&scroll);
 
         let sidebar = Self {
             root,
             computer_button,
+            settings_button,
             list,
             places: RefCell::new(Vec::new()),
         };
@@ -73,9 +94,12 @@ impl Sidebar {
         self.places.borrow().get(index).cloned()
     }
 
-    pub fn set_computer_active(&self, active: bool) {
-        self.computer_button.set_active(active);
-        if active {
+    pub fn set_active_section(&self, section: SidebarSection) {
+        self.computer_button
+            .set_active(section == SidebarSection::Computer);
+        self.settings_button
+            .set_active(section == SidebarSection::Settings);
+        if section != SidebarSection::Files {
             self.list.unselect_all();
         }
     }

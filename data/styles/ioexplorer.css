@@ -42,9 +42,13 @@ window {
   border-right: 1px solid rgba(255, 255, 255, 0.12);
 }
 
-.sidebar-computer-button {
+.sidebar-nav-button {
   margin: 6px;
   border-radius: 6px;
+}
+
+.sidebar-nav-button + .sidebar-nav-button {
+  margin-top: 0;
 }
 
 .sidebar-separator {
@@ -174,6 +178,39 @@ window {
 
 .computer-volume-usage {
   font-size: 0.92em;
+}
+
+.settings-page-scroll,
+.settings-page-scroll > viewport {
+  background: rgba(10, 12, 16, 0.54);
+}
+
+.settings-title {
+  font-size: 1.15em;
+  font-weight: 700;
+}
+
+.settings-tabs button {
+  min-height: 32px;
+  padding: 0 12px;
+  border-radius: 6px;
+}
+
+.settings-tab {
+  margin-top: 4px;
+}
+
+.settings-row {
+  min-height: 42px;
+  padding: 8px 0;
+}
+
+.settings-row-label {
+  font-weight: 600;
+}
+
+.settings-value {
+  color: alpha(currentColor, 0.72);
 }
 
 .content-grid flowboxchild {

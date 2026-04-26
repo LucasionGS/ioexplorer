@@ -13,6 +13,7 @@ It is developed with customization and ricing in mind, as well as efficiency nav
 - Native GTK/GDK drag-and-drop for local files using standard file-list/URI data.
 - XDG config loading and optional user CSS for distribution theme customization.
 - Desktop integration metadata and packaging scaffolds.
+- Graphical settings page with General, View, and Actions tabs.
 
 ## Dependencies
 
@@ -135,7 +136,7 @@ In icon view, use Ctrl+scroll to resize file entries. The chosen icon size is sa
 - Tabs, split panes, and saved layout profiles.
 - Filtering.
 - Network/provider plugins.
-- Graphical settings and theme editor.
+- Theme editor.
 - Custom configurable actions on files and folders
   - Actions are defined with a command that gets run with the file/folder path as an argument
   - Filter allows these actions to only show up for certain file types or folders

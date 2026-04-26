@@ -18,7 +18,14 @@ use crate::{
     config::{AppConfig, ViewMode, clamp_icon_size},
     providers::{FileItem, FileKind, Provider, ProviderError, ProviderUri, local::LocalProvider},
     state::AppState,
-    ui::{computer::ComputerPage, context_menu, dnd, sidebar::Sidebar, topbar::TopBar, views},
+    ui::{
+        computer::ComputerPage,
+        context_menu, dnd,
+        settings::SettingsPage,
+        sidebar::{Sidebar, SidebarSection},
+        topbar::TopBar,
+        views,
+    },
 };
 
 const MOUSE_BUTTON_BACK: u32 = 8;
@@ -33,6 +40,7 @@ const ICON_VIEW_ZOOM_STEP: i32 = 16;
 enum AppPage {
     Files,
     Computer,
+    Settings,
 }
 
 pub struct AppWindow {
@@ -50,6 +58,7 @@ pub struct AppWindow {
     sidebar: Sidebar,
     stack: gtk::Stack,
     computer_page: ComputerPage,
+    settings_page: SettingsPage,
     list_box: gtk::ListBox,
     flow_box: gtk::FlowBox,
     grid_scroll: gtk::ScrolledWindow,
@@ -82,6 +91,7 @@ impl AppWindow {
         let bookmarks = bookmarks::load();
         let sidebar = Sidebar::new(config.sidebar_width, &bookmarks);
         let computer_page = ComputerPage::new();
+        let settings_page = SettingsPage::new(state.layout, state.show_hidden, state.icon_size);
         let selected_indices = Rc::new(RefCell::new(BTreeSet::new()));
         let anchor_index = Rc::new(Cell::new(None::<usize>));
         let list_box = gtk::ListBox::builder()
@@ -141,6 +151,7 @@ impl AppWindow {
         stack.add_named(&list_overlay, Some("list"));
         stack.add_named(&grid_overlay, Some("icon"));
         stack.add_named(&computer_page.root, Some("computer"));
+        stack.add_named(&settings_page.root, Some("settings"));
 
         let status_label = gtk::Label::builder()
             .xalign(0.0)
@@ -210,6 +221,7 @@ impl AppWindow {
             sidebar,
             stack,
             computer_page,
+            settings_page,
             list_box,
             flow_box,
             grid_scroll,
@@ -335,6 +347,51 @@ impl AppWindow {
         self.sidebar
             .computer_button
             .connect_clicked(move |_| this.show_computer_page());
+
+        let this = Rc::clone(self);
+        self.sidebar
+            .settings_button
+            .connect_clicked(move |_| this.show_settings_page());
+
+        let this = Rc::clone(self);
+        self.settings_page
+            .show_hidden_check
+            .connect_toggled(move |button| this.set_show_hidden(button.is_active()));
+
+        let this = Rc::clone(self);
+        self.settings_page
+            .list_button
+            .connect_toggled(move |button| {
+                if button.is_active() {
+                    this.apply_view_mode(ViewMode::List);
+                }
+            });
+
+        let this = Rc::clone(self);
+        self.settings_page
+            .icon_button
+            .connect_toggled(move |button| {
+                if button.is_active() {
+                    this.apply_view_mode(ViewMode::Icon);
+                }
+            });
+
+        let this = Rc::clone(self);
+        self.settings_page
+            .icon_size_down_button
+            .connect_clicked(move |_| this.change_icon_size(-ICON_VIEW_ZOOM_STEP));
+
+        let this = Rc::clone(self);
+        self.settings_page
+            .icon_size_up_button
+            .connect_clicked(move |_| this.change_icon_size(ICON_VIEW_ZOOM_STEP));
+
+        let this = Rc::clone(self);
+        self.settings_page
+            .icon_size_scale
+            .connect_value_changed(move |scale| {
+                this.set_icon_size(scale.value().round() as i32);
+            });
 
         let this = Rc::clone(self);
         self.computer_page
@@ -749,7 +806,7 @@ impl AppWindow {
         match self.list_visible_items(&uri) {
             Ok(items) => {
                 self.active_page.set(AppPage::Files);
-                self.sidebar.set_computer_active(false);
+                self.sidebar.set_active_section(SidebarSection::Files);
                 self.set_file_topbar_state();
                 self.apply_view_mode(self.view_mode.get());
 
@@ -792,7 +849,7 @@ impl AppWindow {
 
     fn show_computer_page(self: &Rc<Self>) {
         self.active_page.set(AppPage::Computer);
-        self.sidebar.set_computer_active(true);
+        self.sidebar.set_active_section(SidebarSection::Computer);
         self.cancel_pending_filter();
         self.cancel_pending_folder_reload();
         if let Some(monitor) = self.folder_monitor.borrow_mut().take() {
@@ -809,6 +866,27 @@ impl AppWindow {
         self.stack.set_visible_child_name("computer");
         self.set_computer_topbar_state();
         self.update_computer_status();
+        self.focus_content();
+    }
+
+    fn show_settings_page(self: &Rc<Self>) {
+        self.active_page.set(AppPage::Settings);
+        self.sidebar.set_active_section(SidebarSection::Settings);
+        self.cancel_pending_filter();
+        self.cancel_pending_folder_reload();
+        if let Some(monitor) = self.folder_monitor.borrow_mut().take() {
+            monitor.cancel();
+        }
+        *self.filter_text.borrow_mut() = String::new();
+        self.update_filter_bar();
+        clear_entry_selection(&self.selected_indices, &self.list_box, &self.flow_box);
+
+        self.render_settings_breadcrumb();
+        self.topbar.path_entry.set_text("Settings");
+        self.show_breadcrumbs();
+        self.stack.set_visible_child_name("settings");
+        self.set_settings_topbar_state();
+        self.status_label.set_text("Settings");
         self.focus_content();
     }
 
@@ -839,6 +917,20 @@ impl AppWindow {
         self.topbar.breadcrumbs.append(&button);
     }
 
+    fn render_settings_breadcrumb(&self) {
+        views::clear_box_children(&self.topbar.breadcrumbs);
+
+        let button = gtk::Button::builder()
+            .css_classes(["breadcrumb-button"])
+            .sensitive(false)
+            .build();
+        button.set_child(Some(&breadcrumb_content_with_icon(
+            "Settings",
+            "preferences-system-symbolic",
+        )));
+        self.topbar.breadcrumbs.append(&button);
+    }
+
     fn set_file_topbar_state(&self) {
         self.topbar.new_folder_button.set_sensitive(true);
         self.topbar.location_button.set_sensitive(true);
@@ -848,6 +940,9 @@ impl AppWindow {
         self.topbar
             .show_hidden_button
             .set_active(self.show_hidden.get());
+        self.settings_page.set_show_hidden(self.show_hidden.get());
+        self.settings_page.set_view_mode(self.view_mode.get());
+        self.settings_page.set_icon_size(self.icon_size.get());
         self.update_navigation_buttons();
     }
 
@@ -861,6 +956,21 @@ impl AppWindow {
         self.topbar.list_button.set_sensitive(false);
         self.topbar.icon_button.set_sensitive(false);
         self.topbar.show_hidden_button.set_sensitive(false);
+    }
+
+    fn set_settings_topbar_state(&self) {
+        self.topbar.back_button.set_sensitive(false);
+        self.topbar.forward_button.set_sensitive(false);
+        self.topbar.up_button.set_sensitive(false);
+        self.topbar.refresh_button.set_sensitive(false);
+        self.topbar.new_folder_button.set_sensitive(false);
+        self.topbar.location_button.set_sensitive(false);
+        self.topbar.list_button.set_sensitive(false);
+        self.topbar.icon_button.set_sensitive(false);
+        self.topbar.show_hidden_button.set_sensitive(false);
+        self.settings_page.set_show_hidden(self.show_hidden.get());
+        self.settings_page.set_view_mode(self.view_mode.get());
+        self.settings_page.set_icon_size(self.icon_size.get());
     }
 
     fn list_visible_items(&self, uri: &ProviderUri) -> Result<Vec<FileItem>, ProviderError> {
@@ -1078,16 +1188,21 @@ impl AppWindow {
         self.view_mode.set(mode);
         match mode {
             ViewMode::List => {
-                self.stack.set_visible_child_name("list");
+                if self.active_page.get() == AppPage::Files {
+                    self.stack.set_visible_child_name("list");
+                }
                 self.topbar.icon_button.set_active(false);
                 self.topbar.list_button.set_active(true);
             }
             ViewMode::Icon => {
-                self.stack.set_visible_child_name("icon");
+                if self.active_page.get() == AppPage::Files {
+                    self.stack.set_visible_child_name("icon");
+                }
                 self.topbar.list_button.set_active(false);
                 self.topbar.icon_button.set_active(true);
             }
         }
+        self.settings_page.set_view_mode(mode);
         self.save_ui_state();
     }
 
@@ -1098,6 +1213,7 @@ impl AppWindow {
 
         self.show_hidden.set(show_hidden);
         self.topbar.show_hidden_button.set_active(show_hidden);
+        self.settings_page.set_show_hidden(show_hidden);
         self.save_ui_state();
 
         if self.active_page.get() == AppPage::Files {
@@ -1149,23 +1265,32 @@ impl AppWindow {
 
     fn change_icon_size(self: &Rc<Self>, delta: i32) {
         let current = self.icon_size.get();
-        let next = clamp_icon_size(current + delta);
+        self.set_icon_size(current + delta);
+    }
+
+    fn set_icon_size(self: &Rc<Self>, icon_size: i32) {
+        let current = self.icon_size.get();
+        let next = clamp_icon_size(icon_size);
         if next == current {
+            self.settings_page.set_icon_size(next);
             return;
         }
 
         let selected = self.selected_indices.borrow().clone();
         self.icon_size.set(next);
+        self.settings_page.set_icon_size(next);
         self.save_ui_state();
         views::icon::clear_thumbnail_cache(&self.thumbnail_cache);
-        self.render_entries();
-        if !selected.is_empty() {
-            set_entry_selection(
-                &self.selected_indices,
-                &self.list_box,
-                &self.flow_box,
-                selected,
-            );
+        if self.active_page.get() == AppPage::Files {
+            self.render_entries();
+            if !selected.is_empty() {
+                set_entry_selection(
+                    &self.selected_indices,
+                    &self.list_box,
+                    &self.flow_box,
+                    selected,
+                );
+            }
         }
         self.status_label.set_text(&format!("Icon size: {next}px"));
     }
@@ -1255,6 +1380,10 @@ impl AppWindow {
         if self.active_page.get() == AppPage::Computer {
             self.computer_page.refresh();
             self.update_computer_status();
+            return;
+        }
+
+        if self.active_page.get() != AppPage::Files {
             return;
         }
 
