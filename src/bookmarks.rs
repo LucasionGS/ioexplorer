@@ -61,7 +61,7 @@ pub fn normalized_path(path: impl AsRef<std::path::Path>) -> PathBuf {
 }
 
 pub fn storage_path() -> Option<PathBuf> {
-    UserDirs::new().map(|dirs| dirs.home_dir().join(".local/ioexplorer/bookmarks"))
+    UserDirs::new().map(|dirs| dirs.home_dir().join(".local/state/ioexplorer/bookmarks"))
 }
 
 fn parse_bookmarks(contents: &str) -> Vec<PathBuf> {
