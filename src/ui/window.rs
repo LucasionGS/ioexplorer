@@ -9,7 +9,7 @@ use std::{
 };
 
 use gdk_pixbuf::prelude::*;
-use gio::prelude::{AppInfoExt, FileExt, FileExtManual};
+use gio::prelude::{AppInfoExt, FileExt, FileExtManual, FileMonitorExt};
 use gtk::prelude::*;
 use url::Url;
 
@@ -22,6 +22,7 @@ use crate::{
 
 const MOUSE_BUTTON_BACK: u32 = 8;
 const MOUSE_BUTTON_FORWARD: u32 = 9;
+const FOLDER_MONITOR_DEBOUNCE_MS: u64 = 250;
 
 pub struct AppWindow {
     window: gtk::ApplicationWindow,
@@ -49,6 +50,8 @@ pub struct AppWindow {
     pending_filter: RefCell<Option<glib::SourceId>>,
     clipboard_paths: RefCell<Vec<PathBuf>>,
     clipboard_operation: Cell<Option<FileClipboardOperation>>,
+    folder_monitor: RefCell<Option<gio::FileMonitor>>,
+    pending_folder_reload: RefCell<Option<glib::SourceId>>,
     bookmarks: RefCell<Vec<PathBuf>>,
     thumbnail_cache: views::icon::ThumbnailCache,
     pending_visible_thumbnail_load: Cell<bool>,
@@ -199,6 +202,8 @@ impl AppWindow {
             pending_filter: RefCell::new(None),
             clipboard_paths: RefCell::new(Vec::new()),
             clipboard_operation: Cell::new(None),
+            folder_monitor: RefCell::new(None),
+            pending_folder_reload: RefCell::new(None),
             bookmarks: RefCell::new(bookmarks),
             thumbnail_cache: views::icon::new_thumbnail_cache(),
             pending_visible_thumbnail_load: Cell::new(false),
@@ -651,12 +656,8 @@ impl AppWindow {
             return;
         }
 
-        match self.provider.list(&uri) {
-            Ok(mut items) => {
-                if !self.config.show_hidden {
-                    items.retain(|item| !item.hidden);
-                }
-
+        match self.list_visible_items(&uri) {
+            Ok(items) => {
                 if push_history {
                     self.back_stack
                         .borrow_mut()
@@ -665,6 +666,7 @@ impl AppWindow {
                 }
 
                 *self.current_uri.borrow_mut() = uri.clone();
+                self.watch_current_folder(&uri);
                 // Cancel any pending debounce timer and clear filter on navigation
                 if let Ok(mut pending) = self.pending_filter.try_borrow_mut()
                     && let Some(id) = pending.take()
@@ -695,6 +697,106 @@ impl AppWindow {
             }
             Err(error) => self.show_error(error),
         }
+    }
+
+    fn list_visible_items(&self, uri: &ProviderUri) -> Result<Vec<FileItem>, ProviderError> {
+        let mut items = self.provider.list(uri)?;
+        if !self.config.show_hidden {
+            items.retain(|item| !item.hidden);
+        }
+        Ok(items)
+    }
+
+    fn watch_current_folder(self: &Rc<Self>, uri: &ProviderUri) {
+        self.cancel_pending_folder_reload();
+        if let Some(monitor) = self.folder_monitor.borrow_mut().take() {
+            monitor.cancel();
+        }
+
+        let Ok(path) = uri.local_path() else {
+            return;
+        };
+
+        let file = gio::File::for_path(&path);
+        let monitor = match file.monitor_directory(
+            gio::FileMonitorFlags::WATCH_MOVES,
+            None::<&gio::Cancellable>,
+        ) {
+            Ok(monitor) => monitor,
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "failed to watch folder");
+                return;
+            }
+        };
+
+        monitor.set_rate_limit(FOLDER_MONITOR_DEBOUNCE_MS as i32);
+        let weak_self = Rc::downgrade(self);
+        monitor.connect_changed(move |_, _, _, event| {
+            if folder_monitor_event_affects_listing(event)
+                && let Some(this) = weak_self.upgrade()
+            {
+                this.queue_folder_reload(path.clone());
+            }
+        });
+
+        *self.folder_monitor.borrow_mut() = Some(monitor);
+    }
+
+    fn queue_folder_reload(self: &Rc<Self>, watched_path: PathBuf) {
+        if !self.is_current_local_path(&watched_path) {
+            return;
+        }
+
+        if self.pending_folder_reload.borrow().is_some() {
+            return;
+        }
+
+        let this = Rc::clone(self);
+        let source_id = glib::timeout_add_local_once(
+            Duration::from_millis(FOLDER_MONITOR_DEBOUNCE_MS),
+            move || {
+                *this.pending_folder_reload.borrow_mut() = None;
+                if this.is_current_local_path(&watched_path) {
+                    this.reload_current_folder_from_monitor(&watched_path);
+                }
+            },
+        );
+        *self.pending_folder_reload.borrow_mut() = Some(source_id);
+    }
+
+    fn reload_current_folder_from_monitor(self: &Rc<Self>, watched_path: &Path) {
+        if !self.is_current_local_path(watched_path) {
+            return;
+        }
+
+        let uri = self.current_uri.borrow().clone();
+        match self.list_visible_items(&uri) {
+            Ok(items) => {
+                *self.all_entries.borrow_mut() = items;
+                self.topbar.path_entry.set_text(&uri.display_path());
+                self.render_breadcrumbs();
+                self.apply_filter_to_entries();
+                self.update_navigation_buttons();
+                if !self.is_filtering() {
+                    self.update_full_status();
+                }
+                self.focus_content();
+            }
+            Err(error) => self.show_error(error),
+        }
+    }
+
+    fn cancel_pending_folder_reload(&self) {
+        if let Some(source_id) = self.pending_folder_reload.borrow_mut().take() {
+            source_id.remove();
+        }
+    }
+
+    fn is_current_local_path(&self, path: &Path) -> bool {
+        self.current_uri
+            .borrow()
+            .local_path()
+            .is_ok_and(|current| current == path)
     }
 
     fn render_entries(self: &Rc<Self>) {
@@ -2735,6 +2837,22 @@ fn wrapped_image_index(len: usize, current_index: usize, delta: isize) -> usize 
     (current_index as isize + delta).rem_euclid(len) as usize
 }
 
+fn folder_monitor_event_affects_listing(event: gio::FileMonitorEvent) -> bool {
+    matches!(
+        event,
+        gio::FileMonitorEvent::Changed
+            | gio::FileMonitorEvent::ChangesDoneHint
+            | gio::FileMonitorEvent::Deleted
+            | gio::FileMonitorEvent::Created
+            | gio::FileMonitorEvent::AttributeChanged
+            | gio::FileMonitorEvent::Unmounted
+            | gio::FileMonitorEvent::Moved
+            | gio::FileMonitorEvent::Renamed
+            | gio::FileMonitorEvent::MovedIn
+            | gio::FileMonitorEvent::MovedOut
+    )
+}
+
 impl dnd::DropOperation {
     fn verb(self) -> &'static str {
         match self {
@@ -2931,8 +3049,9 @@ mod tests {
 
     use super::{
         FileClipboardOperation, copy_path_into, drop_target_is_selected, dropped_file_name_for_uri,
-        file_clipboard_payload, file_uri_list_payload, is_desktop_entry_file, is_gif_image_path,
-        move_path_into, new_folder_target, partition_drop_uris,
+        file_clipboard_payload, file_uri_list_payload, folder_monitor_event_affects_listing,
+        is_desktop_entry_file, is_gif_image_path, move_path_into, new_folder_target,
+        partition_drop_uris,
     };
 
     #[test]
@@ -3027,6 +3146,25 @@ mod tests {
         assert!(new_folder_target(temp_dir.path(), "..").is_err());
         assert!(new_folder_target(temp_dir.path(), "parent/child").is_err());
         assert!(new_folder_target(temp_dir.path(), "exists").is_err());
+    }
+
+    #[test]
+    fn folder_monitor_events_trigger_listing_updates() {
+        assert!(folder_monitor_event_affects_listing(
+            gio::FileMonitorEvent::Created
+        ));
+        assert!(folder_monitor_event_affects_listing(
+            gio::FileMonitorEvent::Deleted
+        ));
+        assert!(folder_monitor_event_affects_listing(
+            gio::FileMonitorEvent::Renamed
+        ));
+        assert!(folder_monitor_event_affects_listing(
+            gio::FileMonitorEvent::AttributeChanged
+        ));
+        assert!(!folder_monitor_event_affects_listing(
+            gio::FileMonitorEvent::PreUnmount
+        ));
     }
 
     #[test]
