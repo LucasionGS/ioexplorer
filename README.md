@@ -68,6 +68,36 @@ On custom Wayland sessions, make sure D-Bus activation has the GUI environment:
 dbus-update-activation-environment --systemd DISPLAY WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_DATA_DIRS PATH
 ```
 
+## Default File Manager
+
+IoExplorer's desktop entry handles `inode/directory`, so it can be selected as the default app for folders:
+
+```sh
+xdg-mime default io.github.ionix.IoExplorer.desktop inode/directory
+xdg-mime query default inode/directory
+xdg-open "$HOME"
+```
+
+Some apps use the standard `org.freedesktop.FileManager1` D-Bus service for actions like "Show in folder". IoExplorer ships an opt-in service binary and a sample activation file because that generic bus name is commonly owned by Nautilus, Nemo, Dolphin, or Thunar.
+
+For the Arch package, copy the sample into the user service directory to prefer IoExplorer without replacing another package's system file:
+
+```sh
+mkdir -p ~/.local/share/dbus-1/services
+cp /usr/share/doc/ioexplorer-git/org.freedesktop.FileManager1.service ~/.local/share/dbus-1/services/org.freedesktop.FileManager1.service
+dbus-update-activation-environment --systemd DISPLAY WAYLAND_DISPLAY XDG_CURRENT_DESKTOP PATH
+```
+
+Then test folder opening and item revealing:
+
+```sh
+xdg-open "$HOME"
+home_uri=$(gio info -a standard::uri "$HOME" | awk '/^uri:/ {print $2}')
+item_uri=$(gio info -a standard::uri /etc/hosts | awk '/^uri:/ {print $2}')
+busctl --user call org.freedesktop.FileManager1 /org/freedesktop/FileManager1 org.freedesktop.FileManager1 ShowFolders ass 1 "$home_uri" ""
+busctl --user call org.freedesktop.FileManager1 /org/freedesktop/FileManager1 org.freedesktop.FileManager1 ShowItems ass 1 "$item_uri" ""
+```
+
 ## Validation
 
 ```sh

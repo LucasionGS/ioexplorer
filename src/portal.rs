@@ -260,11 +260,9 @@ mod tests {
         options.insert_value("multiple", &true.to_variant());
 
         let parameters = glib::Variant::tuple_from_iter([
-            glib::variant::ObjectPath::try_from(
-                "/org/freedesktop/portal/desktop/request/test",
-            )
-            .unwrap()
-            .to_variant(),
+            glib::variant::ObjectPath::try_from("/org/freedesktop/portal/desktop/request/test")
+                .unwrap()
+                .to_variant(),
             "app.id".to_variant(),
             "".to_variant(),
             "Open File".to_variant(),

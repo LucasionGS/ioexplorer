@@ -253,6 +253,28 @@ impl AppWindow {
         self.load_uri(ProviderUri::local(path), true);
     }
 
+    pub fn open_paths(self: &Rc<Self>, paths: Vec<PathBuf>) {
+        let Some(first_path) = paths.first().cloned() else {
+            return;
+        };
+
+        if first_path.is_dir() {
+            self.navigate_to_path(first_path);
+        } else {
+            self.reveal_paths(paths);
+        }
+    }
+
+    pub fn reveal_paths(self: &Rc<Self>, paths: Vec<PathBuf>) {
+        let Some(first_path) = paths.first() else {
+            return;
+        };
+        let folder = reveal_folder_for_path(first_path);
+
+        self.load_uri(ProviderUri::local(&folder), true);
+        self.select_paths_in_current_folder(&folder, &paths);
+    }
+
     fn setup_callbacks(self: &Rc<Self>) {
         let this = Rc::clone(self);
         self.topbar.path_entry.connect_activate(move |entry| {
@@ -1417,6 +1439,67 @@ impl AppWindow {
         if let Some(item) = item {
             let this = Rc::clone(self);
             glib::idle_add_local_once(move || this.activate_entry(item));
+        }
+    }
+
+    fn select_paths_in_current_folder(&self, folder: &Path, paths: &[PathBuf]) {
+        let selected_names = paths
+            .iter()
+            .filter(|path| path.parent().is_some_and(|parent| parent == folder))
+            .filter_map(|path| path.file_name())
+            .filter_map(|name| name.to_str())
+            .collect::<BTreeSet<_>>();
+
+        if selected_names.is_empty() {
+            return;
+        }
+
+        let indices = self
+            .entries
+            .borrow()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| {
+                selected_names.contains(item.name.as_str()).then_some(index)
+            })
+            .collect::<BTreeSet<_>>();
+
+        let Some(first_index) = indices.first().copied() else {
+            return;
+        };
+
+        self.anchor_index.set(Some(first_index));
+        set_entry_selection(
+            &self.selected_indices,
+            &self.list_box,
+            &self.flow_box,
+            indices.clone(),
+        );
+        self.focus_entry_at(first_index);
+
+        if indices.len() == 1 {
+            if let Some(name) = selected_names.iter().next() {
+                self.status_label.set_text(&format!("Selected {name}"));
+            }
+        } else {
+            self.status_label
+                .set_text(&format!("Selected {} items", indices.len()));
+        }
+    }
+
+    fn focus_entry_at(&self, index: usize) {
+        let index = index as i32;
+        match self.view_mode.get() {
+            ViewMode::List => {
+                if let Some(row) = self.list_box.row_at_index(index) {
+                    row.grab_focus();
+                }
+            }
+            ViewMode::Icon => {
+                if let Some(child) = self.flow_box.child_at_index(index) {
+                    child.grab_focus();
+                }
+            }
         }
     }
 
@@ -2946,6 +3029,13 @@ fn is_previewable_image_file(item: &FileItem) -> bool {
     item.kind == FileKind::File
         && views::icon::is_previewable_image(&item.name)
         && item.uri.local_path().is_ok()
+}
+
+fn reveal_folder_for_path(path: &Path) -> PathBuf {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("/"))
 }
 
 fn image_viewer_button(icon_name: &str, tooltip: &str) -> gtk::Button {
