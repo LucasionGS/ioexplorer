@@ -2,6 +2,7 @@
 name = "ioexplorer"
 version = "0.1.0"
 edition = "2024"
+default-run = "ioexplorer"
 description = "A Wayland-native, provider-oriented file manager for Wayland desktops"
 authors = ["Lucasion"]
 repository = "https://github.com/LucasionGS/ioexplorer"

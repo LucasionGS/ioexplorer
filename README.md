@@ -34,6 +34,40 @@ To force the Wayland backend during development:
 GDK_BACKEND=wayland cargo run
 ```
 
+The file selector mode can be launched directly for testing:
+
+```sh
+cargo run -- --chooser --chooser-mode open
+cargo run -- --chooser --chooser-mode save --current-name example.txt
+```
+
+## Desktop Portal File Chooser
+
+IoExplorer includes an `ioexplorer-portal` backend for `org.freedesktop.impl.portal.FileChooser` so portal-aware apps can use IoExplorer for Open and Save dialogs.
+
+Install the two binaries plus the portal metadata in the standard locations:
+
+```sh
+cargo build --release
+install -Dm755 target/release/ioexplorer ~/.local/bin/ioexplorer
+install -Dm755 target/release/ioexplorer-portal ~/.local/bin/ioexplorer-portal
+install -Dm644 data/ioexplorer.portal ~/.local/share/xdg-desktop-portal/portals/ioexplorer.portal
+install -Dm644 data/org.freedesktop.impl.portal.desktop.ioexplorer.service ~/.local/share/dbus-1/services/org.freedesktop.impl.portal.desktop.ioexplorer.service
+install -Dm644 data/ioexplorer-portals.conf ~/.config/xdg-desktop-portal/portals.conf
+```
+
+Restart `xdg-desktop-portal` after installing or changing portal preference files:
+
+```sh
+systemctl --user restart xdg-desktop-portal.service
+```
+
+On custom Wayland sessions, make sure D-Bus activation has the GUI environment:
+
+```sh
+dbus-update-activation-environment --systemd DISPLAY WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_DATA_DIRS PATH
+```
+
 ## Validation
 
 ```sh

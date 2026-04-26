@@ -1,3 +1,3 @@
 fn main() -> glib::ExitCode {
-    ioexplorer::app::run()
+    ioexplorer::portal::run()
 }

@@ -1,12 +1,19 @@
+use std::env;
+
 use gtk::prelude::*;
 use tracing_subscriber::{EnvFilter, fmt};
 
-use crate::{config::AppConfig, theme, ui::window::AppWindow};
+use crate::{config::AppConfig, selector, theme, ui::window::AppWindow};
 
 pub const APP_ID: &str = "io.github.ionix.IoExplorer";
 
 pub fn run() -> glib::ExitCode {
     init_logging();
+
+    let args = env::args().skip(1).collect::<Vec<_>>();
+    if selector::is_chooser_invocation(&args) {
+        return selector::run_from_args(&args);
+    }
 
     let app = gtk::Application::builder()
         .application_id(APP_ID)
