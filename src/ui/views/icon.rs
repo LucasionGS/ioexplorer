@@ -33,6 +33,7 @@ pub struct ThumbnailCacheEntry {
     validation: ThumbnailValidation,
     texture: gtk::gdk::Texture,
     pixel_size: i32,
+    icon_size: i32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -66,6 +67,12 @@ pub fn new_thumbnail_cache() -> ThumbnailCache {
         entries: HashMap::new(),
         pending: HashSet::new(),
     }))
+}
+
+pub fn clear_thumbnail_cache(thumbnail_cache: &ThumbnailCache) {
+    let mut cache = thumbnail_cache.borrow_mut();
+    cache.entries.clear();
+    cache.pending.clear();
 }
 
 #[derive(Clone)]
@@ -140,7 +147,12 @@ fn tile_for(
     tile.append(&icon);
     tile.append(&label);
 
-    apply_cached_thumbnail(item, &icon, Rc::clone(&options.thumbnail_cache));
+    apply_cached_thumbnail(
+        item,
+        &icon,
+        options.icon_size,
+        Rc::clone(&options.thumbnail_cache),
+    );
 
     install_selection_click(&tile, index, selection_handler);
     install_context_menu_click(&tile, index, context_menu_handler);
@@ -249,7 +261,7 @@ fn request_thumbnail(
         return;
     };
 
-    if let Some(cached) = cached_thumbnail(&thumbnail_cache, &path, validation) {
+    if let Some(cached) = cached_thumbnail(&thumbnail_cache, &path, validation, icon_size) {
         apply_thumbnail(icon, &cached.texture, cached.pixel_size);
         return;
     }
@@ -281,6 +293,7 @@ fn request_thumbnail(
                 validation,
                 texture: render.texture.clone(),
                 pixel_size: render.pixel_size,
+                icon_size,
             },
         );
 
@@ -480,11 +493,16 @@ fn thumbnail_identity(item: &FileItem) -> Option<(PathBuf, ThumbnailValidation, 
         .map(|path| (path, ThumbnailValidation::from_item(item), source))
 }
 
-fn apply_cached_thumbnail(item: &FileItem, icon: &gtk::Image, thumbnail_cache: ThumbnailCache) {
+fn apply_cached_thumbnail(
+    item: &FileItem,
+    icon: &gtk::Image,
+    icon_size: i32,
+    thumbnail_cache: ThumbnailCache,
+) {
     let Some((path, validation, _)) = thumbnail_identity(item) else {
         return;
     };
-    if let Some(cached) = cached_thumbnail(&thumbnail_cache, &path, validation) {
+    if let Some(cached) = cached_thumbnail(&thumbnail_cache, &path, validation, icon_size) {
         apply_thumbnail(icon, &cached.texture, cached.pixel_size);
     }
 }
@@ -493,10 +511,11 @@ fn cached_thumbnail(
     thumbnail_cache: &ThumbnailCache,
     path: &PathBuf,
     validation: ThumbnailValidation,
+    icon_size: i32,
 ) -> Option<ThumbnailCacheEntry> {
     let mut cache = thumbnail_cache.borrow_mut();
     let cached = cache.entries.get(path)?;
-    if cached.validation == validation {
+    if cached.validation == validation && cached.icon_size == icon_size {
         Some(cached.clone())
     } else {
         cache.entries.remove(path);

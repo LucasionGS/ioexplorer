@@ -3,12 +3,13 @@ use std::{fs, io, path::PathBuf};
 use directories::UserDirs;
 use serde::{Deserialize, Serialize};
 
-use crate::config::{AppConfig, ViewMode};
+use crate::config::{AppConfig, ViewMode, clamp_icon_size};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct AppState {
     pub layout: ViewMode,
     pub show_hidden: bool,
+    pub icon_size: i32,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -16,6 +17,7 @@ pub struct AppState {
 struct StoredState {
     layout: Option<ViewMode>,
     show_hidden: Option<bool>,
+    icon_size: Option<i32>,
 }
 
 impl AppState {
@@ -23,6 +25,7 @@ impl AppState {
         Self {
             layout: config.default_view,
             show_hidden: config.show_hidden,
+            icon_size: clamp_icon_size(config.icon_size),
         }
     }
 
@@ -53,6 +56,7 @@ impl AppState {
         let stored = StoredState {
             layout: Some(self.layout),
             show_hidden: Some(self.show_hidden),
+            icon_size: Some(clamp_icon_size(self.icon_size)),
         };
         let contents = toml::to_string_pretty(&stored).map_err(io::Error::other)?;
         fs::write(path, contents)
@@ -68,6 +72,10 @@ fn parse_state(contents: &str, fallback: AppState) -> Result<AppState, toml::de:
     Ok(AppState {
         layout: stored.layout.unwrap_or(fallback.layout),
         show_hidden: stored.show_hidden.unwrap_or(fallback.show_hidden),
+        icon_size: stored
+            .icon_size
+            .map(clamp_icon_size)
+            .unwrap_or(fallback.icon_size),
     })
 }
 
@@ -82,13 +90,18 @@ mod tests {
         let fallback = AppState {
             layout: ViewMode::Icon,
             show_hidden: false,
+            icon_size: 128,
         };
 
-        let parsed =
-            parse_state("layout = \"list\"\nshow-hidden = true\n", fallback).expect("valid state");
+        let parsed = parse_state(
+            "layout = \"list\"\nshow-hidden = true\nicon-size = 96\n",
+            fallback,
+        )
+        .expect("valid state");
 
         assert_eq!(parsed.layout, ViewMode::List);
         assert!(parsed.show_hidden);
+        assert_eq!(parsed.icon_size, 96);
     }
 
     #[test]
@@ -96,11 +109,26 @@ mod tests {
         let fallback = AppState {
             layout: ViewMode::List,
             show_hidden: true,
+            icon_size: 144,
         };
 
         let parsed = parse_state("show-hidden = false\n", fallback).expect("valid state");
 
         assert_eq!(parsed.layout, ViewMode::List);
         assert!(!parsed.show_hidden);
+        assert_eq!(parsed.icon_size, 144);
+    }
+
+    #[test]
+    fn clamps_persisted_icon_size() {
+        let fallback = AppState {
+            layout: ViewMode::Icon,
+            show_hidden: false,
+            icon_size: 128,
+        };
+
+        let parsed = parse_state("icon-size = 999\n", fallback).expect("valid state");
+
+        assert_eq!(parsed.icon_size, 256);
     }
 }

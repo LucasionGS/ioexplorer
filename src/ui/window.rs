@@ -15,7 +15,7 @@ use url::Url;
 
 use crate::{
     bookmarks,
-    config::{AppConfig, ViewMode},
+    config::{AppConfig, ViewMode, clamp_icon_size},
     providers::{FileItem, FileKind, Provider, ProviderError, ProviderUri, local::LocalProvider},
     state::AppState,
     ui::{computer::ComputerPage, context_menu, dnd, sidebar::Sidebar, topbar::TopBar, views},
@@ -27,6 +27,7 @@ const FOLDER_MONITOR_DEBOUNCE_MS: u64 = 250;
 const IMAGE_VIEWER_MIN_ZOOM: f64 = 1.0;
 const IMAGE_VIEWER_MAX_ZOOM: f64 = 8.0;
 const IMAGE_VIEWER_ZOOM_STEP: f64 = 1.15;
+const ICON_VIEW_ZOOM_STEP: i32 = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AppPage {
@@ -44,6 +45,7 @@ pub struct AppWindow {
     entries: RefCell<Vec<FileItem>>,
     view_mode: Cell<ViewMode>,
     show_hidden: Cell<bool>,
+    icon_size: Cell<i32>,
     topbar: TopBar,
     sidebar: Sidebar,
     stack: gtk::Stack,
@@ -202,6 +204,7 @@ impl AppWindow {
             entries: RefCell::new(Vec::new()),
             view_mode: Cell::new(state.layout),
             show_hidden: Cell::new(state.show_hidden),
+            icon_size: Cell::new(state.icon_size),
             config,
             topbar,
             sidebar,
@@ -425,6 +428,8 @@ impl AppWindow {
         self.grid_scroll
             .vadjustment()
             .connect_page_size_notify(move |_| this.queue_visible_thumbnail_load());
+
+        self.install_icon_view_zoom_controls();
 
         let right_click = gtk::GestureClick::new();
         right_click.set_button(gtk::gdk::BUTTON_SECONDARY);
@@ -994,7 +999,7 @@ impl AppWindow {
             &self.flow_box,
             &entries,
             views::icon::IconViewOptions {
-                icon_size: self.config.icon_size,
+                icon_size: self.icon_size.get(),
                 thumbnail_cache: Rc::clone(&self.thumbnail_cache),
             },
             folder_drop_handler,
@@ -1025,7 +1030,7 @@ impl AppWindow {
             &self.grid_scroll,
             &entries,
             views::icon::IconViewOptions {
-                icon_size: self.config.icon_size,
+                icon_size: self.icon_size.get(),
                 thumbnail_cache: Rc::clone(&self.thumbnail_cache),
             },
         );
@@ -1109,10 +1114,60 @@ impl AppWindow {
         let state = AppState {
             layout: self.view_mode.get(),
             show_hidden: self.show_hidden.get(),
+            icon_size: self.icon_size.get(),
         };
         if let Err(error) = state.save() {
             tracing::warn!(%error, "failed to save UI state");
         }
+    }
+
+    fn install_icon_view_zoom_controls(self: &Rc<Self>) {
+        let scroll_controller =
+            gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+        scroll_controller.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let this = Rc::clone(self);
+        scroll_controller.connect_scroll(move |scroll, _, delta_y| {
+            if delta_y == 0.0
+                || this.active_page.get() != AppPage::Files
+                || this.view_mode.get() != ViewMode::Icon
+                || !scroll
+                    .current_event_state()
+                    .contains(gtk::gdk::ModifierType::CONTROL_MASK)
+            {
+                return glib::Propagation::Proceed;
+            }
+
+            if delta_y < 0.0 {
+                this.change_icon_size(ICON_VIEW_ZOOM_STEP);
+            } else {
+                this.change_icon_size(-ICON_VIEW_ZOOM_STEP);
+            }
+            glib::Propagation::Stop
+        });
+        self.grid_scroll.add_controller(scroll_controller);
+    }
+
+    fn change_icon_size(self: &Rc<Self>, delta: i32) {
+        let current = self.icon_size.get();
+        let next = clamp_icon_size(current + delta);
+        if next == current {
+            return;
+        }
+
+        let selected = self.selected_indices.borrow().clone();
+        self.icon_size.set(next);
+        self.save_ui_state();
+        views::icon::clear_thumbnail_cache(&self.thumbnail_cache);
+        self.render_entries();
+        if !selected.is_empty() {
+            set_entry_selection(
+                &self.selected_indices,
+                &self.list_box,
+                &self.flow_box,
+                selected,
+            );
+        }
+        self.status_label.set_text(&format!("Icon size: {next}px"));
     }
 
     fn activate_entry(self: &Rc<Self>, item: FileItem) {

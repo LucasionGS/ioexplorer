@@ -3,6 +3,9 @@ use std::{fs, path::PathBuf};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
+pub const MIN_ICON_SIZE: i32 = 48;
+pub const MAX_ICON_SIZE: i32 = 256;
+
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ViewMode {
@@ -64,6 +67,10 @@ impl AppConfig {
         ProjectDirs::from("io.github", "ionix", "ioexplorer")
             .map(|dirs| dirs.config_dir().join("config.toml"))
     }
+}
+
+pub fn clamp_icon_size(icon_size: i32) -> i32 {
+    icon_size.clamp(MIN_ICON_SIZE, MAX_ICON_SIZE)
 }
 
 #[cfg(test)]

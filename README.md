@@ -127,6 +127,8 @@ modified = true
 
 The bundled CSS lives in `data/styles/ioexplorer.css`. Distribution maintainers can override or layer styling through `custom_css`.
 
+In icon view, use Ctrl+scroll to resize file entries. The chosen icon size is saved in `~/.local/state/ioexplorer/state` and overrides the configured `icon_size` on later launches.
+
 ## Roadmap
 
 - Richer file operations.
