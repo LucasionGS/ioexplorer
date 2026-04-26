@@ -1,0 +1,24 @@
+[package]
+name = "ioexplorer"
+version = "0.1.0"
+edition = "2024"
+description = "A Wayland-native, provider-oriented file manager for Wayland desktops"
+authors = ["Lucasion"]
+repository = "https://github.com/LucasionGS/ioexplorer"
+
+[dependencies]
+anyhow = "1.0"
+directories = "6.0"
+gio = "0.21"
+gdk-pixbuf = "0.21"
+glib = "0.21"
+gtk = { package = "gtk4", version = "0.10", features = ["v4_12"] }
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2.0"
+toml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2.5"
+
+[dev-dependencies]
+tempfile = "3.23"

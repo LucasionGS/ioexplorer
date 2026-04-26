@@ -1,0 +1,188 @@
+window {
+  background: rgba(10, 12, 16, 0.74);
+  color: rgba(244, 247, 252, 0.94);
+}
+
+.topbar {
+  padding: 6px 8px;
+  background: rgba(13, 15, 20, 0.86);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.toolbar-group {
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.24);
+}
+
+.toolbar-group > button,
+.toolbar-group > togglebutton,
+.breadcrumb-button {
+  min-width: 34px;
+  min-height: 32px;
+  padding: 0 9px;
+  border-radius: 0;
+}
+
+.toolbar-group > button:first-child,
+.toolbar-group > togglebutton:first-child,
+.breadcrumb-button:first-child {
+  border-top-left-radius: 6px;
+  border-bottom-left-radius: 6px;
+}
+
+.toolbar-group > button:last-child,
+.toolbar-group > togglebutton:last-child,
+.breadcrumb-button:last-child {
+  border-top-right-radius: 6px;
+  border-bottom-right-radius: 6px;
+}
+
+.sidebar {
+  background: rgba(10, 12, 16, 0.68);
+  border-right: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.sidebar-list row {
+  border-radius: 6px;
+  margin: 2px 6px;
+}
+
+.breadcrumbs {
+  min-width: 180px;
+  background: rgba(0, 0, 0, 0.16);
+  border-radius: 6px;
+}
+
+.breadcrumb-button {
+  font-weight: 600;
+}
+
+.path-stack {
+  min-width: 260px;
+  background: rgba(0, 0, 0, 0.16);
+  border-radius: 6px;
+}
+
+.path-entry {
+  min-height: 32px;
+  min-width: 260px;
+}
+
+.content-list row {
+  border-radius: 6px;
+  margin: 1px 6px;
+}
+
+.content-list row:hover,
+.content-grid flowboxchild:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.content-list row.entry-selected,
+.content-grid flowboxchild.entry-selected {
+  background: rgba(67, 123, 214, 0.34);
+}
+
+.content-list row.entry-selected:hover,
+.content-grid flowboxchild.entry-selected:hover {
+  background: rgba(82, 145, 238, 0.44);
+}
+
+.rubberband-selection {
+  background: rgba(67, 123, 214, 0.2);
+  border: 1px solid rgba(146, 188, 255, 0.78);
+  border-radius: 3px;
+}
+
+.context-menu {
+  background: rgba(18, 21, 28, 0.96);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 6px;
+}
+
+.context-menu-item {
+  min-width: 170px;
+  padding: 7px 10px;
+  border-radius: 5px;
+}
+
+.context-menu-item:hover {
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.context-menu-item.destructive-action {
+  color: rgb(255, 128, 128);
+}
+
+.content-scroll,
+.content-scroll > viewport {
+  background: rgba(10, 12, 16, 0.54);
+}
+
+.content-list,
+.content-grid {
+  background: transparent;
+}
+
+.content-grid flowboxchild {
+  border-radius: 6px;
+}
+
+.file-tile {
+  padding: 8px;
+}
+
+.file-tile-icon.image-thumbnail {
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.dim-label,
+.status-label {
+  color: alpha(currentColor, 0.68);
+}
+
+.status-label {
+  padding: 6px 10px;
+  background: rgba(10, 12, 16, 0.72);
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.filter-bar {
+  padding: 5px 10px;
+  background: rgba(13, 15, 20, 0.86);
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.filter-label {
+  font-style: italic;
+}
+
+.image-viewer {
+  background: rgba(7, 8, 11, 0.98);
+}
+
+.image-viewer-toolbar {
+  padding: 7px 8px;
+  background: rgba(13, 15, 20, 0.92);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.image-viewer-button {
+  min-width: 34px;
+  min-height: 32px;
+  border-radius: 6px;
+}
+
+.image-viewer-title {
+  font-weight: 600;
+}
+
+.image-viewer-counter {
+  min-width: 64px;
+}
+
+.image-viewer-picture {
+  padding: 12px;
+  background: rgba(0, 0, 0, 0.32);
+}

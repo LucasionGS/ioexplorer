@@ -1,0 +1,23 @@
+app-id: io.github.ionix.IoExplorer
+runtime: org.gnome.Platform
+runtime-version: '48'
+sdk: org.gnome.Sdk
+command: ioexplorer
+finish-args:
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  - --filesystem=home
+  - --talk-name=org.freedesktop.FileManager1
+modules:
+  - name: ioexplorer
+    buildsystem: simple
+    build-commands:
+      - cargo --offline build --release
+      - install -Dm755 target/release/ioexplorer /app/bin/ioexplorer
+      - install -Dm644 data/io.github.ionix.IoExplorer.desktop /app/share/applications/io.github.ionix.IoExplorer.desktop
+      - install -Dm644 data/io.github.ionix.IoExplorer.metainfo.xml /app/share/metainfo/io.github.ionix.IoExplorer.metainfo.xml
+      - install -Dm644 data/icons/hicolor/scalable/apps/io.github.ionix.IoExplorer.svg /app/share/icons/hicolor/scalable/apps/io.github.ionix.IoExplorer.svg
+    sources:
+      - type: dir
+        path: ../..

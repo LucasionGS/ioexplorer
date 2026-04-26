@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=IoExplorer
+Comment=Wayland-native file manager for Hyprland desktops
+Exec=ioexplorer %U
+Icon=io.github.ionix.IoExplorer
+Terminal=false
+Categories=System;FileTools;FileManager;GTK;
+MimeType=inode/directory;
+StartupNotify=true

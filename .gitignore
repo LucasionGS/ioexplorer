@@ -1,0 +1,7 @@
+/target/
+/.flatpak-builder/
+/build-dir/
+/.cargo/config.toml
+*.swp
+*.swo
+*~

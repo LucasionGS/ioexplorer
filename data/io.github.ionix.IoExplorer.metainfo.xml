@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.ionix.IoExplorer</id>
+  <name>IoExplorer</name>
+  <summary>Wayland-native file manager for Hyprland desktops</summary>
+  <developer id="io.github.ionix">
+    <name>Ionix</name>
+  </developer>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>LicenseRef-Unknown</project_license>
+  <description>
+    <p>IoExplorer is a provider-oriented graphical file manager built with Rust and GTK4 for Wayland desktops.</p>
+    <p>The initial release focuses on local filesystem browsing, list and icon layouts, editable path navigation, theme customization, and native file drag-and-drop.</p>
+  </description>
+  <launchable type="desktop-id">io.github.ionix.IoExplorer.desktop</launchable>
+  <categories>
+    <category>System</category>
+    <category>FileManager</category>
+  </categories>
+  <url type="homepage">https://github.com/LucasionGS/ioexplorer</url>
+  <releases>
+    <release version="0.1.0" date="2026-04-25">
+      <description>
+        <p>Initial MVP scaffold with local browsing, theming foundations, and Wayland drag-and-drop hooks.</p>
+      </description>
+    </release>
+  </releases>
+  <content_rating type="oars-1.1" />
+</component>
