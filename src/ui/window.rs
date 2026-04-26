@@ -630,6 +630,10 @@ impl AppWindow {
                     this.paste_from_clipboard();
                     glib::Propagation::Stop
                 }
+                gtk::gdk::Key::a | gtk::gdk::Key::A if this.file_shortcuts_enabled() && ctrl => {
+                    this.select_all_entries();
+                    glib::Propagation::Stop
+                }
                 gtk::gdk::Key::h | gtk::gdk::Key::H if this.file_shortcuts_enabled() && ctrl => {
                     this.set_show_hidden(!this.show_hidden.get());
                     glib::Propagation::Stop
@@ -690,6 +694,26 @@ impl AppWindow {
 
     fn is_filtering(&self) -> bool {
         !self.filter_text.borrow().is_empty()
+    }
+
+    fn select_all_entries(&self) {
+        let entry_count = self.entries.borrow().len();
+        let indices = (0..entry_count).collect::<BTreeSet<_>>();
+        set_entry_selection(
+            &self.selected_indices,
+            &self.list_box,
+            &self.flow_box,
+            indices,
+        );
+
+        if entry_count == 0 {
+            self.anchor_index.set(None);
+            self.status_label.set_text("No items to select");
+        } else {
+            self.anchor_index.set(Some(0));
+            self.status_label
+                .set_text(&format!("Selected {entry_count} items"));
+        }
     }
 
     fn apply_filter_to_entries(self: &Rc<Self>) {
