@@ -9,6 +9,7 @@ It is developed with customization and ricing in mind, as well as efficiency nav
 - Local filesystem provider with a provider registry shaped for future SMB, SFTP, cloud, or virtual providers.
 - Left sidebar for common local places.
 - Main content area with List View and Icon View.
+- File pane tabs with per-tab navigation history.
 - Top bar with back, forward, up, refresh, breadcrumbs, and an editable path/URL entry.
 - Native GTK/GDK drag-and-drop for local files using standard file-list/URI data.
 - XDG config loading and optional user CSS for distribution theme customization.
@@ -155,7 +156,7 @@ Custom actions appear in file, folder, and empty-folder-space context menus when
 ## Roadmap
 
 - Richer file operations.
-- Tabs, split panes, and saved layout profiles.
+- Split panes and saved layout profiles.
 - Filtering.
 - Network/provider plugins.
 - Theme editor.

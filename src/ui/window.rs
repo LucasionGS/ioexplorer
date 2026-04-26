@@ -45,6 +45,23 @@ enum AppPage {
     Settings,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FileTab {
+    uri: ProviderUri,
+    back_stack: Vec<ProviderUri>,
+    forward_stack: Vec<ProviderUri>,
+}
+
+impl FileTab {
+    fn new(uri: ProviderUri) -> Self {
+        Self {
+            uri,
+            back_stack: Vec::new(),
+            forward_stack: Vec::new(),
+        }
+    }
+}
+
 pub struct AppWindow {
     window: gtk::ApplicationWindow,
     provider: LocalProvider,
@@ -59,6 +76,7 @@ pub struct AppWindow {
     icon_size: Cell<i32>,
     topbar: TopBar,
     sidebar: Sidebar,
+    tab_bar: gtk::Box,
     stack: gtk::Stack,
     computer_page: ComputerPage,
     settings_page: SettingsPage,
@@ -80,6 +98,8 @@ pub struct AppWindow {
     pending_folder_reload: RefCell<Option<glib::SourceId>>,
     mount_monitor: gio::UnixMountMonitor,
     active_page: Cell<AppPage>,
+    tabs: RefCell<Vec<FileTab>>,
+    active_tab: Cell<usize>,
     bookmarks: RefCell<Vec<PathBuf>>,
     thumbnail_cache: views::icon::ThumbnailCache,
     pending_visible_thumbnail_load: Cell<bool>,
@@ -161,6 +181,21 @@ impl AppWindow {
         stack.add_named(&computer_page.root, Some("computer"));
         stack.add_named(&settings_page.root, Some("settings"));
 
+        let tab_bar = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(4)
+            .hexpand(true)
+            .css_classes(["tab-strip"])
+            .build();
+        let content_area = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(0)
+            .hexpand(true)
+            .vexpand(true)
+            .build();
+        content_area.append(&tab_bar);
+        content_area.append(&stack);
+
         let status_label = gtk::Label::builder()
             .xalign(0.0)
             .css_classes(["status-label"])
@@ -192,7 +227,7 @@ impl AppWindow {
         let body = gtk::Paned::builder()
             .orientation(gtk::Orientation::Horizontal)
             .start_child(&sidebar.root)
-            .end_child(&stack)
+            .end_child(&content_area)
             .resize_start_child(false)
             .shrink_start_child(false)
             .build();
@@ -228,6 +263,7 @@ impl AppWindow {
             config,
             topbar,
             sidebar,
+            tab_bar,
             stack,
             computer_page,
             settings_page,
@@ -249,6 +285,8 @@ impl AppWindow {
             pending_folder_reload: RefCell::new(None),
             mount_monitor: gio::UnixMountMonitor::get(),
             active_page: Cell::new(AppPage::Files),
+            tabs: RefCell::new(vec![FileTab::new(start_uri.clone())]),
+            active_tab: Cell::new(0),
             bookmarks: RefCell::new(bookmarks),
             thumbnail_cache: views::icon::new_thumbnail_cache(),
             pending_visible_thumbnail_load: Cell::new(false),
@@ -533,6 +571,7 @@ impl AppWindow {
 
     fn install_keyboard_actions(self: &Rc<Self>) {
         let controller = gtk::EventControllerKey::new();
+        controller.set_propagation_phase(gtk::PropagationPhase::Capture);
         let this = Rc::clone(self);
         controller.connect_key_pressed(move |_, key, _, state| {
             let alt = state.contains(gtk::gdk::ModifierType::ALT_MASK);
@@ -630,6 +669,22 @@ impl AppWindow {
                     this.paste_from_clipboard();
                     glib::Propagation::Stop
                 }
+                gtk::gdk::Key::t | gtk::gdk::Key::T if ctrl => {
+                    this.open_new_tab();
+                    glib::Propagation::Stop
+                }
+                gtk::gdk::Key::w | gtk::gdk::Key::W if ctrl => {
+                    this.close_current_tab();
+                    glib::Propagation::Stop
+                }
+                gtk::gdk::Key::Page_Up if ctrl => {
+                    this.switch_tab_by(-1);
+                    glib::Propagation::Stop
+                }
+                gtk::gdk::Key::Page_Down if ctrl => {
+                    this.switch_tab_by(1);
+                    glib::Propagation::Stop
+                }
                 gtk::gdk::Key::a | gtk::gdk::Key::A if this.file_shortcuts_enabled() && ctrl => {
                     this.select_all_entries();
                     glib::Propagation::Stop
@@ -690,6 +745,165 @@ impl AppWindow {
 
     fn file_shortcuts_enabled(&self) -> bool {
         self.active_page.get() == AppPage::Files && !self.topbar.path_entry.has_focus()
+    }
+
+    fn active_tab_uri(&self) -> ProviderUri {
+        if self.active_page.get() == AppPage::Files {
+            self.current_uri.borrow().clone()
+        } else {
+            self.tabs
+                .borrow()
+                .get(self.active_tab.get())
+                .map(|tab| tab.uri.clone())
+                .unwrap_or_else(|| home_uri().unwrap_or_else(|| self.provider.root()))
+        }
+    }
+
+    fn save_active_tab_state(&self) {
+        let index = self.active_tab.get();
+        let mut tabs = self.tabs.borrow_mut();
+        let Some(tab) = tabs.get_mut(index) else {
+            return;
+        };
+
+        tab.uri = self.current_uri.borrow().clone();
+        tab.back_stack = self.back_stack.borrow().clone();
+        tab.forward_stack = self.forward_stack.borrow().clone();
+    }
+
+    fn open_new_tab(self: &Rc<Self>) {
+        self.save_active_tab_state();
+        let uri = self.active_tab_uri();
+        let index = {
+            let mut tabs = self.tabs.borrow_mut();
+            tabs.push(FileTab::new(uri.clone()));
+            tabs.len() - 1
+        };
+        self.active_tab.set(index);
+        self.back_stack.borrow_mut().clear();
+        self.forward_stack.borrow_mut().clear();
+        self.load_uri(uri, false);
+        self.status_label.set_text("Opened new tab");
+    }
+
+    fn switch_to_tab(self: &Rc<Self>, index: usize) {
+        if index == self.active_tab.get() {
+            return;
+        }
+
+        let Some(tab) = self.tabs.borrow().get(index).cloned() else {
+            return;
+        };
+        self.save_active_tab_state();
+        self.active_tab.set(index);
+        *self.back_stack.borrow_mut() = tab.back_stack;
+        *self.forward_stack.borrow_mut() = tab.forward_stack;
+        self.load_uri(tab.uri, false);
+    }
+
+    fn switch_tab_by(self: &Rc<Self>, offset: isize) {
+        let tab_count = self.tabs.borrow().len();
+        if tab_count <= 1 {
+            return;
+        }
+
+        let current = self.active_tab.get();
+        let next = if offset < 0 {
+            current.checked_sub(1).unwrap_or(tab_count - 1)
+        } else {
+            (current + 1) % tab_count
+        };
+        self.switch_to_tab(next);
+    }
+
+    fn close_current_tab(self: &Rc<Self>) {
+        self.close_tab(self.active_tab.get());
+    }
+
+    fn close_tab(self: &Rc<Self>, index: usize) {
+        if self.tabs.borrow().len() <= 1 {
+            self.status_label
+                .set_text("At least one tab must stay open");
+            return;
+        }
+
+        self.save_active_tab_state();
+        let active = self.active_tab.get();
+        let next_active = next_tab_index_after_close(active, index, self.tabs.borrow().len());
+        {
+            let mut tabs = self.tabs.borrow_mut();
+            if index >= tabs.len() {
+                return;
+            }
+            tabs.remove(index);
+        }
+
+        self.active_tab.set(next_active);
+        if index == active {
+            let tab = self.tabs.borrow()[next_active].clone();
+            *self.back_stack.borrow_mut() = tab.back_stack;
+            *self.forward_stack.borrow_mut() = tab.forward_stack;
+            self.load_uri(tab.uri, false);
+        } else {
+            self.render_tab_bar();
+        }
+        self.status_label.set_text("Closed tab");
+    }
+
+    fn render_tab_bar(self: &Rc<Self>) {
+        views::clear_box_children(&self.tab_bar);
+        self.tab_bar
+            .set_visible(self.active_page.get() == AppPage::Files);
+
+        let tabs = self.tabs.borrow().clone();
+        let active = self.active_tab.get();
+        for (index, tab) in tabs.iter().enumerate() {
+            self.tab_bar
+                .append(&self.tab_button(index, tab, index == active));
+        }
+
+        let new_button = gtk::Button::builder()
+            .icon_name("list-add-symbolic")
+            .tooltip_text("New Tab")
+            .css_classes(["tab-new-button"])
+            .build();
+        new_button.set_focusable(false);
+        let this = Rc::clone(self);
+        new_button.connect_clicked(move |_| this.open_new_tab());
+        self.tab_bar.append(&new_button);
+    }
+
+    fn tab_button(self: &Rc<Self>, index: usize, tab: &FileTab, active: bool) -> gtk::Box {
+        let tab_box = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(0)
+            .css_classes(["file-tab"])
+            .build();
+
+        let select_button = gtk::ToggleButton::builder()
+            .label(tab_title(&tab.uri))
+            .active(active)
+            .hexpand(false)
+            .tooltip_text(tab.uri.display_path())
+            .css_classes(["file-tab-button"])
+            .build();
+        select_button.set_focusable(false);
+        let this = Rc::clone(self);
+        select_button.connect_clicked(move |_| this.switch_to_tab(index));
+        tab_box.append(&select_button);
+
+        let close_button = gtk::Button::builder()
+            .icon_name("window-close-symbolic")
+            .tooltip_text("Close Tab")
+            .css_classes(["file-tab-close"])
+            .build();
+        close_button.set_focusable(false);
+        close_button.set_sensitive(self.tabs.borrow().len() > 1);
+        let this = Rc::clone(self);
+        close_button.connect_clicked(move |_| this.close_tab(index));
+        tab_box.append(&close_button);
+
+        tab_box
     }
 
     fn is_filtering(&self) -> bool {
@@ -880,6 +1094,8 @@ impl AppWindow {
                     uri.display_path()
                 ) + &current_kind;
                 self.status_label.set_text(&status);
+                self.save_active_tab_state();
+                self.render_tab_bar();
                 self.focus_content();
             }
             Err(error) => self.show_error(error),
@@ -902,6 +1118,7 @@ impl AppWindow {
         self.render_computer_breadcrumb();
         self.topbar.path_entry.set_text("This PC");
         self.show_breadcrumbs();
+        self.tab_bar.set_visible(false);
         self.stack.set_visible_child_name("computer");
         self.set_computer_topbar_state();
         self.update_computer_status();
@@ -923,6 +1140,7 @@ impl AppWindow {
         self.render_settings_breadcrumb();
         self.topbar.path_entry.set_text("Settings");
         self.show_breadcrumbs();
+        self.tab_bar.set_visible(false);
         self.stack.set_visible_child_name("settings");
         self.set_settings_topbar_state();
         self.status_label.set_text("Settings");
@@ -3630,6 +3848,32 @@ fn is_previewable_image_file(item: &FileItem) -> bool {
         && item.uri.local_path().is_ok()
 }
 
+fn tab_title(uri: &ProviderUri) -> String {
+    let path = uri.path();
+    if path == "/" {
+        return "/".to_string();
+    }
+
+    path.rsplit('/')
+        .find(|component| !component.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| uri.display_path())
+}
+
+fn next_tab_index_after_close(active: usize, closing: usize, tab_count: usize) -> usize {
+    if tab_count <= 1 {
+        return 0;
+    }
+
+    if closing == active {
+        active.min(tab_count - 2)
+    } else if closing < active {
+        active - 1
+    } else {
+        active
+    }
+}
+
 fn action_editor_field(label: &str, control: &impl IsA<gtk::Widget>) -> gtk::Box {
     let field = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -4237,7 +4481,7 @@ mod tests {
         FileClipboardOperation, copy_path_into, drop_target_is_selected, dropped_file_name_for_uri,
         file_clipboard_payload, file_uri_list_payload, folder_monitor_event_affects_listing,
         is_desktop_entry_file, is_gif_image_path, move_path_into, new_folder_target,
-        partition_drop_uris,
+        next_tab_index_after_close, partition_drop_uris, tab_title,
     };
 
     #[test]
@@ -4260,6 +4504,22 @@ mod tests {
     fn detects_gif_paths_for_animation_viewer() {
         assert!(is_gif_image_path(Path::new("/tmp/clip.GIF")));
         assert!(!is_gif_image_path(Path::new("/tmp/photo.png")));
+    }
+
+    #[test]
+    fn tab_titles_use_last_path_component() {
+        assert_eq!(tab_title(&ProviderUri::local("/")), "/");
+        assert_eq!(
+            tab_title(&ProviderUri::local("/home/user/Projects")),
+            "Projects"
+        );
+    }
+
+    #[test]
+    fn close_tab_keeps_adjacent_active_index() {
+        assert_eq!(next_tab_index_after_close(2, 2, 3), 1);
+        assert_eq!(next_tab_index_after_close(1, 0, 3), 0);
+        assert_eq!(next_tab_index_after_close(0, 2, 3), 0);
     }
 
     #[test]
