@@ -1,5 +1,5 @@
 pkgname=ioexplorer
-pkgver=0.1.0
+pkgver=r0.000000
 pkgrel=1
 pkgdesc='Wayland-native provider-oriented file manager for Wayland desktops'
 arch=('x86_64')
@@ -7,16 +7,16 @@ url='https://github.com/LucasionGS/ioexplorer'
 license=('MIT')
 depends=('gtk4' 'glib2')
 makedepends=('cargo')
-source=("$pkgname-$pkgver.tar.gz")
+source=("$pkgname::git+https://github.com/LucasionGS/ioexplorer.git")
 sha256sums=('SKIP')
 
 build() {
-  cd "$pkgname-$pkgver"
+  cd "$srcdir/$pkgname"
   cargo build --release --locked
 }
 
 package() {
-  cd "$pkgname-$pkgver"
+  cd "$srcdir/$pkgname"
   install -Dm755 target/release/ioexplorer "$pkgdir/usr/bin/ioexplorer"
   install -Dm644 data/io.github.ionix.IoExplorer.desktop "$pkgdir/usr/share/applications/io.github.ionix.IoExplorer.desktop"
   install -Dm644 data/io.github.ionix.IoExplorer.metainfo.xml "$pkgdir/usr/share/metainfo/io.github.ionix.IoExplorer.metainfo.xml"
