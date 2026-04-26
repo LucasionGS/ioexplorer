@@ -134,3 +134,7 @@ The bundled CSS lives in `data/styles/ioexplorer.css`. Distribution maintainers 
 - Filtering.
 - Network/provider plugins.
 - Graphical settings and theme editor.
+- Custom configurable actions on files and folders
+  - Actions are defined with a command that gets run with the file/folder path as an argument
+  - Filter allows these actions to only show up for certain file types or folders
+    - Filters are defined with glob patterns and special keywords like `folder/` (Which matches folders and current directory), but generally should be flexible enough to support things like `*.txt` or `image/*` (Which matches common image formats)
