@@ -1,4 +1,5 @@
 mod app;
+mod bookmarks;
 mod config;
 mod providers;
 mod theme;

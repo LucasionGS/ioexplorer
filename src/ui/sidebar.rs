@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{cell::RefCell, path::PathBuf};
 
 use directories::UserDirs;
 use gtk::prelude::*;
@@ -10,25 +10,21 @@ pub struct SidebarPlace {
     pub label: String,
     pub icon_name: &'static str,
     pub uri: ProviderUri,
+    pub is_bookmark: bool,
 }
 
 pub struct Sidebar {
     pub root: gtk::ScrolledWindow,
     pub list: gtk::ListBox,
-    pub places: Vec<SidebarPlace>,
+    places: RefCell<Vec<SidebarPlace>>,
 }
 
 impl Sidebar {
-    pub fn new(width: i32) -> Self {
+    pub fn new(width: i32, bookmarks: &[PathBuf]) -> Self {
         let list = gtk::ListBox::builder()
             .selection_mode(gtk::SelectionMode::Single)
             .css_classes(["sidebar-list"])
             .build();
-
-        let places = default_places();
-        for place in &places {
-            list.append(&place_row(place));
-        }
 
         let root = gtk::ScrolledWindow::builder()
             .min_content_width(width)
@@ -37,8 +33,51 @@ impl Sidebar {
             .css_classes(["sidebar"])
             .build();
 
-        Self { root, list, places }
+        let sidebar = Self {
+            root,
+            list,
+            places: RefCell::new(Vec::new()),
+        };
+        sidebar.set_bookmarks(bookmarks);
+        sidebar
     }
+
+    pub fn place_at(&self, index: usize) -> Option<SidebarPlace> {
+        self.places.borrow().get(index).cloned()
+    }
+
+    pub fn set_bookmarks(&self, bookmarks: &[PathBuf]) {
+        while let Some(row) = self.list.row_at_index(0) {
+            self.list.remove(&row);
+        }
+
+        let places = places_with_bookmarks(bookmarks);
+        for place in &places {
+            self.list.append(&place_row(place));
+        }
+        *self.places.borrow_mut() = places;
+    }
+}
+
+fn places_with_bookmarks(bookmarks: &[PathBuf]) -> Vec<SidebarPlace> {
+    let mut places = default_places();
+    for path in bookmarks {
+        places.push(SidebarPlace {
+            label: bookmark_label(path),
+            icon_name: "user-bookmarks-symbolic",
+            uri: ProviderUri::local(path),
+            is_bookmark: true,
+        });
+    }
+    places
+}
+
+fn bookmark_label(path: &std::path::Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| path.display().to_string())
 }
 
 fn default_places() -> Vec<SidebarPlace> {
@@ -75,6 +114,7 @@ fn default_places() -> Vec<SidebarPlace> {
         label: "Filesystem".to_string(),
         icon_name: "drive-harddisk-symbolic",
         uri: ProviderUri::local(PathBuf::from("/")),
+        is_bookmark: false,
     });
 
     places
@@ -92,6 +132,7 @@ fn push_place(
             label: label.to_string(),
             icon_name,
             uri: ProviderUri::local(path),
+            is_bookmark: false,
         });
     }
 }

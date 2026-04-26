@@ -8,6 +8,31 @@ pub type ClipboardAction = Rc<dyn Fn(Vec<PathBuf>)>;
 pub type ViewAction = Rc<dyn Fn()>;
 pub type MenuAction = Rc<dyn Fn()>;
 
+#[derive(Clone)]
+pub struct BookmarkAction {
+    label: String,
+    activate: MenuAction,
+}
+
+impl BookmarkAction {
+    pub fn new(label: impl Into<String>, activate: MenuAction) -> Self {
+        Self {
+            label: label.into(),
+            activate,
+        }
+    }
+
+    fn context_action(&self) -> ContextMenuAction {
+        let activate = Rc::clone(&self.activate);
+        ContextMenuAction::new(
+            self.label.clone(),
+            Some("user-bookmarks-symbolic"),
+            false,
+            Rc::new(move || activate()),
+        )
+    }
+}
+
 pub trait ContextMenuContext {
     fn actions(&self) -> Vec<ContextMenuAction>;
 }
@@ -78,11 +103,16 @@ impl ContextMenu {
 pub struct EmptySpaceContext {
     paste: MenuAction,
     new_folder: MenuAction,
+    bookmark: BookmarkAction,
 }
 
 impl EmptySpaceContext {
-    pub fn new(paste: MenuAction, new_folder: MenuAction) -> Self {
-        Self { paste, new_folder }
+    pub fn new(paste: MenuAction, new_folder: MenuAction, bookmark: BookmarkAction) -> Self {
+        Self {
+            paste,
+            new_folder,
+            bookmark,
+        }
     }
 }
 
@@ -104,7 +134,31 @@ impl ContextMenuContext for EmptySpaceContext {
                 false,
                 Rc::new(move || new_folder()),
             ),
+            self.bookmark.context_action(),
         ]
+    }
+}
+
+pub struct SidebarBookmarkContext {
+    remove: MenuAction,
+}
+
+impl SidebarBookmarkContext {
+    pub fn new(remove: MenuAction) -> Self {
+        Self { remove }
+    }
+}
+
+impl ContextMenuContext for SidebarBookmarkContext {
+    fn actions(&self) -> Vec<ContextMenuAction> {
+        let remove = Rc::clone(&self.remove);
+
+        vec![ContextMenuAction::new(
+            "Remove Bookmark",
+            Some("user-bookmarks-symbolic"),
+            false,
+            Rc::new(move || remove()),
+        )]
     }
 }
 
@@ -117,6 +171,7 @@ impl FileEntryContext {
     pub fn for_paths(
         paths: Vec<PathBuf>,
         view: Option<ViewAction>,
+        bookmark: Option<BookmarkAction>,
         copy: ClipboardAction,
         cut: ClipboardAction,
         rename: RenameAction,
@@ -127,6 +182,7 @@ impl FileEntryContext {
             1 => Some(Self::Single(FileSingleSelectionContext {
                 path: paths[0].clone(),
                 view,
+                bookmark,
                 copy,
                 cut,
                 rename,
@@ -155,6 +211,7 @@ impl ContextMenuContext for FileEntryContext {
 pub struct FileSingleSelectionContext {
     path: PathBuf,
     view: Option<ViewAction>,
+    bookmark: Option<BookmarkAction>,
     copy: ClipboardAction,
     cut: ClipboardAction,
     rename: RenameAction,
@@ -172,6 +229,7 @@ impl ContextMenuContext for FileSingleSelectionContext {
                 Rc::new(move || view()),
             )
         });
+        let bookmark = self.bookmark.as_ref().map(BookmarkAction::context_action);
         let copy_paths = vec![self.path.clone()];
         let copy = Rc::clone(&self.copy);
         let cut_paths = vec![self.path.clone()];
@@ -183,6 +241,7 @@ impl ContextMenuContext for FileSingleSelectionContext {
 
         let mut actions = Vec::new();
         actions.extend(view);
+        actions.extend(bookmark);
         actions.extend([
             ContextMenuAction::new(
                 "Copy",
@@ -314,8 +373,8 @@ fn action_button(popover: &gtk::Popover, action: ContextMenuAction) -> gtk::Butt
 #[cfg(test)]
 mod tests {
     use super::{
-        ClipboardAction, ContextMenuContext, DeleteAction, EmptySpaceContext, FileEntryContext,
-        MenuAction, RenameAction, ViewAction,
+        BookmarkAction, ClipboardAction, ContextMenuContext, DeleteAction, EmptySpaceContext,
+        FileEntryContext, MenuAction, RenameAction, SidebarBookmarkContext, ViewAction,
     };
     use std::{path::PathBuf, rc::Rc};
 
@@ -323,6 +382,7 @@ mod tests {
     fn single_file_context_includes_clipboard_rename_and_delete() {
         let context = FileEntryContext::for_paths(
             vec![PathBuf::from("/tmp/file.txt")],
+            None,
             None,
             noop_clipboard(),
             noop_clipboard(),
@@ -344,6 +404,7 @@ mod tests {
         let context = FileEntryContext::for_paths(
             vec![PathBuf::from("/tmp/photo.png")],
             Some(noop_view()),
+            None,
             noop_clipboard(),
             noop_clipboard(),
             noop_rename(),
@@ -360,9 +421,55 @@ mod tests {
     }
 
     #[test]
+    fn single_folder_context_can_include_bookmark() {
+        let context = FileEntryContext::for_paths(
+            vec![PathBuf::from("/tmp/folder")],
+            None,
+            Some(noop_bookmark_action("Add Bookmark")),
+            noop_clipboard(),
+            noop_clipboard(),
+            noop_rename(),
+            noop_delete(),
+        )
+        .expect("single context");
+
+        let labels = context
+            .actions()
+            .into_iter()
+            .map(|action| action.label)
+            .collect::<Vec<_>>();
+        assert_eq!(labels, ["Add Bookmark", "Copy", "Cut", "Rename", "Delete"]);
+    }
+
+    #[test]
+    fn bookmarked_folder_context_can_include_remove_bookmark() {
+        let context = FileEntryContext::for_paths(
+            vec![PathBuf::from("/tmp/folder")],
+            None,
+            Some(noop_bookmark_action("Remove Bookmark")),
+            noop_clipboard(),
+            noop_clipboard(),
+            noop_rename(),
+            noop_delete(),
+        )
+        .expect("single context");
+
+        let labels = context
+            .actions()
+            .into_iter()
+            .map(|action| action.label)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            ["Remove Bookmark", "Copy", "Cut", "Rename", "Delete"]
+        );
+    }
+
+    #[test]
     fn multi_file_context_includes_clipboard_and_delete() {
         let context = FileEntryContext::for_paths(
             vec![PathBuf::from("/tmp/a.txt"), PathBuf::from("/tmp/b.txt")],
+            None,
             None,
             noop_clipboard(),
             noop_clipboard(),
@@ -381,18 +488,38 @@ mod tests {
 
     #[test]
     fn empty_space_context_includes_paste_and_new_folder() {
-        let context = EmptySpaceContext::new(noop_menu_action(), noop_menu_action());
+        let context = EmptySpaceContext::new(
+            noop_menu_action(),
+            noop_menu_action(),
+            noop_bookmark_action("Add Bookmark"),
+        );
 
         let labels = context
             .actions()
             .into_iter()
             .map(|action| action.label)
             .collect::<Vec<_>>();
-        assert_eq!(labels, ["Paste", "New Folder"]);
+        assert_eq!(labels, ["Paste", "New Folder", "Add Bookmark"]);
+    }
+
+    #[test]
+    fn sidebar_bookmark_context_removes_bookmark() {
+        let context = SidebarBookmarkContext::new(noop_menu_action());
+
+        let labels = context
+            .actions()
+            .into_iter()
+            .map(|action| action.label)
+            .collect::<Vec<_>>();
+        assert_eq!(labels, ["Remove Bookmark"]);
     }
 
     fn noop_menu_action() -> MenuAction {
         Rc::new(|| {})
+    }
+
+    fn noop_bookmark_action(label: &str) -> BookmarkAction {
+        BookmarkAction::new(label, noop_menu_action())
     }
 
     fn noop_view() -> ViewAction {

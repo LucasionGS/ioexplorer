@@ -14,6 +14,7 @@ use gtk::prelude::*;
 use url::Url;
 
 use crate::{
+    bookmarks,
     config::{AppConfig, ViewMode},
     providers::{FileItem, FileKind, Provider, ProviderError, ProviderUri, local::LocalProvider},
     ui::{context_menu, dnd, sidebar::Sidebar, topbar::TopBar, views},
@@ -48,6 +49,7 @@ pub struct AppWindow {
     pending_filter: RefCell<Option<glib::SourceId>>,
     clipboard_paths: RefCell<Vec<PathBuf>>,
     clipboard_operation: Cell<Option<FileClipboardOperation>>,
+    bookmarks: RefCell<Vec<PathBuf>>,
     thumbnail_cache: views::icon::ThumbnailCache,
     pending_visible_thumbnail_load: Cell<bool>,
 }
@@ -57,7 +59,8 @@ impl AppWindow {
         let provider = LocalProvider::new();
         let start_uri = home_uri().unwrap_or_else(|| provider.root());
         let topbar = TopBar::new(config.default_view);
-        let sidebar = Sidebar::new(config.sidebar_width);
+        let bookmarks = bookmarks::load();
+        let sidebar = Sidebar::new(config.sidebar_width, &bookmarks);
         let selected_indices = Rc::new(RefCell::new(BTreeSet::new()));
         let anchor_index = Rc::new(Cell::new(None::<usize>));
         let list_box = gtk::ListBox::builder()
@@ -196,6 +199,7 @@ impl AppWindow {
             pending_filter: RefCell::new(None),
             clipboard_paths: RefCell::new(Vec::new()),
             clipboard_operation: Cell::new(None),
+            bookmarks: RefCell::new(bookmarks),
             thumbnail_cache: views::icon::new_thumbnail_cache(),
             pending_visible_thumbnail_load: Cell::new(false),
         });
@@ -273,10 +277,33 @@ impl AppWindow {
 
         let this = Rc::clone(self);
         self.sidebar.list.connect_row_activated(move |_, row| {
-            if let Some(place) = this.sidebar.places.get(row.index() as usize) {
+            if let Some(place) = this.sidebar.place_at(row.index() as usize) {
                 this.load_uri(place.uri.clone(), true);
             }
         });
+
+        let sidebar_right_click = gtk::GestureClick::new();
+        sidebar_right_click.set_button(gtk::gdk::BUTTON_SECONDARY);
+        let sidebar_list = self.sidebar.list.clone();
+        let this = Rc::clone(self);
+        sidebar_right_click.connect_pressed(move |gesture, _, x, y| {
+            let Some(row) = picked_list_box_row(&sidebar_list, x, y) else {
+                return;
+            };
+            let Some(place) = this.sidebar.place_at(row.index().max(0) as usize) else {
+                return;
+            };
+            if !place.is_bookmark {
+                return;
+            }
+            let Ok(path) = place.uri.local_path() else {
+                return;
+            };
+
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            this.show_sidebar_bookmark_context_menu(path, sidebar_list.clone().upcast(), x, y);
+        });
+        self.sidebar.list.add_controller(sidebar_right_click);
 
         let this = Rc::clone(self);
         self.list_box.connect_row_activated(move |_, row| {
@@ -1134,6 +1161,14 @@ impl AppWindow {
                 let this = Rc::clone(self);
                 Rc::new(move || this.show_image_viewer(path.clone())) as context_menu::ViewAction
             });
+        let bookmark: Option<context_menu::BookmarkAction> = self
+            .entries
+            .borrow()
+            .get(index)
+            .cloned()
+            .filter(|item| item.kind == FileKind::Directory)
+            .and_then(|item| item.uri.local_path().ok())
+            .map(|path| self.bookmark_action_for_folder(path));
         let rename: context_menu::RenameAction = {
             let this = Rc::clone(self);
             Rc::new(move |path| this.show_rename_dialog(path))
@@ -1151,9 +1186,9 @@ impl AppWindow {
             Rc::new(move |paths| this.copy_paths_to_clipboard(paths, FileClipboardOperation::Cut))
         };
 
-        let Some(context) =
-            context_menu::FileEntryContext::for_paths(paths, view, copy, cut, rename, delete)
-        else {
+        let Some(context) = context_menu::FileEntryContext::for_paths(
+            paths, view, bookmark, copy, cut, rename, delete,
+        ) else {
             return;
         };
 
@@ -1316,9 +1351,120 @@ impl AppWindow {
             let this = Rc::clone(self);
             Rc::new(move || this.create_folder())
         };
-        let context = context_menu::EmptySpaceContext::new(paste, new_folder);
+        let bookmark = self.current_folder_bookmark_action();
+        let context = context_menu::EmptySpaceContext::new(paste, new_folder, bookmark);
 
         context_menu::ContextMenu::popup_at(&parent, x, y, &context);
+    }
+
+    fn show_sidebar_bookmark_context_menu(
+        self: &Rc<Self>,
+        path: PathBuf,
+        parent: gtk::Widget,
+        x: f64,
+        y: f64,
+    ) {
+        let remove: context_menu::MenuAction = {
+            let this = Rc::clone(self);
+            Rc::new(move || this.remove_bookmark(path.clone()))
+        };
+        let context = context_menu::SidebarBookmarkContext::new(remove);
+
+        context_menu::ContextMenu::popup_at(&parent, x, y, &context);
+    }
+
+    fn current_folder_bookmark_action(self: &Rc<Self>) -> context_menu::BookmarkAction {
+        let target_dir = self.current_uri.borrow().local_path().ok();
+        match target_dir {
+            Some(path) => self.bookmark_action_for_folder(path),
+            None => {
+                let this = Rc::clone(self);
+                context_menu::BookmarkAction::new(
+                    "Add Bookmark",
+                    Rc::new(move || this.bookmark_current_folder()),
+                )
+            }
+        }
+    }
+
+    fn bookmark_action_for_folder(self: &Rc<Self>, path: PathBuf) -> context_menu::BookmarkAction {
+        if self.is_bookmarked(&path) {
+            let this = Rc::clone(self);
+            context_menu::BookmarkAction::new(
+                "Remove Bookmark",
+                Rc::new(move || this.remove_bookmark(path.clone())),
+            )
+        } else {
+            let this = Rc::clone(self);
+            context_menu::BookmarkAction::new(
+                "Add Bookmark",
+                Rc::new(move || this.add_bookmark(path.clone())),
+            )
+        }
+    }
+
+    fn bookmark_current_folder(self: &Rc<Self>) {
+        let target_dir = {
+            let current_uri = self.current_uri.borrow();
+            match current_uri.local_path() {
+                Ok(path) => path,
+                Err(_) => {
+                    self.status_label
+                        .set_text("Bookmarks are only supported for local folders");
+                    return;
+                }
+            }
+        };
+
+        self.add_bookmark(target_dir);
+    }
+
+    fn add_bookmark(self: &Rc<Self>, path: PathBuf) {
+        if !path.is_dir() {
+            self.status_label.set_text("Only folders can be bookmarked");
+            return;
+        }
+
+        let mut next_bookmarks = self.bookmarks.borrow().clone();
+        if !bookmarks::add(&mut next_bookmarks, path.clone()) {
+            self.status_label
+                .set_text(&format!("{} is already bookmarked", path.display()));
+            return;
+        }
+
+        let success = format!("Bookmarked {}", path.display());
+        self.save_bookmark_changes(next_bookmarks, success);
+    }
+
+    fn remove_bookmark(self: &Rc<Self>, path: PathBuf) {
+        let mut next_bookmarks = self.bookmarks.borrow().clone();
+        if !bookmarks::remove(&mut next_bookmarks, &path) {
+            self.status_label
+                .set_text(&format!("{} is not bookmarked", path.display()));
+            return;
+        }
+
+        let success = format!("Removed bookmark {}", path.display());
+        self.save_bookmark_changes(next_bookmarks, success);
+    }
+
+    fn is_bookmarked(&self, path: &Path) -> bool {
+        let bookmarks = self.bookmarks.borrow();
+        bookmarks::contains(bookmarks.as_slice(), path)
+    }
+
+    fn save_bookmark_changes(&self, next_bookmarks: Vec<PathBuf>, success: String) {
+        match bookmarks::save(&next_bookmarks) {
+            Ok(()) => {
+                *self.bookmarks.borrow_mut() = next_bookmarks;
+                let bookmarks = self.bookmarks.borrow();
+                self.sidebar.set_bookmarks(bookmarks.as_slice());
+                self.status_label.set_text(&success);
+            }
+            Err(error) => self
+                .status_label
+                .set_text(&format!("Failed to save bookmark: {error}")),
+        }
     }
 
     fn show_rename_dialog(self: &Rc<Self>, path: PathBuf) {
@@ -1624,22 +1770,112 @@ impl AppWindow {
             }
         };
 
-        let mut candidate = target_dir.join("New Folder");
-        let mut suffix = 2;
-        while candidate.exists() {
-            candidate = target_dir.join(format!("New Folder {suffix}"));
-            suffix += 1;
-        }
+        self.show_create_folder_dialog(target_dir);
+    }
 
-        match fs::create_dir(&candidate) {
+    fn show_create_folder_dialog(self: &Rc<Self>, target_dir: PathBuf) {
+        let create_window = gtk::Window::builder()
+            .title("New Folder")
+            .transient_for(&self.window)
+            .modal(true)
+            .default_width(420)
+            .resizable(false)
+            .build();
+
+        let content = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(10)
+            .margin_top(14)
+            .margin_bottom(14)
+            .margin_start(14)
+            .margin_end(14)
+            .build();
+
+        content.append(
+            &gtk::Label::builder()
+                .label("Folder name")
+                .xalign(0.0)
+                .build(),
+        );
+        let name_entry = gtk::Entry::builder()
+            .text("New Folder")
+            .hexpand(true)
+            .build();
+        name_entry.select_region(0, -1);
+        content.append(&name_entry);
+
+        let button_row = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(8)
+            .halign(gtk::Align::End)
+            .build();
+        let cancel_button = gtk::Button::builder().label("Cancel").build();
+        let create_button = gtk::Button::builder()
+            .label("Create")
+            .css_classes(["suggested-action"])
+            .build();
+        button_row.append(&cancel_button);
+        button_row.append(&create_button);
+        content.append(&button_row);
+        create_window.set_child(Some(&content));
+
+        let this = Rc::clone(self);
+        let submit = Rc::new({
+            let create_window = create_window.clone();
+            let name_entry = name_entry.clone();
+            move || {
+                if this.create_folder_named(&target_dir, name_entry.text().trim()) {
+                    create_window.close();
+                }
+            }
+        });
+
+        let submit_from_button = Rc::clone(&submit);
+        create_button.connect_clicked(move |_| submit_from_button());
+        name_entry.connect_activate(move |_| submit());
+
+        let cancel_window = create_window.clone();
+        cancel_button.connect_clicked(move |_| {
+            cancel_window.close();
+        });
+
+        let esc_controller = gtk::EventControllerKey::new();
+        let esc_window = create_window.clone();
+        esc_controller.connect_key_pressed(move |_, key, _, _| {
+            if key == gtk::gdk::Key::Escape {
+                esc_window.close();
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
+            }
+        });
+        create_window.add_controller(esc_controller);
+
+        create_window.present();
+        name_entry.grab_focus();
+    }
+
+    fn create_folder_named(self: &Rc<Self>, target_dir: &Path, name: &str) -> bool {
+        let target = match new_folder_target(target_dir, name) {
+            Ok(target) => target,
+            Err(message) => {
+                self.status_label.set_text(message);
+                return false;
+            }
+        };
+
+        match fs::create_dir(&target) {
             Ok(()) => {
                 self.status_label
-                    .set_text(&format!("Created {}", candidate.display()));
+                    .set_text(&format!("Created {}", target.display()));
                 self.refresh();
+                true
             }
-            Err(error) => self
-                .status_label
-                .set_text(&format!("Failed to create folder: {error}")),
+            Err(error) => {
+                self.status_label
+                    .set_text(&format!("Failed to create folder: {error}"));
+                false
+            }
         }
     }
 
@@ -2165,6 +2401,14 @@ fn hit_widget_type(
         .is_some()
 }
 
+fn picked_list_box_row(widget: &impl IsA<gtk::Widget>, x: f64, y: f64) -> Option<gtk::ListBoxRow> {
+    widget
+        .pick(x, y, gtk::PickFlags::DEFAULT)?
+        .ancestor(gtk::ListBoxRow::static_type())?
+        .downcast::<gtk::ListBoxRow>()
+        .ok()
+}
+
 fn rubberband_rect(
     start_x: f64,
     start_y: f64,
@@ -2632,6 +2876,22 @@ fn copy_dir_recursive(source: &Path, target: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+fn new_folder_target(target_dir: &Path, name: &str) -> Result<PathBuf, &'static str> {
+    if name.is_empty() {
+        return Err("Name cannot be empty");
+    }
+    if name == "." || name == ".." || name.contains('/') {
+        return Err("Name cannot contain path separators");
+    }
+
+    let target = target_dir.join(name);
+    if target.exists() {
+        return Err("A folder or file with that name already exists");
+    }
+
+    Ok(target)
+}
+
 fn next_available_path(path: &Path) -> PathBuf {
     if !path.exists() {
         return path.to_path_buf();
@@ -2672,7 +2932,7 @@ mod tests {
     use super::{
         FileClipboardOperation, copy_path_into, drop_target_is_selected, dropped_file_name_for_uri,
         file_clipboard_payload, file_uri_list_payload, is_desktop_entry_file, is_gif_image_path,
-        move_path_into, partition_drop_uris,
+        move_path_into, new_folder_target, partition_drop_uris,
     };
 
     #[test]
@@ -2745,6 +3005,28 @@ mod tests {
             dropped_file_name_for_uri("https://example.com/"),
             "Dropped File"
         );
+    }
+
+    #[test]
+    fn builds_new_folder_target_from_requested_name() {
+        let temp_dir = tempdir().expect("temp dir");
+
+        assert_eq!(
+            new_folder_target(temp_dir.path(), "Projects").expect("valid folder name"),
+            temp_dir.path().join("Projects")
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_new_folder_names() {
+        let temp_dir = tempdir().expect("temp dir");
+        fs::write(temp_dir.path().join("exists"), "already here").expect("existing file");
+
+        assert!(new_folder_target(temp_dir.path(), "").is_err());
+        assert!(new_folder_target(temp_dir.path(), ".").is_err());
+        assert!(new_folder_target(temp_dir.path(), "..").is_err());
+        assert!(new_folder_target(temp_dir.path(), "parent/child").is_err());
+        assert!(new_folder_target(temp_dir.path(), "exists").is_err());
     }
 
     #[test]
