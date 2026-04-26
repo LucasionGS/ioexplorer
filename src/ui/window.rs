@@ -9,8 +9,9 @@ use std::{
 };
 
 use gdk_pixbuf::prelude::*;
-use gio::prelude::AppInfoExt;
+use gio::prelude::{AppInfoExt, FileExt, FileExtManual};
 use gtk::prelude::*;
+use url::Url;
 
 use crate::{
     config::{AppConfig, ViewMode},
@@ -306,8 +307,8 @@ impl AppWindow {
         });
 
         let this = Rc::clone(self);
-        dnd::install_drop_target(&self.stack, move |operation, paths| {
-            this.transfer_dropped_paths(operation, paths);
+        dnd::install_drop_target(&self.stack, move |payload| {
+            this.transfer_dropped_payload(payload);
         });
 
         let this = Rc::clone(self);
@@ -673,8 +674,8 @@ impl AppWindow {
         let entries = self.entries.borrow().clone();
         let folder_drop_handler: views::FolderDropHandler = {
             let this = Rc::clone(self);
-            Rc::new(move |target_dir, operation, paths| {
-                this.transfer_paths_into_target(operation, paths, target_dir);
+            Rc::new(move |target_dir, payload| {
+                this.transfer_drop_payload_into_target(payload, target_dir);
             })
         };
         let list_drag_handler: views::FileDragHandler = {
@@ -776,8 +777,8 @@ impl AppWindow {
 
         if let Ok(target_dir) = uri.local_path() {
             let this = Rc::clone(self);
-            dnd::install_drop_target(&button, move |operation, paths| {
-                this.transfer_paths_into_target(operation, paths, target_dir.clone());
+            dnd::install_drop_target(&button, move |payload| {
+                this.transfer_drop_payload_into_target(payload, target_dir.clone());
             });
         }
 
@@ -1471,7 +1472,7 @@ impl AppWindow {
         }
     }
 
-    fn transfer_dropped_paths(self: &Rc<Self>, operation: dnd::DropOperation, paths: Vec<PathBuf>) {
+    fn transfer_dropped_payload(self: &Rc<Self>, payload: dnd::DropPayload) {
         let target_dir = {
             let current_uri = self.current_uri.borrow();
             match current_uri.local_path() {
@@ -1484,7 +1485,90 @@ impl AppWindow {
             }
         };
 
-        self.transfer_paths_into_target(operation, paths, target_dir);
+        self.transfer_drop_payload_into_target(payload, target_dir);
+    }
+
+    fn transfer_drop_payload_into_target(
+        self: &Rc<Self>,
+        payload: dnd::DropPayload,
+        target_dir: PathBuf,
+    ) {
+        match payload {
+            dnd::DropPayload::LocalPaths { operation, paths } => {
+                self.transfer_paths_into_target(operation, paths, target_dir);
+            }
+            dnd::DropPayload::Uris(uris) => self.import_uri_drop_into_target(uris, target_dir),
+            dnd::DropPayload::Texture(texture) => {
+                self.save_dropped_texture_into_target(texture, target_dir);
+            }
+        }
+    }
+
+    fn import_uri_drop_into_target(self: &Rc<Self>, uris: Vec<String>, target_dir: PathBuf) {
+        let (local_paths, remote_uris) = partition_drop_uris(uris);
+        if local_paths.is_empty() && remote_uris.is_empty() {
+            self.status_label
+                .set_text("Dropped data did not contain importable files");
+            return;
+        }
+
+        if !local_paths.is_empty() {
+            self.transfer_paths_into_target(
+                dnd::DropOperation::Copy,
+                local_paths,
+                target_dir.clone(),
+            );
+        }
+
+        if !remote_uris.is_empty() {
+            self.import_remote_uris_into_target(remote_uris, target_dir);
+        }
+    }
+
+    fn import_remote_uris_into_target(self: &Rc<Self>, uris: Vec<String>, target_dir: PathBuf) {
+        let total = uris.len();
+        self.status_label
+            .set_text(&format!("Importing {total} dropped item(s)..."));
+
+        let this = Rc::clone(self);
+        glib::MainContext::default().spawn_local(async move {
+            let mut imported = 0;
+            let mut last_error = None;
+            for uri in uris {
+                match copy_remote_uri_into_target(&uri, &target_dir).await {
+                    Ok(_) => imported += 1,
+                    Err(error) => last_error = Some(format!("Failed to import {uri}: {error}")),
+                }
+            }
+
+            if imported > 0 {
+                this.status_label
+                    .set_text(&format!("Imported {imported} of {total} dropped item(s)"));
+                this.refresh();
+            }
+
+            if let Some(error) = last_error {
+                this.status_label.set_text(&error);
+            }
+        });
+    }
+
+    fn save_dropped_texture_into_target(
+        self: &Rc<Self>,
+        texture: gtk::gdk::Texture,
+        target_dir: PathBuf,
+    ) {
+        let target = next_available_path(&target_dir.join("Dropped Image.png"));
+        match texture.save_to_png(&target) {
+            Ok(()) => {
+                self.status_label
+                    .set_text(&format!("Imported {}", target.display()));
+                self.refresh();
+            }
+            Err(error) => self
+                .status_label
+                .set_text(&format!("Failed to import dropped image: {error}")),
+        }
     }
 
     fn transfer_paths_into_target(
@@ -1566,6 +1650,121 @@ impl AppWindow {
 
 fn home_uri() -> Option<ProviderUri> {
     directories::UserDirs::new().map(|dirs| ProviderUri::local(dirs.home_dir()))
+}
+
+async fn copy_remote_uri_into_target(uri: &str, target_dir: &Path) -> Result<PathBuf, glib::Error> {
+    let file_name = dropped_file_name_for_uri(uri);
+    let target = next_available_path(&target_dir.join(file_name));
+    let source_file = gio::File::for_uri(uri);
+    let target_file = gio::File::for_path(&target);
+    let (copy, _progress) = source_file.copy_future(
+        &target_file,
+        gio::FileCopyFlags::NONE,
+        glib::Priority::DEFAULT,
+    );
+    copy.await?;
+    Ok(target)
+}
+
+fn partition_drop_uris(uris: Vec<String>) -> (Vec<PathBuf>, Vec<String>) {
+    let mut local_paths = Vec::new();
+    let mut remote_uris = Vec::new();
+
+    for uri in uris {
+        let trimmed = uri.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if let Some(path) = drop_uri_to_local_path(trimmed) {
+            local_paths.push(path);
+        } else if is_remote_drop_uri(trimmed) {
+            remote_uris.push(trimmed.to_string());
+        }
+    }
+
+    (local_paths, remote_uris)
+}
+
+fn drop_uri_to_local_path(uri: &str) -> Option<PathBuf> {
+    if let Ok(url) = Url::parse(uri)
+        && url.scheme() == "file"
+    {
+        return url.to_file_path().ok();
+    }
+
+    let path = PathBuf::from(uri);
+    path.is_absolute().then_some(path)
+}
+
+fn is_remote_drop_uri(uri: &str) -> bool {
+    Url::parse(uri)
+        .map(|url| matches!(url.scheme(), "http" | "https"))
+        .unwrap_or(false)
+}
+
+fn dropped_file_name_for_uri(uri: &str) -> String {
+    let candidate = Url::parse(uri)
+        .ok()
+        .and_then(|url| {
+            url.path_segments().and_then(|segments| {
+                segments
+                    .rev()
+                    .find(|segment| !segment.is_empty())
+                    .map(percent_decode_path_segment)
+            })
+        })
+        .unwrap_or_else(|| "Dropped File".to_string());
+
+    sanitize_dropped_file_name(&candidate, "Dropped File")
+}
+
+fn sanitize_dropped_file_name(name: &str, fallback: &str) -> String {
+    let sanitized = name
+        .chars()
+        .map(|character| match character {
+            '/' | '\\' | '\0' => '_',
+            character => character,
+        })
+        .collect::<String>()
+        .trim()
+        .to_string();
+
+    if sanitized.is_empty() {
+        fallback.to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn percent_decode_path_segment(segment: &str) -> String {
+    let bytes = segment.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let (Some(high), Some(low)) =
+                (hex_digit(bytes[index + 1]), hex_digit(bytes[index + 2]))
+        {
+            decoded.push(high << 4 | low);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
+fn hex_digit(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
 }
 
 type ClearSelectionHandler = Rc<dyn Fn()>;
@@ -2471,8 +2670,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        FileClipboardOperation, copy_path_into, drop_target_is_selected, file_clipboard_payload,
-        file_uri_list_payload, is_desktop_entry_file, is_gif_image_path, move_path_into,
+        FileClipboardOperation, copy_path_into, drop_target_is_selected, dropped_file_name_for_uri,
+        file_clipboard_payload, file_uri_list_payload, is_desktop_entry_file, is_gif_image_path,
+        move_path_into, partition_drop_uris,
     };
 
     #[test]
@@ -2514,6 +2714,36 @@ mod tests {
         assert_eq!(
             file_uri_list_payload(&paths),
             "file:///tmp/a.txt\r\nfile:///tmp/b.txt\r\n"
+        );
+    }
+
+    #[test]
+    fn partitions_local_and_remote_drop_uris() {
+        let (local, remote) = partition_drop_uris(vec![
+            "file:///tmp/My%20Photo.png".to_string(),
+            "/tmp/plain-path.txt".to_string(),
+            "https://example.com/image.jpg".to_string(),
+        ]);
+
+        assert_eq!(
+            local,
+            vec![
+                PathBuf::from("/tmp/My Photo.png"),
+                PathBuf::from("/tmp/plain-path.txt"),
+            ]
+        );
+        assert_eq!(remote, vec!["https://example.com/image.jpg".to_string()]);
+    }
+
+    #[test]
+    fn infers_filename_for_remote_drop_uri() {
+        assert_eq!(
+            dropped_file_name_for_uri("https://example.com/assets/My%20Photo.png?size=large"),
+            "My Photo.png"
+        );
+        assert_eq!(
+            dropped_file_name_for_uri("https://example.com/"),
+            "Dropped File"
         );
     }
 

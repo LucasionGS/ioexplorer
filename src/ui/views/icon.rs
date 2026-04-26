@@ -149,8 +149,8 @@ fn tile_for(
     if item.kind == FileKind::Directory
         && let Ok(target_dir) = item.uri.local_path()
     {
-        dnd::install_drop_target(&tile, move |operation, paths| {
-            folder_drop_handler(target_dir.clone(), operation, paths);
+        dnd::install_drop_target(&tile, move |payload| {
+            folder_drop_handler(target_dir.clone(), payload);
         });
     }
 

@@ -92,8 +92,8 @@ fn row_for(
     if item.kind == FileKind::Directory
         && let Ok(target_dir) = item.uri.local_path()
     {
-        dnd::install_drop_target(&row, move |operation, paths| {
-            folder_drop_handler(target_dir.clone(), operation, paths);
+        dnd::install_drop_target(&row, move |payload| {
+            folder_drop_handler(target_dir.clone(), payload);
         });
     }
 

@@ -11,10 +11,10 @@ use gtk::prelude::*;
 
 use crate::{
     providers::{FileIcon, FileItem, FileKind},
-    ui::dnd::DropOperation,
+    ui::dnd::DropPayload,
 };
 
-pub type FolderDropHandler = Rc<dyn Fn(PathBuf, DropOperation, Vec<PathBuf>)>;
+pub type FolderDropHandler = Rc<dyn Fn(PathBuf, DropPayload)>;
 pub type FileDragHandler = Rc<dyn Fn(usize) -> Vec<PathBuf>>;
 pub type EntrySelectionHandler = Rc<dyn Fn(usize, gtk::gdk::ModifierType)>;
 pub type EntryContextMenuHandler = Rc<dyn Fn(usize, gtk::Widget, f64, f64)>;
