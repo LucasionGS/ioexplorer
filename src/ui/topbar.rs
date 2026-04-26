@@ -15,10 +15,11 @@ pub struct TopBar {
     pub path_entry: gtk::Entry,
     pub list_button: gtk::ToggleButton,
     pub icon_button: gtk::ToggleButton,
+    pub show_hidden_button: gtk::ToggleButton,
 }
 
 impl TopBar {
-    pub fn new(default_view: ViewMode) -> Self {
+    pub fn new(default_view: ViewMode, show_hidden: bool) -> Self {
         let root = gtk::Box::builder()
             .orientation(gtk::Orientation::Horizontal)
             .spacing(8)
@@ -67,6 +68,12 @@ impl TopBar {
             .tooltip_text("Icon View")
             .build();
         icon_button.set_focusable(false);
+        let show_hidden_button = gtk::ToggleButton::builder()
+            .icon_name("view-hidden-symbolic")
+            .tooltip_text("Show Hidden Files")
+            .active(show_hidden)
+            .build();
+        show_hidden_button.set_focusable(false);
 
         match default_view {
             ViewMode::List => list_button.set_active(true),
@@ -82,7 +89,11 @@ impl TopBar {
             toolbar_group(&[refresh_button.upcast_ref(), new_folder_button.upcast_ref()]);
         let utility_group =
             toolbar_group(&[location_button.upcast_ref(), search_button.upcast_ref()]);
-        let view_group = toolbar_group(&[list_button.upcast_ref(), icon_button.upcast_ref()]);
+        let view_group = toolbar_group(&[
+            list_button.upcast_ref(),
+            icon_button.upcast_ref(),
+            show_hidden_button.upcast_ref(),
+        ]);
 
         root.append(&nav_group);
         root.append(&file_group);
@@ -103,6 +114,7 @@ impl TopBar {
             path_entry,
             list_button,
             icon_button,
+            show_hidden_button,
         }
     }
 }

@@ -2,6 +2,7 @@ mod app;
 mod bookmarks;
 mod config;
 mod providers;
+mod state;
 mod theme;
 mod ui;
 

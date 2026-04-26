@@ -17,6 +17,7 @@ use crate::{
     bookmarks,
     config::{AppConfig, ViewMode},
     providers::{FileItem, FileKind, Provider, ProviderError, ProviderUri, local::LocalProvider},
+    state::AppState,
     ui::{computer::ComputerPage, context_menu, dnd, sidebar::Sidebar, topbar::TopBar, views},
 };
 
@@ -39,6 +40,7 @@ pub struct AppWindow {
     forward_stack: RefCell<Vec<ProviderUri>>,
     entries: RefCell<Vec<FileItem>>,
     view_mode: Cell<ViewMode>,
+    show_hidden: Cell<bool>,
     topbar: TopBar,
     sidebar: Sidebar,
     stack: gtk::Stack,
@@ -70,7 +72,8 @@ impl AppWindow {
     pub fn new(app: &gtk::Application, config: AppConfig) -> Rc<Self> {
         let provider = LocalProvider::new();
         let start_uri = home_uri().unwrap_or_else(|| provider.root());
-        let topbar = TopBar::new(config.default_view);
+        let state = AppState::load(&config);
+        let topbar = TopBar::new(state.layout, state.show_hidden);
         let bookmarks = bookmarks::load();
         let sidebar = Sidebar::new(config.sidebar_width, &bookmarks);
         let computer_page = ComputerPage::new();
@@ -194,7 +197,8 @@ impl AppWindow {
             back_stack: RefCell::new(Vec::new()),
             forward_stack: RefCell::new(Vec::new()),
             entries: RefCell::new(Vec::new()),
-            view_mode: Cell::new(config.default_view),
+            view_mode: Cell::new(state.layout),
+            show_hidden: Cell::new(state.show_hidden),
             config,
             topbar,
             sidebar,
@@ -293,6 +297,11 @@ impl AppWindow {
                 this.apply_view_mode(ViewMode::Icon);
             }
         });
+
+        let this = Rc::clone(self);
+        self.topbar
+            .show_hidden_button
+            .connect_toggled(move |button| this.set_show_hidden(button.is_active()));
 
         let this = Rc::clone(self);
         self.sidebar
@@ -517,6 +526,10 @@ impl AppWindow {
                 }
                 gtk::gdk::Key::v | gtk::gdk::Key::V if this.file_shortcuts_enabled() && ctrl => {
                     this.paste_from_clipboard();
+                    glib::Propagation::Stop
+                }
+                gtk::gdk::Key::h | gtk::gdk::Key::H if this.file_shortcuts_enabled() && ctrl => {
+                    this.set_show_hidden(!this.show_hidden.get());
                     glib::Propagation::Stop
                 }
                 gtk::gdk::Key::l if ctrl && this.active_page.get() == AppPage::Files => {
@@ -801,6 +814,10 @@ impl AppWindow {
         self.topbar.location_button.set_sensitive(true);
         self.topbar.list_button.set_sensitive(true);
         self.topbar.icon_button.set_sensitive(true);
+        self.topbar.show_hidden_button.set_sensitive(true);
+        self.topbar
+            .show_hidden_button
+            .set_active(self.show_hidden.get());
         self.update_navigation_buttons();
     }
 
@@ -813,11 +830,12 @@ impl AppWindow {
         self.topbar.location_button.set_sensitive(false);
         self.topbar.list_button.set_sensitive(false);
         self.topbar.icon_button.set_sensitive(false);
+        self.topbar.show_hidden_button.set_sensitive(false);
     }
 
     fn list_visible_items(&self, uri: &ProviderUri) -> Result<Vec<FileItem>, ProviderError> {
         let mut items = self.provider.list(uri)?;
-        if !self.config.show_hidden {
+        if !self.show_hidden.get() {
             items.retain(|item| !item.hidden);
         }
         Ok(items)
@@ -873,18 +891,14 @@ impl AppWindow {
             move || {
                 *this.pending_folder_reload.borrow_mut() = None;
                 if this.is_current_local_path(&watched_path) {
-                    this.reload_current_folder_from_monitor(&watched_path);
+                    this.reload_current_folder_entries();
                 }
             },
         );
         *self.pending_folder_reload.borrow_mut() = Some(source_id);
     }
 
-    fn reload_current_folder_from_monitor(self: &Rc<Self>, watched_path: &Path) {
-        if !self.is_current_local_path(watched_path) {
-            return;
-        }
-
+    fn reload_current_folder_entries(self: &Rc<Self>) {
         let uri = self.current_uri.borrow().clone();
         match self.list_visible_items(&uri) {
             Ok(items) => {
@@ -1043,6 +1057,36 @@ impl AppWindow {
                 self.topbar.list_button.set_active(false);
                 self.topbar.icon_button.set_active(true);
             }
+        }
+        self.save_ui_state();
+    }
+
+    fn set_show_hidden(self: &Rc<Self>, show_hidden: bool) {
+        if self.show_hidden.get() == show_hidden {
+            return;
+        }
+
+        self.show_hidden.set(show_hidden);
+        self.topbar.show_hidden_button.set_active(show_hidden);
+        self.save_ui_state();
+
+        if self.active_page.get() == AppPage::Files {
+            self.reload_current_folder_entries();
+            self.status_label.set_text(if show_hidden {
+                "Showing hidden files"
+            } else {
+                "Hiding hidden files"
+            });
+        }
+    }
+
+    fn save_ui_state(&self) {
+        let state = AppState {
+            layout: self.view_mode.get(),
+            show_hidden: self.show_hidden.get(),
+        };
+        if let Err(error) = state.save() {
+            tracing::warn!(%error, "failed to save UI state");
         }
     }
 
