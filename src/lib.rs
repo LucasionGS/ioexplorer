@@ -4,6 +4,7 @@ pub mod portal;
 
 mod bookmarks;
 mod config;
+mod custom_actions;
 mod providers;
 mod selector;
 mod state;

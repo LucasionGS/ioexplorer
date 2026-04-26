@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf};
+use std::{fs, io, path::PathBuf};
 
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
@@ -21,6 +21,16 @@ pub struct ListColumns {
     pub modified: bool,
 }
 
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CustomActionConfig {
+    pub label: String,
+    pub command: String,
+    #[serde(default)]
+    pub run_on_each: bool,
+    #[serde(default)]
+    pub filters: Vec<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AppConfig {
     pub default_view: ViewMode,
@@ -29,6 +39,8 @@ pub struct AppConfig {
     pub sidebar_width: i32,
     pub custom_css: Option<PathBuf>,
     pub list_columns: ListColumns,
+    #[serde(default)]
+    pub actions: Vec<CustomActionConfig>,
 }
 
 impl Default for AppConfig {
@@ -44,6 +56,7 @@ impl Default for AppConfig {
                 kind: true,
                 modified: true,
             },
+            actions: Vec::new(),
         }
     }
 }
@@ -66,6 +79,19 @@ impl AppConfig {
     pub fn config_path() -> Option<PathBuf> {
         ProjectDirs::from("io.github", "ionix", "ioexplorer")
             .map(|dirs| dirs.config_dir().join("config.toml"))
+    }
+
+    pub fn save(&self) -> io::Result<()> {
+        let Some(path) = Self::config_path() else {
+            return Ok(());
+        };
+
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let contents = toml::to_string_pretty(self).map_err(io::Error::other)?;
+        fs::write(path, contents)
     }
 }
 
@@ -90,6 +116,12 @@ sidebar_width = 210
 size = true
 kind = false
 modified = true
+
+[[actions]]
+label = "Open in Editor"
+command = "code --reuse-window"
+run_on_each = true
+filters = ["*.txt", "*.md"]
 "#,
         )
         .expect("valid config");
@@ -97,5 +129,44 @@ modified = true
         assert_eq!(parsed.default_view, ViewMode::List);
         assert!(parsed.show_hidden);
         assert!(!parsed.list_columns.kind);
+        assert_eq!(parsed.actions.len(), 1);
+        assert_eq!(parsed.actions[0].label, "Open in Editor");
+        assert!(parsed.actions[0].run_on_each);
+    }
+
+    #[test]
+    fn missing_run_on_each_defaults_to_false() {
+        let parsed: CustomActionConfig = toml::from_str(
+            r#"
+label = "Open in Editor"
+command = "code --reuse-window"
+filters = ["*.txt"]
+"#,
+        )
+        .expect("valid action config");
+
+        assert!(!parsed.run_on_each);
+    }
+
+    #[test]
+    fn serializes_actions_as_toml_array() {
+        let config = AppConfig {
+            actions: vec![CustomActionConfig {
+                label: "Open in Editor".to_string(),
+                command: "code --reuse-window".to_string(),
+                run_on_each: true,
+                filters: vec!["*.txt".to_string(), "*.md".to_string()],
+            }],
+            ..Default::default()
+        };
+
+        let contents = toml::to_string_pretty(&config).expect("serializable config");
+
+        assert!(contents.contains("[[actions]]"));
+        assert!(contents.contains("label = \"Open in Editor\""));
+        assert!(contents.contains("run_on_each = true"));
+        assert!(contents.contains("filters = ["));
+        assert!(contents.contains("\"*.txt\""));
+        assert!(contents.contains("\"*.md\""));
     }
 }

@@ -3,6 +3,7 @@ use std::{
     collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
+    process::Command,
     rc::Rc,
     str::FromStr,
     time::{Duration, SystemTime},
@@ -15,13 +16,14 @@ use url::Url;
 
 use crate::{
     bookmarks,
-    config::{AppConfig, ViewMode, clamp_icon_size},
+    config::{AppConfig, CustomActionConfig, ViewMode, clamp_icon_size},
+    custom_actions::{self, ActionTarget},
     providers::{FileItem, FileKind, Provider, ProviderError, ProviderUri, local::LocalProvider},
     state::AppState,
     ui::{
         computer::ComputerPage,
         context_menu, dnd,
-        settings::SettingsPage,
+        settings::{ActionEditorCallbacks, SettingsPage},
         sidebar::{Sidebar, SidebarSection},
         topbar::TopBar,
         views,
@@ -47,6 +49,7 @@ pub struct AppWindow {
     window: gtk::ApplicationWindow,
     provider: LocalProvider,
     config: AppConfig,
+    custom_action_configs: RefCell<Vec<CustomActionConfig>>,
     current_uri: RefCell<ProviderUri>,
     back_stack: RefCell<Vec<ProviderUri>>,
     forward_stack: RefCell<Vec<ProviderUri>>,
@@ -91,7 +94,12 @@ impl AppWindow {
         let bookmarks = bookmarks::load();
         let sidebar = Sidebar::new(config.sidebar_width, &bookmarks);
         let computer_page = ComputerPage::new();
-        let settings_page = SettingsPage::new(state.layout, state.show_hidden, state.icon_size);
+        let settings_page = SettingsPage::new(
+            state.layout,
+            state.show_hidden,
+            state.icon_size,
+            &config.actions,
+        );
         let selected_indices = Rc::new(RefCell::new(BTreeSet::new()));
         let anchor_index = Rc::new(Cell::new(None::<usize>));
         let list_box = gtk::ListBox::builder()
@@ -216,6 +224,7 @@ impl AppWindow {
             view_mode: Cell::new(state.layout),
             show_hidden: Cell::new(state.show_hidden),
             icon_size: Cell::new(state.icon_size),
+            custom_action_configs: RefCell::new(config.actions.clone()),
             config,
             topbar,
             sidebar,
@@ -246,6 +255,7 @@ impl AppWindow {
         });
 
         this.setup_callbacks();
+        this.refresh_action_editor();
         this.apply_view_mode(this.view_mode.get());
         this.load_uri(start_uri, false);
         this
@@ -392,6 +402,11 @@ impl AppWindow {
             .connect_value_changed(move |scale| {
                 this.set_icon_size(scale.value().round() as i32);
             });
+
+        let this = Rc::clone(self);
+        self.settings_page
+            .action_add_button
+            .connect_clicked(move |_| this.show_action_editor_dialog(None));
 
         let this = Rc::clone(self);
         self.computer_page
@@ -1455,6 +1470,13 @@ impl AppWindow {
     }
 
     fn selected_paths(&self) -> Vec<PathBuf> {
+        self.selected_items()
+            .into_iter()
+            .filter_map(|item| item.uri.local_path().ok())
+            .collect()
+    }
+
+    fn selected_items(&self) -> Vec<FileItem> {
         let selected_indices = self
             .selected_indices
             .try_borrow()
@@ -1465,7 +1487,6 @@ impl AppWindow {
         selected_indices
             .into_iter()
             .filter_map(|index| entries.get(index).cloned())
-            .filter_map(|item| item.uri.local_path().ok())
             .collect()
     }
 
@@ -1706,7 +1727,12 @@ impl AppWindow {
             );
         }
 
-        let paths = self.selected_paths();
+        let selected_items = self.selected_items();
+        let paths = selected_items
+            .iter()
+            .filter_map(|item| item.uri.local_path().ok())
+            .collect::<Vec<_>>();
+        let custom_actions = self.custom_menu_actions_for_items(&selected_items);
         let view: Option<context_menu::ViewAction> = self
             .entries
             .borrow()
@@ -1744,7 +1770,16 @@ impl AppWindow {
         };
 
         let Some(context) = context_menu::FileEntryContext::for_paths(
-            paths, view, bookmark, copy, cut, rename, delete,
+            paths,
+            context_menu::FileEntryActions {
+                view,
+                bookmark,
+                copy,
+                cut,
+                rename,
+                delete,
+                custom_actions,
+            },
         ) else {
             return;
         };
@@ -1956,9 +1991,365 @@ impl AppWindow {
             Rc::new(move || this.create_folder())
         };
         let bookmark = self.current_folder_bookmark_action();
-        let context = context_menu::EmptySpaceContext::new(paste, new_folder, bookmark);
+        let custom_actions = self.custom_menu_actions_for_current_folder();
+        let context =
+            context_menu::EmptySpaceContext::new(paste, new_folder, bookmark, custom_actions);
 
         context_menu::ContextMenu::popup_at(&parent, x, y, &context);
+    }
+
+    fn custom_menu_actions_for_items(
+        self: &Rc<Self>,
+        items: &[FileItem],
+    ) -> Vec<context_menu::CustomAction> {
+        let targets = items
+            .iter()
+            .filter_map(ActionTarget::from_item)
+            .collect::<Vec<_>>();
+        self.custom_menu_actions_for_targets(targets)
+    }
+
+    fn custom_menu_actions_for_current_folder(self: &Rc<Self>) -> Vec<context_menu::CustomAction> {
+        let Ok(path) = self.current_uri.borrow().local_path() else {
+            return Vec::new();
+        };
+        self.custom_menu_actions_for_targets(vec![ActionTarget::current_folder(path)])
+    }
+
+    fn custom_menu_actions_for_targets(
+        self: &Rc<Self>,
+        targets: Vec<ActionTarget>,
+    ) -> Vec<context_menu::CustomAction> {
+        let actions = self.custom_action_configs.borrow();
+        custom_actions::matching_actions(&actions, &targets)
+            .into_iter()
+            .map(|action| {
+                let this = Rc::clone(self);
+                let targets = targets.clone();
+                let label = action.label.clone();
+                context_menu::CustomAction::new(
+                    label,
+                    Rc::new(move || this.run_custom_action(action.clone(), targets.clone())),
+                )
+            })
+            .collect()
+    }
+
+    fn refresh_action_editor(self: &Rc<Self>) {
+        let actions = self.custom_action_configs.borrow().clone();
+        let edit: Rc<dyn Fn(usize)> = {
+            let this = Rc::clone(self);
+            Rc::new(move |index| this.show_action_editor_dialog(Some(index)))
+        };
+        let delete: Rc<dyn Fn(usize)> = {
+            let this = Rc::clone(self);
+            Rc::new(move |index| this.delete_custom_action(index))
+        };
+        let move_up: Rc<dyn Fn(usize)> = {
+            let this = Rc::clone(self);
+            Rc::new(move |index| this.move_custom_action(index, -1))
+        };
+        let move_down: Rc<dyn Fn(usize)> = {
+            let this = Rc::clone(self);
+            Rc::new(move |index| this.move_custom_action(index, 1))
+        };
+
+        self.settings_page.set_action_editor(
+            &actions,
+            ActionEditorCallbacks {
+                edit,
+                delete,
+                move_up,
+                move_down,
+            },
+        );
+    }
+
+    fn show_action_editor_dialog(self: &Rc<Self>, edit_index: Option<usize>) {
+        let existing = edit_index.and_then(|index| {
+            self.custom_action_configs
+                .borrow()
+                .get(index)
+                .cloned()
+                .map(|action| (index, action))
+        });
+        if edit_index.is_some() && existing.is_none() {
+            self.status_label.set_text("Action is no longer available");
+            self.refresh_action_editor();
+            return;
+        }
+
+        let existing_action = existing.as_ref().map(|(_, action)| action);
+        let editing_index = existing.as_ref().map(|(index, _)| *index);
+        let is_editing = existing_action.is_some();
+        let title = if is_editing {
+            "Edit Action"
+        } else {
+            "Add Action"
+        };
+        let editor_window = gtk::Window::builder()
+            .title(title)
+            .transient_for(&self.window)
+            .modal(true)
+            .default_width(520)
+            .resizable(false)
+            .build();
+
+        let content = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(10)
+            .margin_top(14)
+            .margin_bottom(14)
+            .margin_start(14)
+            .margin_end(14)
+            .build();
+
+        let label_entry = gtk::Entry::builder()
+            .text(
+                existing_action
+                    .map(|action| action.label.as_str())
+                    .unwrap_or_default(),
+            )
+            .hexpand(true)
+            .build();
+        let command_entry = gtk::Entry::builder()
+            .text(
+                existing_action
+                    .map(|action| action.command.as_str())
+                    .unwrap_or_default(),
+            )
+            .placeholder_text("code --reuse-window {path}")
+            .hexpand(true)
+            .build();
+        let filters_entry = gtk::Entry::builder()
+            .text(existing_action.map(action_filters_text).unwrap_or_default())
+            .placeholder_text("*.txt, folder/, image/*")
+            .hexpand(true)
+            .build();
+        let run_on_each_check = gtk::CheckButton::builder()
+            .label("Run on each")
+            .active(existing_action.is_some_and(|action| action.run_on_each))
+            .tooltip_text("Run the command once per selected entry")
+            .build();
+
+        content.append(&action_editor_field("Label", &label_entry));
+        content.append(&action_editor_field("Command", &command_entry));
+        content.append(&action_editor_help());
+        content.append(&run_on_each_check);
+        content.append(&action_editor_field("Filters", &filters_entry));
+
+        let button_row = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(8)
+            .halign(gtk::Align::End)
+            .build();
+        let cancel_button = gtk::Button::builder().label("Cancel").build();
+        let save_button = gtk::Button::builder()
+            .label(if is_editing { "Save" } else { "Add" })
+            .css_classes(["suggested-action"])
+            .build();
+        button_row.append(&cancel_button);
+        button_row.append(&save_button);
+        content.append(&button_row);
+        editor_window.set_child(Some(&content));
+
+        let this = Rc::clone(self);
+        let submit = Rc::new({
+            let editor_window = editor_window.clone();
+            let label_entry = label_entry.clone();
+            let command_entry = command_entry.clone();
+            let run_on_each_check = run_on_each_check.clone();
+            let filters_entry = filters_entry.clone();
+            move || {
+                let label = label_entry.text().trim().to_string();
+                if label.is_empty() {
+                    this.status_label.set_text("Action label cannot be empty");
+                    return;
+                }
+
+                let command = command_entry.text().trim().to_string();
+                if command.is_empty() {
+                    this.status_label.set_text("Action command cannot be empty");
+                    return;
+                }
+
+                let action = CustomActionConfig {
+                    label: label.clone(),
+                    command,
+                    run_on_each: run_on_each_check.is_active(),
+                    filters: parse_action_filters(filters_entry.text().as_str()),
+                };
+                let mut actions = this.custom_action_configs.borrow().clone();
+                let success = if let Some(index) = editing_index {
+                    if index >= actions.len() {
+                        this.status_label.set_text("Action is no longer available");
+                        this.refresh_action_editor();
+                        return;
+                    }
+                    actions[index] = action;
+                    format!("Saved action {label}")
+                } else {
+                    actions.push(action);
+                    format!("Added action {label}")
+                };
+
+                if this.save_custom_action_changes(actions, success) {
+                    editor_window.close();
+                }
+            }
+        });
+
+        let submit_from_button = Rc::clone(&submit);
+        save_button.connect_clicked(move |_| submit_from_button());
+        let submit_from_label = Rc::clone(&submit);
+        label_entry.connect_activate(move |_| submit_from_label());
+        let submit_from_command = Rc::clone(&submit);
+        command_entry.connect_activate(move |_| submit_from_command());
+        filters_entry.connect_activate(move |_| submit());
+
+        let cancel_window = editor_window.clone();
+        cancel_button.connect_clicked(move |_| {
+            cancel_window.close();
+        });
+
+        let esc_controller = gtk::EventControllerKey::new();
+        let esc_window = editor_window.clone();
+        esc_controller.connect_key_pressed(move |_, key, _, _| {
+            if key == gtk::gdk::Key::Escape {
+                esc_window.close();
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
+            }
+        });
+        editor_window.add_controller(esc_controller);
+
+        editor_window.present();
+        label_entry.grab_focus();
+        if is_editing {
+            label_entry.select_region(0, -1);
+        }
+    }
+
+    fn delete_custom_action(self: &Rc<Self>, index: usize) {
+        let mut actions = self.custom_action_configs.borrow().clone();
+        if index >= actions.len() {
+            self.status_label.set_text("Action is no longer available");
+            self.refresh_action_editor();
+            return;
+        }
+
+        let removed = actions.remove(index);
+        self.save_custom_action_changes(actions, format!("Deleted action {}", removed.label));
+    }
+
+    fn move_custom_action(self: &Rc<Self>, index: usize, offset: isize) {
+        let mut actions = self.custom_action_configs.borrow().clone();
+        if actions.is_empty() || index >= actions.len() {
+            self.status_label.set_text("Action is no longer available");
+            self.refresh_action_editor();
+            return;
+        }
+
+        let Some(next_index) = index.checked_add_signed(offset) else {
+            return;
+        };
+        if next_index >= actions.len() {
+            return;
+        }
+
+        actions.swap(index, next_index);
+        self.save_custom_action_changes(actions, "Reordered actions".to_string());
+    }
+
+    fn save_custom_action_changes(
+        self: &Rc<Self>,
+        next_actions: Vec<CustomActionConfig>,
+        success: String,
+    ) -> bool {
+        let mut config = self.config.clone();
+        config.actions = next_actions.clone();
+
+        match config.save() {
+            Ok(()) => {
+                *self.custom_action_configs.borrow_mut() = next_actions;
+                self.refresh_action_editor();
+                self.status_label.set_text(&success);
+                true
+            }
+            Err(error) => {
+                self.status_label
+                    .set_text(&format!("Failed to save actions: {error}"));
+                false
+            }
+        }
+    }
+
+    fn run_custom_action(&self, action: CustomActionConfig, targets: Vec<ActionTarget>) {
+        if targets.is_empty() {
+            self.status_label.set_text("No item selected");
+            return;
+        }
+
+        let current_dir = self.current_uri.borrow().local_path().ok();
+        let command = action.command.trim();
+        let invocations = if action.run_on_each {
+            targets
+                .iter()
+                .cloned()
+                .map(|target| vec![target])
+                .collect::<Vec<_>>()
+        } else {
+            vec![targets]
+        };
+        let target_count = invocations.iter().map(Vec::len).sum::<usize>();
+        let mut launched = 0;
+        let mut last_error = None;
+
+        for invocation_targets in &invocations {
+            let command_line = custom_actions::action_command_line(command, invocation_targets);
+            let mut command = Command::new("sh");
+            command
+                .arg("-c")
+                .arg(&command_line)
+                .arg("ioexplorer-action");
+            if let Some(current_dir) = &current_dir {
+                command.current_dir(current_dir);
+            }
+
+            match command.spawn() {
+                Ok(mut child) => {
+                    launched += 1;
+                    let label = action.label.clone();
+                    std::thread::spawn(move || {
+                        if let Err(error) = child.wait() {
+                            tracing::warn!(%error, action = %label, "custom action process failed");
+                        }
+                    });
+                }
+                Err(error) => last_error = Some(error),
+            }
+        }
+
+        if launched == invocations.len() {
+            self.status_label.set_text(&format!(
+                "Running {} for {} item(s)",
+                action.label, target_count
+            ));
+        } else if launched > 0 {
+            self.status_label.set_text(&format!(
+                "Running {} for {} command(s); {} failed",
+                action.label,
+                launched,
+                invocations.len() - launched
+            ));
+        } else if let Some(error) = last_error {
+            self.status_label
+                .set_text(&format!("Failed to run {}: {error}", action.label));
+        } else {
+            self.status_label
+                .set_text(&format!("Failed to run {}", action.label));
+        }
     }
 
     fn show_sidebar_bookmark_context_menu(
@@ -3213,6 +3604,84 @@ fn is_previewable_image_file(item: &FileItem) -> bool {
     item.kind == FileKind::File
         && views::icon::is_previewable_image(&item.name)
         && item.uri.local_path().is_ok()
+}
+
+fn action_editor_field(label: &str, control: &impl IsA<gtk::Widget>) -> gtk::Box {
+    let field = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(4)
+        .build();
+    field.append(&gtk::Label::builder().label(label).xalign(0.0).build());
+    field.append(control);
+    field
+}
+
+fn action_editor_help() -> gtk::Box {
+    let help = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(5)
+        .css_classes(["action-editor-help"])
+        .build();
+
+    help.append(
+        &gtk::Label::builder()
+            .label("Command variables")
+            .xalign(0.0)
+            .css_classes(["settings-row-label"])
+            .build(),
+    );
+    help.append(
+        &gtk::Label::builder()
+            .label("Use variables directly in commands. With Run on each off, path variables expand to all selected entries. Without variables, selected paths are appended as final arguments.")
+            .xalign(0.0)
+            .wrap(true)
+            .wrap_mode(gtk::pango::WrapMode::WordChar)
+            .css_classes(["settings-value"])
+            .build(),
+    );
+
+    for variable in custom_actions::ACTION_COMMAND_VARIABLES {
+        help.append(&action_variable_row(variable));
+    }
+
+    help
+}
+
+fn action_variable_row(variable: &custom_actions::ActionCommandVariable) -> gtk::Box {
+    let row = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .css_classes(["action-editor-variable-row"])
+        .build();
+    row.append(
+        &gtk::Label::builder()
+            .label(variable.placeholder)
+            .xalign(0.0)
+            .width_chars(12)
+            .css_classes(["action-editor-variable"])
+            .build(),
+    );
+    row.append(
+        &gtk::Label::builder()
+            .label(variable.description)
+            .xalign(0.0)
+            .hexpand(true)
+            .css_classes(["settings-value"])
+            .build(),
+    );
+    row
+}
+
+fn action_filters_text(action: &CustomActionConfig) -> String {
+    action.filters.join(", ")
+}
+
+fn parse_action_filters(text: &str) -> Vec<String> {
+    text.split(',')
+        .map(str::trim)
+        .filter(|filter| !filter.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 fn reveal_folder_for_path(path: &Path) -> PathBuf {

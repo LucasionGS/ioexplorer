@@ -13,7 +13,8 @@ It is developed with customization and ricing in mind, as well as efficiency nav
 - Native GTK/GDK drag-and-drop for local files using standard file-list/URI data.
 - XDG config loading and optional user CSS for distribution theme customization.
 - Desktop integration metadata and packaging scaffolds.
-- Graphical settings page with General, View, and Actions tabs.
+- Graphical settings page with General, View, and an Actions editor.
+- Custom configurable context-menu actions for files and folders.
 
 ## Dependencies
 
@@ -124,11 +125,32 @@ custom_css = "/home/user/.config/ioexplorer/theme.css"
 size = true
 kind = true
 modified = true
+
+[[actions]]
+label = "Open in Editor"
+command = "code --reuse-window"
+run_on_each = false
+filters = ["*.txt", "*.md"]
+
+[[actions]]
+label = "Open Terminal Here"
+command = "kitty --working-directory"
+filters = ["folder/"]
+
+[[actions]]
+label = "Preview Image Metadata"
+command = "exiftool {path}"
+run_on_each = true
+filters = ["image/*"]
 ```
 
 The bundled CSS lives in `data/styles/ioexplorer.css`. Distribution maintainers can override or layer styling through `custom_css`.
 
 In icon view, use Ctrl+scroll to resize file entries. The chosen icon size is saved in `~/.local/state/ioexplorer/state` and overrides the configured `icon_size` on later launches.
+
+Custom actions can also be added, edited, deleted, reordered, and configured with Run on each from Settings -> Actions. Changes are saved back to `config.toml` and take effect immediately for context menus. The editor shows command variables that can be used in custom commands: `{path}`, `{name}`, `{parent}`, `{stem}`, `{extension}`, `{uri}`, and `{kind}`.
+
+Custom actions appear in file, folder, and empty-folder-space context menus when every selected target matches at least one configured filter. Empty `filters` match everything. By default, IoExplorer runs the configured command once with all selected or current paths expanded as shell-quoted arguments, using the current folder as the working directory. If a command does not use any variables, the selected paths are appended as final arguments. If variables are used, placeholders such as `{path}` expand to all selected entries. Set `run_on_each = true` to run the command once per entry instead. Supported filters include glob patterns such as `*.txt`, the folder keyword `folder/`, and common type groups such as `image/*`, `video/*`, `audio/*`, and `text/*`.
 
 ## Roadmap
 
@@ -137,7 +159,3 @@ In icon view, use Ctrl+scroll to resize file entries. The chosen icon size is sa
 - Filtering.
 - Network/provider plugins.
 - Theme editor.
-- Custom configurable actions on files and folders
-  - Actions are defined with a command that gets run with the file/folder path as an argument
-  - Filter allows these actions to only show up for certain file types or folders
-    - Filters are defined with glob patterns and special keywords like `folder/` (Which matches folders and current directory), but generally should be flexible enough to support things like `*.txt` or `image/*` (Which matches common image formats)

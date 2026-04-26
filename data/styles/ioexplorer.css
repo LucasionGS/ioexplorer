@@ -213,6 +213,54 @@ window {
   color: alpha(currentColor, 0.72);
 }
 
+.settings-actions-list {
+  background: transparent;
+}
+
+.settings-actions-list row {
+  border-radius: 6px;
+  margin: 2px 0;
+}
+
+.settings-action-row {
+  padding: 9px 10px;
+}
+
+.settings-action-details {
+  min-width: 0;
+}
+
+.settings-action-title {
+  font-weight: 700;
+}
+
+.settings-action-command {
+  color: alpha(currentColor, 0.82);
+  font-family: monospace;
+}
+
+.settings-action-controls button {
+  min-height: 30px;
+  min-width: 30px;
+  padding: 0;
+  border-radius: 6px;
+}
+
+.action-editor-help {
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: alpha(currentColor, 0.06);
+}
+
+.action-editor-variable-row {
+  min-height: 20px;
+}
+
+.action-editor-variable {
+  font-family: monospace;
+  font-weight: 700;
+}
+
 .content-grid flowboxchild {
   border-radius: 6px;
 }
