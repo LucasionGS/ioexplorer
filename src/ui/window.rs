@@ -24,6 +24,9 @@ use crate::{
 const MOUSE_BUTTON_BACK: u32 = 8;
 const MOUSE_BUTTON_FORWARD: u32 = 9;
 const FOLDER_MONITOR_DEBOUNCE_MS: u64 = 250;
+const IMAGE_VIEWER_MIN_ZOOM: f64 = 1.0;
+const IMAGE_VIEWER_MAX_ZOOM: f64 = 8.0;
+const IMAGE_VIEWER_ZOOM_STEP: f64 = 1.15;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AppPage {
@@ -1538,23 +1541,37 @@ impl AppWindow {
             .vexpand(true)
             .css_classes(["image-viewer-picture"])
             .build();
+        let image_scroll = gtk::ScrolledWindow::builder()
+            .child(&picture)
+            .hexpand(true)
+            .vexpand(true)
+            .hscrollbar_policy(gtk::PolicyType::Automatic)
+            .vscrollbar_policy(gtk::PolicyType::Automatic)
+            .css_classes(["image-viewer-scroll"])
+            .build();
 
         root.append(&toolbar);
-        root.append(&picture);
+        root.append(&image_scroll);
         viewer_window.set_child(Some(&root));
 
         let images = Rc::new(images);
         let current_index = Rc::new(Cell::new(start_index));
+        let image_zoom = Rc::new(Cell::new(IMAGE_VIEWER_MIN_ZOOM));
         let animation_source = Rc::new(RefCell::new(None::<glib::SourceId>));
+        install_image_viewer_zoom_controls(&picture, &image_scroll, Rc::clone(&image_zoom));
         let update_view: Rc<dyn Fn()> = Rc::new({
             let viewer_window = viewer_window.clone();
             let picture = picture.clone();
+            let image_scroll = image_scroll.clone();
             let title_label = title_label.clone();
             let counter_label = counter_label.clone();
             let images = Rc::clone(&images);
             let current_index = Rc::clone(&current_index);
+            let image_zoom = Rc::clone(&image_zoom);
             let animation_source = Rc::clone(&animation_source);
             move || {
+                image_zoom.set(IMAGE_VIEWER_MIN_ZOOM);
+                apply_image_viewer_zoom(&picture, &image_scroll, image_zoom.get());
                 update_image_viewer(
                     &viewer_window,
                     &picture,
@@ -1598,6 +1615,9 @@ impl AppWindow {
         let previous_from_key = Rc::clone(&previous_image);
         let next_from_key = Rc::clone(&next_image);
         let close_window = viewer_window.clone();
+        let key_picture = picture.clone();
+        let key_image_scroll = image_scroll.clone();
+        let key_image_zoom = Rc::clone(&image_zoom);
         key_controller.connect_key_pressed(move |_, key, _, _| match key {
             gtk::gdk::Key::Left | gtk::gdk::Key::KP_Left => {
                 previous_from_key();
@@ -1611,12 +1631,42 @@ impl AppWindow {
                 close_window.close();
                 glib::Propagation::Stop
             }
+            gtk::gdk::Key::plus | gtk::gdk::Key::equal | gtk::gdk::Key::KP_Add => {
+                zoom_image_viewer(
+                    &key_picture,
+                    &key_image_scroll,
+                    &key_image_zoom,
+                    IMAGE_VIEWER_ZOOM_STEP,
+                    None,
+                );
+                glib::Propagation::Stop
+            }
+            gtk::gdk::Key::minus | gtk::gdk::Key::underscore | gtk::gdk::Key::KP_Subtract => {
+                zoom_image_viewer(
+                    &key_picture,
+                    &key_image_scroll,
+                    &key_image_zoom,
+                    1.0 / IMAGE_VIEWER_ZOOM_STEP,
+                    None,
+                );
+                glib::Propagation::Stop
+            }
             _ => glib::Propagation::Proceed,
         });
         viewer_window.add_controller(key_controller);
 
         update_view();
         viewer_window.present();
+        let initial_picture = picture.clone();
+        let initial_image_scroll = image_scroll.clone();
+        let initial_image_zoom = Rc::clone(&image_zoom);
+        glib::idle_add_local_once(move || {
+            apply_image_viewer_zoom(
+                &initial_picture,
+                &initial_image_scroll,
+                initial_image_zoom.get(),
+            )
+        });
         viewer_window.grab_focus();
     }
 
@@ -2926,6 +2976,187 @@ fn image_viewer_navigation(
         ));
         update_view();
     })
+}
+
+fn install_image_viewer_zoom_controls(
+    picture: &gtk::Picture,
+    image_scroll: &gtk::ScrolledWindow,
+    image_zoom: Rc<Cell<f64>>,
+) {
+    let pointer_anchor = Rc::new(Cell::new(None::<(f64, f64)>));
+    let motion_controller = gtk::EventControllerMotion::new();
+    motion_controller.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let enter_pointer_anchor = Rc::clone(&pointer_anchor);
+    motion_controller.connect_enter(move |_, x, y| enter_pointer_anchor.set(Some((x, y))));
+    let motion_pointer_anchor = Rc::clone(&pointer_anchor);
+    motion_controller.connect_motion(move |_, x, y| motion_pointer_anchor.set(Some((x, y))));
+    let leave_pointer_anchor = Rc::clone(&pointer_anchor);
+    motion_controller.connect_leave(move |_| leave_pointer_anchor.set(None));
+    image_scroll.add_controller(motion_controller);
+
+    let scroll_controller =
+        gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+    scroll_controller.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let scroll_picture = picture.clone();
+    let scroll_image_scroll = image_scroll.clone();
+    let scroll_image_zoom = Rc::clone(&image_zoom);
+    let scroll_pointer_anchor = Rc::clone(&pointer_anchor);
+    scroll_controller.connect_scroll(move |_, _, delta_y| {
+        if delta_y == 0.0 {
+            return glib::Propagation::Proceed;
+        }
+
+        let factor = if delta_y < 0.0 {
+            IMAGE_VIEWER_ZOOM_STEP
+        } else {
+            1.0 / IMAGE_VIEWER_ZOOM_STEP
+        };
+        zoom_image_viewer(
+            &scroll_picture,
+            &scroll_image_scroll,
+            &scroll_image_zoom,
+            factor,
+            scroll_pointer_anchor.get(),
+        );
+        glib::Propagation::Stop
+    });
+    image_scroll.add_controller(scroll_controller);
+
+    let pan_origin = Rc::new(Cell::new(None::<(f64, f64)>));
+    let drag = gtk::GestureDrag::new();
+    drag.set_button(gtk::gdk::BUTTON_PRIMARY);
+    drag.set_propagation_phase(gtk::PropagationPhase::Capture);
+
+    let begin_image_scroll = image_scroll.clone();
+    let begin_pan_origin = Rc::clone(&pan_origin);
+    drag.connect_drag_begin(move |drag, _, _| {
+        if !image_viewer_can_pan(&begin_image_scroll) {
+            begin_pan_origin.set(None);
+            drag.set_state(gtk::EventSequenceState::Denied);
+            return;
+        }
+
+        let horizontal = begin_image_scroll.hadjustment();
+        let vertical = begin_image_scroll.vadjustment();
+        begin_pan_origin.set(Some((horizontal.value(), vertical.value())));
+        drag.set_state(gtk::EventSequenceState::Claimed);
+    });
+
+    let update_image_scroll = image_scroll.clone();
+    let update_pan_origin = Rc::clone(&pan_origin);
+    drag.connect_drag_update(move |_, offset_x, offset_y| {
+        let Some((start_x, start_y)) = update_pan_origin.get() else {
+            return;
+        };
+
+        let horizontal = update_image_scroll.hadjustment();
+        let vertical = update_image_scroll.vadjustment();
+        set_adjustment_value(&horizontal, start_x - offset_x);
+        set_adjustment_value(&vertical, start_y - offset_y);
+    });
+
+    let end_pan_origin = Rc::clone(&pan_origin);
+    drag.connect_drag_end(move |_, _, _| end_pan_origin.set(None));
+    picture.add_controller(drag);
+}
+
+fn zoom_image_viewer(
+    picture: &gtk::Picture,
+    image_scroll: &gtk::ScrolledWindow,
+    image_zoom: &Rc<Cell<f64>>,
+    factor: f64,
+    anchor: Option<(f64, f64)>,
+) {
+    let current_zoom = image_zoom.get();
+    let next_zoom = (current_zoom * factor).clamp(IMAGE_VIEWER_MIN_ZOOM, IMAGE_VIEWER_MAX_ZOOM);
+    if (next_zoom - current_zoom).abs() < f64::EPSILON {
+        return;
+    }
+
+    let horizontal = image_scroll.hadjustment();
+    let vertical = image_scroll.vadjustment();
+    let (old_width, old_height) = image_viewer_zoom_size(image_scroll, current_zoom);
+    let (new_width, new_height) = image_viewer_zoom_size(image_scroll, next_zoom);
+    let (viewport_x, viewport_y) = image_viewer_zoom_anchor(anchor, &horizontal, &vertical);
+    let content_x = horizontal.value() + viewport_x;
+    let content_y = vertical.value() + viewport_y;
+
+    image_zoom.set(next_zoom);
+    apply_image_viewer_zoom(picture, image_scroll, next_zoom);
+
+    let horizontal_target = scaled_viewer_position(content_x, old_width, new_width) - viewport_x;
+    let vertical_target = scaled_viewer_position(content_y, old_height, new_height) - viewport_y;
+    glib::idle_add_local_once(move || {
+        set_adjustment_value(&horizontal, horizontal_target);
+        set_adjustment_value(&vertical, vertical_target);
+    });
+}
+
+fn apply_image_viewer_zoom(picture: &gtk::Picture, image_scroll: &gtk::ScrolledWindow, zoom: f64) {
+    if image_scroll.width() <= 1 || image_scroll.height() <= 1 {
+        picture.set_size_request(-1, -1);
+        return;
+    }
+
+    let (width, height) = image_viewer_zoom_size(image_scroll, zoom);
+    picture.set_size_request(
+        width.round().max(1.0) as i32,
+        height.round().max(1.0) as i32,
+    );
+}
+
+fn image_viewer_zoom_size(image_scroll: &gtk::ScrolledWindow, zoom: f64) -> (f64, f64) {
+    (
+        image_viewer_viewport_width(image_scroll) * zoom,
+        image_viewer_viewport_height(image_scroll) * zoom,
+    )
+}
+
+fn image_viewer_zoom_anchor(
+    anchor: Option<(f64, f64)>,
+    horizontal: &gtk::Adjustment,
+    vertical: &gtk::Adjustment,
+) -> (f64, f64) {
+    let fallback_x = horizontal.page_size() / 2.0;
+    let fallback_y = vertical.page_size() / 2.0;
+    let Some((x, y)) = anchor else {
+        return (fallback_x, fallback_y);
+    };
+
+    (
+        x.clamp(0.0, horizontal.page_size().max(0.0)),
+        y.clamp(0.0, vertical.page_size().max(0.0)),
+    )
+}
+
+fn image_viewer_viewport_width(image_scroll: &gtk::ScrolledWindow) -> f64 {
+    f64::from(image_scroll.width().max(1))
+}
+
+fn image_viewer_viewport_height(image_scroll: &gtk::ScrolledWindow) -> f64 {
+    f64::from(image_scroll.height().max(1))
+}
+
+fn scaled_viewer_position(position: f64, old_size: f64, new_size: f64) -> f64 {
+    if old_size <= 0.0 {
+        return position;
+    }
+
+    position * (new_size / old_size)
+}
+
+fn image_viewer_can_pan(image_scroll: &gtk::ScrolledWindow) -> bool {
+    adjustment_can_scroll(&image_scroll.hadjustment())
+        || adjustment_can_scroll(&image_scroll.vadjustment())
+}
+
+fn adjustment_can_scroll(adjustment: &gtk::Adjustment) -> bool {
+    adjustment.upper() - adjustment.page_size() > adjustment.lower()
+}
+
+fn set_adjustment_value(adjustment: &gtk::Adjustment, value: f64) {
+    let maximum = (adjustment.upper() - adjustment.page_size()).max(adjustment.lower());
+    adjustment.set_value(value.clamp(adjustment.lower(), maximum));
 }
 
 fn update_image_viewer(

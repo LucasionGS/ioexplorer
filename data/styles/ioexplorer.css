@@ -234,6 +234,11 @@ window {
   min-width: 64px;
 }
 
+.image-viewer-scroll,
+.image-viewer-scroll > viewport {
+  background: rgba(0, 0, 0, 0.32);
+}
+
 .image-viewer-picture {
   padding: 12px;
   background: rgba(0, 0, 0, 0.32);
