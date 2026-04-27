@@ -3572,7 +3572,9 @@ fn install_empty_space_click(
         }
         drop(state);
 
-        if !hit_widget_type(&hit_overlay, x, y, item_type) {
+        if !hit_widget_type(&hit_overlay, x, y, item_type)
+            && !hit_widget_type(&hit_overlay, x, y, gtk::Scrollbar::static_type())
+        {
             clear_selection();
         }
     });
@@ -3646,7 +3648,9 @@ fn install_rubberband<S>(
     let begin_rubberband = rubberband.clone();
     let begin_state = Rc::clone(&state);
     drag.connect_drag_begin(move |drag, x, y| {
-        if hit_widget_type(&begin_overlay, x, y, item_type) {
+        if hit_widget_type(&begin_overlay, x, y, item_type)
+            || hit_widget_type(&begin_overlay, x, y, gtk::Scrollbar::static_type())
+        {
             if let Ok(mut state) = begin_state.try_borrow_mut() {
                 state.active = false;
                 state.has_dragged = false;
