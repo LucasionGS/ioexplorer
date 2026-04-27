@@ -20,10 +20,11 @@ use crate::{
     custom_actions::{self, ActionTarget},
     providers::{FileItem, FileKind, Provider, ProviderError, ProviderUri, local::LocalProvider},
     state::AppState,
+    theme,
     ui::{
         computer::ComputerPage,
         context_menu, dnd,
-        settings::{ActionEditorCallbacks, SettingsPage},
+        settings::{ActionEditorCallbacks, SettingsPage, ThemeColorControl},
         sidebar::{Sidebar, SidebarSection},
         topbar::TopBar,
         views,
@@ -65,7 +66,7 @@ impl FileTab {
 pub struct AppWindow {
     window: gtk::ApplicationWindow,
     provider: LocalProvider,
-    config: AppConfig,
+    config: RefCell<AppConfig>,
     custom_action_configs: RefCell<Vec<CustomActionConfig>>,
     current_uri: RefCell<ProviderUri>,
     back_stack: RefCell<Vec<ProviderUri>>,
@@ -80,6 +81,9 @@ pub struct AppWindow {
     stack: gtk::Stack,
     computer_page: ComputerPage,
     settings_page: SettingsPage,
+    theme_css_path: RefCell<Option<PathBuf>>,
+    live_theme: Option<theme::LiveTheme>,
+    theme_editor_updating: Cell<bool>,
     list_box: gtk::ListBox,
     flow_box: gtk::FlowBox,
     grid_scroll: gtk::ScrolledWindow,
@@ -114,12 +118,17 @@ impl AppWindow {
         let bookmarks = bookmarks::load();
         let sidebar = Sidebar::new(config.sidebar_width, &bookmarks);
         let computer_page = ComputerPage::new();
+        let theme_css_path = theme::effective_custom_css_path(&config);
+        let theme_settings = theme::load_generated_settings(theme_css_path.as_deref());
         let settings_page = SettingsPage::new(
             state.layout,
             state.show_hidden,
             state.icon_size,
+            &theme_settings,
+            theme_css_path.as_deref(),
             &config.actions,
         );
+        let live_theme = theme::LiveTheme::new();
         let selected_indices = Rc::new(RefCell::new(BTreeSet::new()));
         let anchor_index = Rc::new(Cell::new(None::<usize>));
         let list_box = gtk::ListBox::builder()
@@ -260,13 +269,16 @@ impl AppWindow {
             show_hidden: Cell::new(state.show_hidden),
             icon_size: Cell::new(state.icon_size),
             custom_action_configs: RefCell::new(config.actions.clone()),
-            config,
+            config: RefCell::new(config),
             topbar,
             sidebar,
             tab_bar,
             stack,
             computer_page,
             settings_page,
+            theme_css_path: RefCell::new(theme_css_path),
+            live_theme,
+            theme_editor_updating: Cell::new(false),
             list_box,
             flow_box,
             grid_scroll,
@@ -440,6 +452,8 @@ impl AppWindow {
             .connect_value_changed(move |scale| {
                 this.set_icon_size(scale.value().round() as i32);
             });
+
+        self.install_theme_editor_callbacks();
 
         let this = Rc::clone(self);
         self.settings_page
@@ -745,6 +759,97 @@ impl AppWindow {
 
     fn file_shortcuts_enabled(&self) -> bool {
         self.active_page.get() == AppPage::Files && !self.topbar.path_entry.has_focus()
+    }
+
+    fn install_theme_editor_callbacks(self: &Rc<Self>) {
+        let connect_color = |button: &ThemeColorControl| {
+            let this = Rc::clone(self);
+            button.connect_rgba_changed(move || this.update_theme_from_editor());
+        };
+        connect_color(&self.settings_page.theme_window_background_button);
+        connect_color(&self.settings_page.theme_panel_background_button);
+        connect_color(&self.settings_page.theme_muted_background_button);
+        connect_color(&self.settings_page.theme_accent_button);
+        connect_color(&self.settings_page.theme_selection_button);
+        connect_color(&self.settings_page.theme_text_button);
+        connect_color(&self.settings_page.theme_border_button);
+
+        let this = Rc::clone(self);
+        self.settings_page
+            .theme_radius_scale
+            .connect_value_changed(move |scale| {
+                let radius = scale.value().round() as i32;
+                this.settings_page
+                    .theme_radius_value_label
+                    .set_text(&format!("{radius}px"));
+                this.update_theme_from_editor();
+            });
+
+        let this = Rc::clone(self);
+        self.settings_page
+            .theme_reset_button
+            .connect_clicked(move |_| this.reset_theme_editor());
+    }
+
+    fn update_theme_from_editor(self: &Rc<Self>) {
+        if self.theme_editor_updating.get() {
+            return;
+        }
+
+        let settings = self.settings_page.theme_settings();
+        let Some(path) = self
+            .theme_css_path
+            .borrow()
+            .clone()
+            .or_else(theme::default_custom_css_path)
+        else {
+            self.status_label
+                .set_text("Unable to locate the config directory for theme CSS");
+            return;
+        };
+
+        match theme::save_generated_theme(&path, &settings) {
+            Ok(css) => {
+                if let Some(live_theme) = &self.live_theme {
+                    live_theme.apply_css(&css);
+                }
+
+                match self.save_theme_css_path(path.clone()) {
+                    Ok(()) => {
+                        *self.theme_css_path.borrow_mut() = Some(path.clone());
+                        self.settings_page.set_theme_css_path(Some(&path));
+                        self.status_label.set_text("Theme updated");
+                    }
+                    Err(error) => self
+                        .status_label
+                        .set_text(&format!("Theme updated, but config save failed: {error}")),
+                }
+            }
+            Err(error) => self
+                .status_label
+                .set_text(&format!("Failed to save theme CSS: {error}")),
+        }
+    }
+
+    fn save_theme_css_path(&self, path: PathBuf) -> std::io::Result<()> {
+        let mut config = self.config.borrow().clone();
+        if config.custom_css.as_ref() == Some(&path) {
+            return Ok(());
+        }
+
+        config.custom_css = Some(path);
+        config.save()?;
+        *self.config.borrow_mut() = config;
+        Ok(())
+    }
+
+    fn reset_theme_editor(self: &Rc<Self>) {
+        let settings = theme::ThemeSettings::default();
+        self.theme_editor_updating.set(true);
+        self.settings_page.set_theme_settings(&settings);
+        self.theme_editor_updating.set(false);
+        self.update_theme_from_editor();
+        self.status_label.set_text("Theme reset");
     }
 
     fn active_tab_uri(&self) -> ProviderUri {
@@ -1348,6 +1453,7 @@ impl AppWindow {
             &self.list_box,
             &self.flow_box,
         );
+        let list_columns = self.config.borrow().list_columns.clone();
         let context_menu_handler: views::EntryContextMenuHandler = {
             let this = Rc::clone(self);
             Rc::new(move |index, parent, x, y| this.show_file_context_menu(index, parent, x, y))
@@ -1356,7 +1462,7 @@ impl AppWindow {
         views::list::populate(
             &self.list_box,
             &entries,
-            &self.config.list_columns,
+            &list_columns,
             folder_drop_handler.clone(),
             list_drag_handler,
             selection_handler.clone(),
@@ -2509,11 +2615,12 @@ impl AppWindow {
         next_actions: Vec<CustomActionConfig>,
         success: String,
     ) -> bool {
-        let mut config = self.config.clone();
+        let mut config = self.config.borrow().clone();
         config.actions = next_actions.clone();
 
         match config.save() {
             Ok(()) => {
+                *self.config.borrow_mut() = config;
                 *self.custom_action_configs.borrow_mut() = next_actions;
                 self.refresh_action_editor();
                 self.status_label.set_text(&success);

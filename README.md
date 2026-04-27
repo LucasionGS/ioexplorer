@@ -14,8 +14,9 @@ It is developed with customization and ricing in mind, as well as efficiency nav
 - Native GTK/GDK drag-and-drop for local files using standard file-list/URI data.
 - XDG config loading and optional user CSS for distribution theme customization.
 - Desktop integration metadata and packaging scaffolds.
-- Graphical settings page with General, View, and an Actions editor.
+- Graphical settings page with General, View, Theme, and an Actions editor.
 - Custom configurable context-menu actions for files and folders.
+- Theme editor with live UI updates and managed local CSS generation.
 
 ## Dependencies
 
@@ -147,6 +148,16 @@ filters = ["image/*"]
 
 The bundled CSS lives in `data/styles/ioexplorer.css`. Distribution maintainers can override or layer styling through `custom_css`.
 
+Settings -> Theme writes generated CSS to the configured `custom_css` path. Theme color controls support alpha, including fully transparent colors. If `custom_css` is not configured yet, IoExplorer creates `~/.config/ioexplorer/theme.css`, saves that path to `config.toml`, and applies changes immediately to the running UI. The generated CSS is kept inside a managed block so user-authored CSS can live before or after it:
+
+```css
+/* IOEXPLORER AUTO_GEN */
+/* generated theme CSS */
+/* /IOEXPLORER AUTO_GEN */
+```
+
+When the managed block already exists, IoExplorer replaces only that block. When no block exists, it prepends the managed block before the existing CSS.
+
 In icon view, use Ctrl+scroll to resize file entries. The chosen icon size is saved in `~/.local/state/ioexplorer/state` and overrides the configured `icon_size` on later launches.
 
 Custom actions can also be added, edited, deleted, reordered, and configured with Run on each from Settings -> Actions. Changes are saved back to `config.toml` and take effect immediately for context menus. The editor shows command variables that can be used in custom commands: `{path}`, `{name}`, `{parent}`, `{stem}`, `{extension}`, `{uri}`, and `{kind}`.
@@ -159,4 +170,3 @@ Custom actions appear in file, folder, and empty-folder-space context menus when
 - Split panes and saved layout profiles.
 - Filtering.
 - Network/provider plugins.
-- Theme editor.
