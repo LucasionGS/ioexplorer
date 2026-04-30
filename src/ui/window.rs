@@ -731,7 +731,7 @@ impl AppWindow {
                 gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter
                     if this.file_shortcuts_enabled() && !this.is_filtering() =>
                 {
-                    this.activate_selection();
+                    this.activate_selection_from_keyboard();
                     glib::Propagation::Stop
                 }
                 gtk::gdk::Key::Up | gtk::gdk::Key::KP_Up if this.file_shortcuts_enabled() => {
@@ -2143,6 +2143,15 @@ impl AppWindow {
         }
     }
 
+    fn activate_selection_from_keyboard(self: &Rc<Self>) {
+        if self.should_accept_chooser_selection_on_enter() {
+            self.accept_chooser();
+            return;
+        }
+
+        self.activate_selection();
+    }
+
     fn select_paths_in_current_folder(&self, folder: &Path, paths: &[PathBuf]) {
         let selected_names = paths
             .iter()
@@ -3395,6 +3404,14 @@ impl AppWindow {
         self.chooser
             .as_ref()
             .is_none_or(|chooser| chooser.options.multiple)
+    }
+
+    fn should_accept_chooser_selection_on_enter(&self) -> bool {
+        self.chooser.as_ref().is_some_and(|chooser| {
+            chooser.options.mode == SelectorMode::Open
+                && chooser.options.multiple
+                && !self.selected_chooser_files().is_empty()
+        })
     }
 
     fn navigate_chooser_save_target_from_input(self: &Rc<Self>, input: &str) -> bool {
