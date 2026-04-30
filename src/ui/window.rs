@@ -107,6 +107,7 @@ pub struct AppWindow {
     live_theme: Option<theme::LiveTheme>,
     theme_editor_updating: Cell<bool>,
     list_box: gtk::ListBox,
+    list_scroll: gtk::ScrolledWindow,
     flow_box: gtk::FlowBox,
     grid_scroll: gtk::ScrolledWindow,
     selected_indices: Rc<RefCell<BTreeSet<usize>>>,
@@ -357,6 +358,7 @@ impl AppWindow {
             live_theme,
             theme_editor_updating: Cell::new(false),
             list_box,
+            list_scroll,
             flow_box,
             grid_scroll,
             selected_indices,
@@ -2152,7 +2154,7 @@ impl AppWindow {
         self.activate_selection();
     }
 
-    fn select_paths_in_current_folder(&self, folder: &Path, paths: &[PathBuf]) {
+    fn select_paths_in_current_folder(self: &Rc<Self>, folder: &Path, paths: &[PathBuf]) {
         let selected_names = paths
             .iter()
             .filter(|path| path.parent().is_some_and(|parent| parent == folder))
@@ -2197,17 +2199,29 @@ impl AppWindow {
         }
     }
 
-    fn focus_entry_at(&self, index: usize) {
+    fn focus_entry_at(self: &Rc<Self>, index: usize) {
         let index = index as i32;
         match self.view_mode.get() {
             ViewMode::List => {
                 if let Some(row) = self.list_box.row_at_index(index) {
                     row.grab_focus();
+                    let row = row.clone();
+                    let list_scroll = self.list_scroll.clone();
+                    glib::idle_add_local_once(move || {
+                        row.grab_focus();
+                        scroll_widget_into_view(&row, &list_scroll);
+                    });
                 }
             }
             ViewMode::Icon => {
                 if let Some(child) = self.flow_box.child_at_index(index) {
                     child.grab_focus();
+                    let child = child.clone();
+                    let grid_scroll = self.grid_scroll.clone();
+                    glib::idle_add_local_once(move || {
+                        child.grab_focus();
+                        scroll_widget_into_view(&child, &grid_scroll);
+                    });
                 }
             }
         }
@@ -3721,6 +3735,51 @@ fn chooser_action_bar(options: &SelectorOptions, status_label: &gtk::Label) -> C
         cancel_button,
         accept_button,
     }
+}
+
+fn scroll_widget_into_view(widget: &impl IsA<gtk::Widget>, scrolled_window: &gtk::ScrolledWindow) {
+    let Some(content) = scrolled_window.child() else {
+        return;
+    };
+    let Some(bounds) = widget.compute_bounds(&content) else {
+        return;
+    };
+
+    let horizontal = scrolled_window.hadjustment();
+    let vertical = scrolled_window.vadjustment();
+    scroll_adjustment_to_reveal(
+        &horizontal,
+        f64::from(bounds.x()),
+        f64::from(bounds.x() + bounds.width()),
+    );
+    scroll_adjustment_to_reveal(
+        &vertical,
+        f64::from(bounds.y()),
+        f64::from(bounds.y() + bounds.height()),
+    );
+}
+
+fn scroll_adjustment_to_reveal(adjustment: &gtk::Adjustment, start: f64, end: f64) {
+    let page_size = adjustment.page_size();
+    if page_size <= 0.0 {
+        return;
+    }
+
+    let padding = 12.0;
+    let start = (start - padding).max(adjustment.lower());
+    let end = end + padding;
+    let visible_start = adjustment.value();
+    let visible_end = visible_start + page_size;
+
+    let target = if start < visible_start {
+        start
+    } else if end > visible_end {
+        end - page_size
+    } else {
+        return;
+    };
+
+    set_adjustment_value(adjustment, target);
 }
 
 async fn copy_remote_uri_into_target(uri: &str, target_dir: &Path) -> Result<PathBuf, glib::Error> {
