@@ -19,6 +19,7 @@ use crate::{
     config::{AppConfig, CustomActionConfig, ViewMode, clamp_icon_size},
     custom_actions::{self, ActionTarget},
     providers::{FileItem, FileKind, Provider, ProviderError, ProviderUri, local::LocalProvider},
+    selector::{SelectorMode, SelectorOptions},
     state::AppState,
     theme,
     ui::{
@@ -51,6 +52,27 @@ struct FileTab {
     uri: ProviderUri,
     back_stack: Vec<ProviderUri>,
     forward_stack: Vec<ProviderUri>,
+}
+
+struct ChooserRequest {
+    options: SelectorOptions,
+    result: Rc<RefCell<Option<Vec<String>>>>,
+}
+
+struct ChooserControls {
+    root: gtk::Box,
+    name_entry: gtk::Entry,
+    cancel_button: gtk::Button,
+    accept_button: gtk::Button,
+}
+
+struct ChooserState {
+    app: gtk::Application,
+    options: SelectorOptions,
+    result: Rc<RefCell<Option<Vec<String>>>>,
+    name_entry: gtk::Entry,
+    cancel_button: gtk::Button,
+    accept_button: gtk::Button,
 }
 
 impl FileTab {
@@ -107,12 +129,33 @@ pub struct AppWindow {
     bookmarks: RefCell<Vec<PathBuf>>,
     thumbnail_cache: views::icon::ThumbnailCache,
     pending_visible_thumbnail_load: Cell<bool>,
+    chooser: Option<ChooserState>,
 }
 
 impl AppWindow {
     pub fn new(app: &gtk::Application, config: AppConfig) -> Rc<Self> {
+        Self::new_internal(app, config, None)
+    }
+
+    pub fn new_for_chooser(
+        app: &gtk::Application,
+        config: AppConfig,
+        options: SelectorOptions,
+        result: Rc<RefCell<Option<Vec<String>>>>,
+    ) -> Rc<Self> {
+        Self::new_internal(app, config, Some(ChooserRequest { options, result }))
+    }
+
+    fn new_internal(
+        app: &gtk::Application,
+        config: AppConfig,
+        chooser_request: Option<ChooserRequest>,
+    ) -> Rc<Self> {
         let provider = LocalProvider::new();
-        let start_uri = home_uri().unwrap_or_else(|| provider.root());
+        let start_uri = chooser_request
+            .as_ref()
+            .map(|request| ProviderUri::local(request.options.start_folder()))
+            .unwrap_or_else(|| home_uri().unwrap_or_else(|| provider.root()));
         let state = AppState::load(&config);
         let topbar = TopBar::new(state.layout, state.show_hidden);
         let bookmarks = bookmarks::load();
@@ -158,8 +201,16 @@ impl AppWindow {
         let list_rubberband = rubberband_widget();
         let list_overlay = gtk::Overlay::builder().child(&list_scroll).build();
         list_overlay.add_overlay(&list_rubberband);
+        let allow_multiple_selection = chooser_request
+            .as_ref()
+            .is_none_or(|request| request.options.multiple);
         let clear_selection = clear_selection_handler(&selected_indices, &list_box, &flow_box);
-        let apply_selection = apply_selection_handler(&selected_indices, &list_box, &flow_box);
+        let apply_selection = apply_selection_handler(
+            &selected_indices,
+            &list_box,
+            &flow_box,
+            allow_multiple_selection,
+        );
         install_list_empty_space_selection(
             &list_overlay,
             &list_rubberband,
@@ -209,6 +260,9 @@ impl AppWindow {
             .xalign(0.0)
             .css_classes(["status-label"])
             .build();
+        let chooser_controls = chooser_request
+            .as_ref()
+            .map(|request| chooser_action_bar(&request.options, &status_label));
 
         let filter_icon = gtk::Image::builder()
             .icon_name("edit-find-symbolic")
@@ -245,18 +299,41 @@ impl AppWindow {
             .orientation(gtk::Orientation::Vertical)
             .spacing(0)
             .build();
+        if chooser_request.is_some() {
+            root.add_css_class("selector-window");
+        }
         root.append(&topbar.root);
         root.append(&body);
         root.append(&filter_bar);
-        root.append(&status_label);
+        if let Some(controls) = &chooser_controls {
+            root.append(&controls.root);
+        } else {
+            root.append(&status_label);
+        }
+
+        let window_title = chooser_request
+            .as_ref()
+            .map(|request| request.options.title.clone())
+            .unwrap_or_else(|| format!("IoExplorer - {}", provider.name()));
 
         let window = gtk::ApplicationWindow::builder()
             .application(app)
-            .title(format!("IoExplorer - {}", provider.name()))
+            .title(window_title)
             .default_width(1120)
             .default_height(760)
             .child(&root)
             .build();
+
+        let chooser = chooser_request
+            .zip(chooser_controls)
+            .map(|(request, controls)| ChooserState {
+                app: app.clone(),
+                options: request.options,
+                result: request.result,
+                name_entry: controls.name_entry,
+                cancel_button: controls.cancel_button,
+                accept_button: controls.accept_button,
+            });
 
         let this = Rc::new(Self {
             window,
@@ -302,17 +379,27 @@ impl AppWindow {
             bookmarks: RefCell::new(bookmarks),
             thumbnail_cache: views::icon::new_thumbnail_cache(),
             pending_visible_thumbnail_load: Cell::new(false),
+            chooser,
         });
 
         this.setup_callbacks();
         this.refresh_action_editor();
         this.apply_view_mode(this.view_mode.get());
         this.load_uri(start_uri, false);
+        this.initialize_chooser_state();
         this
     }
 
     pub fn present(&self) {
         self.window.present();
+        if let Some(chooser) = &self.chooser
+            && chooser.options.mode == SelectorMode::Save
+        {
+            chooser.name_entry.grab_focus();
+            chooser.name_entry.select_region(0, -1);
+            return;
+        }
+
         self.focus_content();
         let stack = self.stack.clone();
         glib::idle_add_local_once(move || {
@@ -351,6 +438,8 @@ impl AppWindow {
     }
 
     fn setup_callbacks(self: &Rc<Self>) {
+        self.setup_chooser_callbacks();
+
         let this = Rc::clone(self);
         self.topbar.path_entry.connect_activate(move |entry| {
             this.navigate_from_input(entry.text().as_str());
@@ -583,6 +672,38 @@ impl AppWindow {
         });
     }
 
+    fn setup_chooser_callbacks(self: &Rc<Self>) {
+        let Some(chooser) = &self.chooser else {
+            return;
+        };
+
+        let this = Rc::clone(self);
+        chooser
+            .accept_button
+            .connect_clicked(move |_| this.accept_chooser());
+
+        let this = Rc::clone(self);
+        chooser
+            .name_entry
+            .connect_activate(move |_| this.accept_chooser());
+
+        let this = Rc::clone(self);
+        chooser
+            .name_entry
+            .connect_changed(move |_| this.update_chooser_accept_state());
+
+        let cancel_app = chooser.app.clone();
+        chooser
+            .cancel_button
+            .connect_clicked(move |_| cancel_app.quit());
+
+        let close_app = chooser.app.clone();
+        self.window.connect_close_request(move |_| {
+            close_app.quit();
+            glib::Propagation::Proceed
+        });
+    }
+
     fn install_keyboard_actions(self: &Rc<Self>) {
         let controller = gtk::EventControllerKey::new();
         controller.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -590,6 +711,7 @@ impl AppWindow {
         controller.connect_key_pressed(move |_, key, _, state| {
             let alt = state.contains(gtk::gdk::ModifierType::ALT_MASK);
             let ctrl = state.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+            let shift = state.contains(gtk::gdk::ModifierType::SHIFT_MASK);
             match key {
                 gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter
                     if this.file_shortcuts_enabled() && this.is_filtering() =>
@@ -691,11 +813,15 @@ impl AppWindow {
                     this.close_current_tab();
                     glib::Propagation::Stop
                 }
-                gtk::gdk::Key::Page_Up if ctrl => {
+                gtk::gdk::Key::Page_Up | gtk::gdk::Key::ISO_Left_Tab if ctrl => {
                     this.switch_tab_by(-1);
                     glib::Propagation::Stop
                 }
-                gtk::gdk::Key::Page_Down if ctrl => {
+                gtk::gdk::Key::Tab if ctrl && shift => {
+                    this.switch_tab_by(-1);
+                    glib::Propagation::Stop
+                }
+                gtk::gdk::Key::Page_Down | gtk::gdk::Key::Tab if ctrl => {
                     this.switch_tab_by(1);
                     glib::Propagation::Stop
                 }
@@ -714,6 +840,8 @@ impl AppWindow {
                 gtk::gdk::Key::Escape => {
                     if this.is_filtering() {
                         this.clear_filter();
+                    } else if this.chooser.is_some() {
+                        this.cancel_chooser();
                     } else {
                         this.show_breadcrumbs();
                     }
@@ -758,7 +886,12 @@ impl AppWindow {
     }
 
     fn file_shortcuts_enabled(&self) -> bool {
-        self.active_page.get() == AppPage::Files && !self.topbar.path_entry.has_focus()
+        self.active_page.get() == AppPage::Files && !self.text_input_has_focus()
+    }
+
+    fn text_input_has_focus(&self) -> bool {
+        gtk::prelude::GtkWindowExt::focus(&self.window)
+            .is_some_and(|focus| widget_is_text_input(&focus))
     }
 
     fn install_theme_editor_callbacks(self: &Rc<Self>) {
@@ -1017,7 +1150,12 @@ impl AppWindow {
 
     fn select_all_entries(&self) {
         let entry_count = self.entries.borrow().len();
-        let indices = (0..entry_count).collect::<BTreeSet<_>>();
+        let indices = if self.allows_multiple_selection() {
+            (0..entry_count).collect::<BTreeSet<_>>()
+        } else {
+            (0..entry_count.min(1)).collect::<BTreeSet<_>>()
+        };
+        let selected_count = indices.len();
         set_entry_selection(
             &self.selected_indices,
             &self.list_box,
@@ -1025,13 +1163,13 @@ impl AppWindow {
             indices,
         );
 
-        if entry_count == 0 {
+        if selected_count == 0 {
             self.anchor_index.set(None);
             self.status_label.set_text("No items to select");
         } else {
             self.anchor_index.set(Some(0));
             self.status_label
-                .set_text(&format!("Selected {entry_count} items"));
+                .set_text(&format!("Selected {selected_count} item(s)"));
         }
     }
 
@@ -1131,6 +1269,10 @@ impl AppWindow {
     }
 
     fn navigate_from_input(self: &Rc<Self>, input: &str) {
+        if self.navigate_chooser_save_target_from_input(input) {
+            return;
+        }
+
         match ProviderUri::from_str(input) {
             Ok(uri) => {
                 self.show_breadcrumbs();
@@ -1452,6 +1594,7 @@ impl AppWindow {
             &self.anchor_index,
             &self.list_box,
             &self.flow_box,
+            self.allows_multiple_selection(),
         );
         let list_columns = self.config.borrow().list_columns.clone();
         let context_menu_handler: views::EntryContextMenuHandler = {
@@ -1659,6 +1802,11 @@ impl AppWindow {
     }
 
     fn activate_entry(self: &Rc<Self>, item: FileItem) {
+        if self.chooser.is_some() {
+            self.activate_chooser_entry(item);
+            return;
+        }
+
         if item.kind == FileKind::Directory {
             self.load_uri(item.uri, true);
         } else if is_desktop_entry_file(&item) {
@@ -3229,6 +3377,205 @@ impl AppWindow {
         }
     }
 
+    fn initialize_chooser_state(self: &Rc<Self>) {
+        let Some(chooser) = &self.chooser else {
+            return;
+        };
+
+        self.update_chooser_accept_state();
+        if chooser.options.mode == SelectorMode::Open
+            && let Some(current_file) = chooser.options.current_file.as_ref()
+        {
+            let folder = reveal_folder_for_path(current_file);
+            self.select_paths_in_current_folder(&folder, std::slice::from_ref(current_file));
+        }
+    }
+
+    fn allows_multiple_selection(&self) -> bool {
+        self.chooser
+            .as_ref()
+            .is_none_or(|chooser| chooser.options.multiple)
+    }
+
+    fn navigate_chooser_save_target_from_input(self: &Rc<Self>, input: &str) -> bool {
+        let Some(chooser) = &self.chooser else {
+            return false;
+        };
+        if chooser.options.mode != SelectorMode::Save {
+            return false;
+        }
+
+        let Ok(uri) = ProviderUri::from_str(input) else {
+            return false;
+        };
+        let Ok(path) = uri.local_path() else {
+            return false;
+        };
+        if path.is_dir() {
+            return false;
+        }
+
+        let Some(parent) = path.parent().filter(|parent| parent.is_dir()) else {
+            return false;
+        };
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            return false;
+        };
+
+        chooser.name_entry.set_text(name);
+        self.show_breadcrumbs();
+        self.load_uri(ProviderUri::local(parent), true);
+        true
+    }
+
+    fn activate_chooser_entry(self: &Rc<Self>, item: FileItem) {
+        let Some(chooser) = &self.chooser else {
+            return;
+        };
+        let Ok(path) = item.uri.local_path() else {
+            self.status_label
+                .set_text("Only local files can be selected");
+            return;
+        };
+
+        if item.kind == FileKind::Directory {
+            if chooser.options.mode == SelectorMode::Open && chooser.options.directory {
+                self.finish_chooser_with_paths(vec![path]);
+            } else {
+                self.load_uri(ProviderUri::local(path), true);
+            }
+            return;
+        }
+
+        match chooser.options.mode {
+            SelectorMode::Open => self.finish_chooser_with_paths(vec![path]),
+            SelectorMode::Save => {
+                chooser.name_entry.set_text(&item.name);
+                self.update_chooser_accept_state();
+            }
+            SelectorMode::SaveFiles => {}
+        }
+    }
+
+    fn accept_chooser(&self) {
+        let Some(chooser) = &self.chooser else {
+            return;
+        };
+        let options = chooser.options.clone();
+        let name = chooser.name_entry.text().trim().to_string();
+        let Some(current_folder) = self.current_chooser_folder() else {
+            self.status_label.set_text("Choose a folder first");
+            return;
+        };
+
+        let paths = match options.mode {
+            SelectorMode::Open if options.directory => {
+                let mut selected = self.selected_chooser_directories();
+                if selected.is_empty() {
+                    vec![current_folder]
+                } else {
+                    if !options.multiple {
+                        selected.truncate(1);
+                    }
+                    selected
+                }
+            }
+            SelectorMode::Open => {
+                let mut selected = self.selected_chooser_files();
+                if selected.is_empty() {
+                    self.status_label.set_text("Select a file first");
+                    return;
+                }
+                if !options.multiple {
+                    selected.truncate(1);
+                }
+                selected
+            }
+            SelectorMode::Save => {
+                if name.is_empty() || name.contains('/') {
+                    self.status_label.set_text("Enter a valid filename");
+                    return;
+                }
+                vec![current_folder.join(name)]
+            }
+            SelectorMode::SaveFiles => {
+                let target_folder = self
+                    .selected_chooser_directories()
+                    .into_iter()
+                    .next()
+                    .unwrap_or(current_folder);
+                if options.file_names.is_empty() {
+                    vec![target_folder]
+                } else {
+                    options
+                        .file_names
+                        .iter()
+                        .map(|name| target_folder.join(name))
+                        .collect()
+                }
+            }
+        };
+
+        self.finish_chooser_with_paths(paths);
+    }
+
+    fn cancel_chooser(&self) {
+        if let Some(chooser) = &self.chooser {
+            chooser.app.quit();
+        }
+    }
+
+    fn update_chooser_accept_state(&self) {
+        let Some(chooser) = &self.chooser else {
+            return;
+        };
+        let sensitive = match chooser.options.mode {
+            SelectorMode::Save => !chooser.name_entry.text().trim().is_empty(),
+            SelectorMode::Open | SelectorMode::SaveFiles => true,
+        };
+        chooser.accept_button.set_sensitive(sensitive);
+    }
+
+    fn current_chooser_folder(&self) -> Option<PathBuf> {
+        if self.active_page.get() != AppPage::Files {
+            return None;
+        }
+        self.current_uri.borrow().local_path().ok()
+    }
+
+    fn selected_chooser_directories(&self) -> Vec<PathBuf> {
+        self.selected_items()
+            .into_iter()
+            .filter(|item| item.kind == FileKind::Directory)
+            .filter_map(|item| item.uri.local_path().ok())
+            .collect()
+    }
+
+    fn selected_chooser_files(&self) -> Vec<PathBuf> {
+        self.selected_items()
+            .into_iter()
+            .filter_map(|item| item.uri.local_path().ok())
+            .filter(|path| path.is_file())
+            .collect()
+    }
+
+    fn finish_chooser_with_paths(&self, paths: Vec<PathBuf>) {
+        let Some(chooser) = &self.chooser else {
+            return;
+        };
+        let uris = paths
+            .iter()
+            .map(|path| file_uri_for_path(path))
+            .collect::<Vec<_>>();
+        if uris.is_empty() {
+            self.status_label.set_text("Nothing selected");
+            return;
+        }
+
+        *chooser.result.borrow_mut() = Some(uris);
+        chooser.app.quit();
+    }
+
     fn show_error(&self, error: ProviderError) {
         self.status_label.set_text(&format!("{error}"));
     }
@@ -3236,6 +3583,39 @@ impl AppWindow {
 
 fn home_uri() -> Option<ProviderUri> {
     directories::UserDirs::new().map(|dirs| ProviderUri::local(dirs.home_dir()))
+}
+
+fn chooser_action_bar(options: &SelectorOptions, status_label: &gtk::Label) -> ChooserControls {
+    status_label.add_css_class("selector-status");
+
+    let name_entry = gtk::Entry::builder()
+        .hexpand(true)
+        .placeholder_text("Filename")
+        .text(options.initial_name())
+        .visible(options.mode == SelectorMode::Save)
+        .build();
+    let cancel_button = gtk::Button::with_label("Cancel");
+    let accept_button = gtk::Button::builder()
+        .label(&options.accept_label)
+        .css_classes(["suggested-action"])
+        .build();
+
+    let root = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .css_classes(["selector-actions"])
+        .build();
+    root.append(&name_entry);
+    root.append(status_label);
+    root.append(&cancel_button);
+    root.append(&accept_button);
+
+    ChooserControls {
+        root,
+        name_entry,
+        cancel_button,
+        accept_button,
+    }
 }
 
 async fn copy_remote_uri_into_target(uri: &str, target_dir: &Path) -> Result<PathBuf, glib::Error> {
@@ -3371,11 +3751,17 @@ fn apply_selection_handler(
     selected_indices: &Rc<RefCell<BTreeSet<usize>>>,
     list: &gtk::ListBox,
     flow: &gtk::FlowBox,
+    allow_multiple: bool,
 ) -> ApplySelectionHandler {
     let selected_indices = Rc::clone(selected_indices);
     let list = list.clone();
     let flow = flow.clone();
-    Rc::new(move |indices| set_entry_selection(&selected_indices, &list, &flow, indices))
+    Rc::new(move |mut indices| {
+        if !allow_multiple && let Some(first) = indices.first().copied() {
+            indices = [first].into_iter().collect();
+        }
+        set_entry_selection(&selected_indices, &list, &flow, indices)
+    })
 }
 
 fn entry_selection_handler(
@@ -3383,14 +3769,15 @@ fn entry_selection_handler(
     anchor_index: &Rc<Cell<Option<usize>>>,
     list: &gtk::ListBox,
     flow: &gtk::FlowBox,
+    allow_multiple: bool,
 ) -> views::EntrySelectionHandler {
     let selected_indices = Rc::clone(selected_indices);
     let anchor_index = Rc::clone(anchor_index);
     let list = list.clone();
     let flow = flow.clone();
     Rc::new(move |index, state| {
-        let ctrl = state.contains(gtk::gdk::ModifierType::CONTROL_MASK);
-        let shift = state.contains(gtk::gdk::ModifierType::SHIFT_MASK);
+        let ctrl = allow_multiple && state.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+        let shift = allow_multiple && state.contains(gtk::gdk::ModifierType::SHIFT_MASK);
 
         let Ok(mut selected) = selected_indices.try_borrow_mut() else {
             return;
@@ -3483,6 +3870,12 @@ fn set_entry_selected_class(widget: &impl IsA<gtk::Widget>, selected: bool) {
     } else {
         widget.remove_css_class("entry-selected");
     }
+}
+
+fn widget_is_text_input(widget: &gtk::Widget) -> bool {
+    widget.is::<gtk::Editable>()
+        || widget.ancestor(gtk::Entry::static_type()).is_some()
+        || widget.ancestor(gtk::TextView::static_type()).is_some()
 }
 
 #[derive(Default)]
