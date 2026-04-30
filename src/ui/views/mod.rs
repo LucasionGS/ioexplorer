@@ -19,15 +19,7 @@ pub type FileDragHandler = Rc<dyn Fn(usize) -> Vec<PathBuf>>;
 pub type EntrySelectionHandler = Rc<dyn Fn(usize, gtk::gdk::ModifierType)>;
 pub type EntryContextMenuHandler = Rc<dyn Fn(usize, gtk::Widget, f64, f64)>;
 
-pub fn format_size(item: &FileItem) -> String {
-    if item.kind == FileKind::Directory {
-        return String::new();
-    }
-
-    let Some(size) = item.size else {
-        return String::new();
-    };
-
+pub fn format_bytes(size: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut value = size as f64;
     let mut unit = 0;
@@ -41,6 +33,18 @@ pub fn format_size(item: &FileItem) -> String {
     } else {
         format!("{value:.1} {}", UNITS[unit])
     }
+}
+
+pub fn format_size(item: &FileItem) -> String {
+    if item.kind == FileKind::Directory {
+        return String::new();
+    }
+
+    let Some(size) = item.size else {
+        return String::new();
+    };
+
+    format_bytes(size)
 }
 
 pub fn format_modified(time: Option<SystemTime>) -> String {

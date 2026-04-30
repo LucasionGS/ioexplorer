@@ -183,6 +183,44 @@ window {
   background: transparent;
 }
 
+.details-panel {
+  background: rgba(13, 15, 20, 0.78);
+  border-left: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.details-scroll,
+.details-scroll > viewport {
+  background: transparent;
+}
+
+.details-title {
+  font-size: 1.08em;
+  font-weight: 700;
+}
+
+.details-subtitle {
+  font-size: 0.94em;
+}
+
+.details-rows {
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.details-row {
+  min-height: 32px;
+  padding: 7px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.details-row-name {
+  font-weight: 700;
+  color: alpha(currentColor, 0.76);
+}
+
+.details-row-value {
+  color: alpha(currentColor, 0.92);
+}
+
 .computer-page-scroll,
 .computer-page-scroll > viewport {
   background: rgba(10, 12, 16, 0.54);

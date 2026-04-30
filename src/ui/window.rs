@@ -75,6 +75,287 @@ struct ChooserState {
     accept_button: gtk::Button,
 }
 
+#[derive(Clone)]
+struct DetailsPanel {
+    root: gtk::Box,
+    icon: gtk::Image,
+    title_label: gtk::Label,
+    subtitle_label: gtk::Label,
+    rows: gtk::Box,
+}
+
+impl DetailsPanel {
+    fn new() -> Self {
+        let icon = gtk::Image::builder()
+            .pixel_size(56)
+            .halign(gtk::Align::Start)
+            .valign(gtk::Align::Start)
+            .build();
+        let title_label = gtk::Label::builder()
+            .xalign(0.0)
+            .wrap(true)
+            .wrap_mode(gtk::pango::WrapMode::WordChar)
+            .lines(3)
+            .css_classes(["details-title"])
+            .build();
+        let subtitle_label = gtk::Label::builder()
+            .xalign(0.0)
+            .wrap(true)
+            .wrap_mode(gtk::pango::WrapMode::WordChar)
+            .css_classes(["details-subtitle", "dim-label"])
+            .build();
+
+        let title_box = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(3)
+            .hexpand(true)
+            .build();
+        title_box.append(&title_label);
+        title_box.append(&subtitle_label);
+
+        let header = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(12)
+            .css_classes(["details-header"])
+            .build();
+        header.append(&icon);
+        header.append(&title_box);
+
+        let rows = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(0)
+            .css_classes(["details-rows"])
+            .build();
+
+        let content = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(12)
+            .margin_top(14)
+            .margin_bottom(14)
+            .margin_start(14)
+            .margin_end(14)
+            .css_classes(["details-content"])
+            .build();
+        content.append(&header);
+        content.append(&rows);
+
+        let scroll = gtk::ScrolledWindow::builder()
+            .child(&content)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vexpand(true)
+            .css_classes(["details-scroll"])
+            .build();
+
+        let root = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .width_request(286)
+            .hexpand(false)
+            .vexpand(true)
+            .visible(true)
+            .css_classes(["details-panel"])
+            .build();
+        root.append(&scroll);
+
+        Self {
+            root,
+            icon,
+            title_label,
+            subtitle_label,
+            rows,
+        }
+    }
+
+    fn set_items(&self, items: &[FileItem]) {
+        match items {
+            [] => self.clear(),
+            [item] => self.set_single_item(item),
+            _ => self.set_multiple_items(items),
+        }
+    }
+
+    fn clear(&self) {
+        self.icon.set_icon_name(Some("dialog-information-symbolic"));
+        self.icon.set_pixel_size(56);
+        self.title_label.set_text("No item selected");
+        self.subtitle_label.set_text("");
+        views::clear_box_children(&self.rows);
+    }
+
+    fn set_single_item(&self, item: &FileItem) {
+        views::clear_box_children(&self.rows);
+        views::set_image_for_item(&self.icon, item, 56);
+        self.title_label.set_text(item.display_name());
+        self.subtitle_label.set_text(item.kind.label());
+
+        if item.display_name() != item.name {
+            self.append_row("File name", &item.name);
+        }
+        self.append_row("Type", item.kind.label());
+        if let Some(size) = item.size {
+            self.append_row("Size", &views::format_bytes(size));
+        }
+        let modified = views::format_modified(item.modified);
+        self.append_row("Modified", &modified);
+        self.append_row("Location", &item_location(item));
+        if item.hidden {
+            self.append_row("Hidden", "Yes");
+        }
+    }
+
+    fn set_multiple_items(&self, items: &[FileItem]) {
+        views::clear_box_children(&self.rows);
+        self.icon.set_icon_name(Some("edit-select-all-symbolic"));
+        self.icon.set_pixel_size(56);
+        self.title_label
+            .set_text(&format!("{} items selected", items.len()));
+        self.subtitle_label.set_text(&selection_kind_summary(items));
+
+        self.append_row("Items", &items.len().to_string());
+        append_count_row(self, "Files", count_kind(items, FileKind::File));
+        append_count_row(self, "Folders", count_kind(items, FileKind::Directory));
+        append_count_row(self, "Links", count_kind(items, FileKind::Symlink));
+        append_count_row(self, "Other", count_kind(items, FileKind::Other));
+        if let Some(size) = selected_items_size(items) {
+            self.append_row("Size", &views::format_bytes(size));
+        }
+        let modified = views::format_modified(latest_modified(items));
+        self.append_row("Latest", &modified);
+        if let Some(location) = common_item_location(items) {
+            self.append_row("Location", &location);
+        }
+    }
+
+    fn append_row(&self, name: &str, value: &str) {
+        if value.is_empty() {
+            return;
+        }
+
+        let row = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(10)
+            .css_classes(["details-row"])
+            .build();
+        let name_label = gtk::Label::builder()
+            .label(name)
+            .xalign(0.0)
+            .width_chars(9)
+            .valign(gtk::Align::Start)
+            .css_classes(["details-row-name"])
+            .build();
+        let value_label = gtk::Label::builder()
+            .label(value)
+            .xalign(0.0)
+            .hexpand(true)
+            .wrap(true)
+            .wrap_mode(gtk::pango::WrapMode::WordChar)
+            .selectable(true)
+            .css_classes(["details-row-value"])
+            .build();
+
+        row.append(&name_label);
+        row.append(&value_label);
+        self.rows.append(&row);
+    }
+}
+
+fn append_count_row(panel: &DetailsPanel, label: &str, count: usize) {
+    if count > 0 {
+        panel.append_row(label, &count.to_string());
+    }
+}
+
+fn count_kind(items: &[FileItem], kind: FileKind) -> usize {
+    items.iter().filter(|item| item.kind == kind).count()
+}
+
+fn selected_items_size(items: &[FileItem]) -> Option<u64> {
+    let mut total = 0;
+    let mut has_size = false;
+    for size in items.iter().filter_map(|item| item.size) {
+        total += size;
+        has_size = true;
+    }
+    has_size.then_some(total)
+}
+
+fn latest_modified(items: &[FileItem]) -> Option<SystemTime> {
+    items.iter().filter_map(|item| item.modified).max()
+}
+
+fn item_location(item: &FileItem) -> String {
+    item.uri
+        .local_path()
+        .ok()
+        .and_then(|path| path.parent().map(|parent| parent.display().to_string()))
+        .unwrap_or_else(|| item.uri.display_path())
+}
+
+fn common_item_location(items: &[FileItem]) -> Option<String> {
+    let parents = items
+        .iter()
+        .filter_map(|item| {
+            item.uri
+                .local_path()
+                .ok()
+                .and_then(|path| path.parent().map(Path::to_path_buf))
+        })
+        .collect::<Vec<_>>();
+
+    if parents.len() != items.len() {
+        return None;
+    }
+
+    let first = parents.first()?;
+    if parents.iter().all(|parent| parent == first) {
+        Some(first.display().to_string())
+    } else {
+        Some("Multiple locations".to_string())
+    }
+}
+
+fn selection_kind_summary(items: &[FileItem]) -> String {
+    let mut parts = Vec::new();
+    push_count_summary(
+        &mut parts,
+        count_kind(items, FileKind::File),
+        "file",
+        "files",
+    );
+    push_count_summary(
+        &mut parts,
+        count_kind(items, FileKind::Directory),
+        "folder",
+        "folders",
+    );
+    push_count_summary(
+        &mut parts,
+        count_kind(items, FileKind::Symlink),
+        "link",
+        "links",
+    );
+    push_count_summary(
+        &mut parts,
+        count_kind(items, FileKind::Other),
+        "item",
+        "items",
+    );
+
+    if parts.is_empty() {
+        "Mixed selection".to_string()
+    } else {
+        parts.join(", ")
+    }
+}
+
+fn push_count_summary(parts: &mut Vec<String>, count: usize, singular: &str, plural: &str) {
+    if count == 0 {
+        return;
+    }
+
+    let label = if count == 1 { singular } else { plural };
+    parts.push(format!("{count} {label}"));
+}
+
 impl FileTab {
     fn new(uri: ProviderUri) -> Self {
         Self {
@@ -93,7 +374,7 @@ pub struct AppWindow {
     current_uri: RefCell<ProviderUri>,
     back_stack: RefCell<Vec<ProviderUri>>,
     forward_stack: RefCell<Vec<ProviderUri>>,
-    entries: RefCell<Vec<FileItem>>,
+    entries: Rc<RefCell<Vec<FileItem>>>,
     view_mode: Cell<ViewMode>,
     show_hidden: Cell<bool>,
     icon_size: Cell<i32>,
@@ -110,7 +391,10 @@ pub struct AppWindow {
     list_scroll: gtk::ScrolledWindow,
     flow_box: gtk::FlowBox,
     grid_scroll: gtk::ScrolledWindow,
+    details_panel: DetailsPanel,
+    details_panel_visible: Cell<bool>,
     selected_indices: Rc<RefCell<BTreeSet<usize>>>,
+    selection_changed: SelectionChangedHandler,
     anchor_index: Rc<Cell<Option<usize>>>,
     status_label: gtk::Label,
     filter_bar: gtk::Box,
@@ -173,6 +457,7 @@ impl AppWindow {
             &config.actions,
         );
         let live_theme = theme::LiveTheme::new();
+        let entries = Rc::new(RefCell::new(Vec::new()));
         let selected_indices = Rc::new(RefCell::new(BTreeSet::new()));
         let anchor_index = Rc::new(Cell::new(None::<usize>));
         let list_box = gtk::ListBox::builder()
@@ -198,6 +483,10 @@ impl AppWindow {
             .child(&flow_box)
             .css_classes(["content-scroll"])
             .build();
+        let details_panel = DetailsPanel::new();
+        details_panel.clear();
+        let selection_changed =
+            selection_changed_handler(&selected_indices, &entries, &details_panel);
 
         let list_rubberband = rubberband_widget();
         let list_overlay = gtk::Overlay::builder().child(&list_scroll).build();
@@ -205,12 +494,18 @@ impl AppWindow {
         let allow_multiple_selection = chooser_request
             .as_ref()
             .is_none_or(|request| request.options.multiple);
-        let clear_selection = clear_selection_handler(&selected_indices, &list_box, &flow_box);
+        let clear_selection = clear_selection_handler(
+            &selected_indices,
+            &list_box,
+            &flow_box,
+            selection_changed.clone(),
+        );
         let apply_selection = apply_selection_handler(
             &selected_indices,
             &list_box,
             &flow_box,
             allow_multiple_selection,
+            selection_changed.clone(),
         );
         install_list_empty_space_selection(
             &list_overlay,
@@ -257,6 +552,15 @@ impl AppWindow {
         content_area.append(&tab_bar);
         content_area.append(&stack);
 
+        let browser_area = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(0)
+            .hexpand(true)
+            .vexpand(true)
+            .build();
+        browser_area.append(&content_area);
+        browser_area.append(&details_panel.root);
+
         let status_label = gtk::Label::builder()
             .xalign(0.0)
             .css_classes(["status-label"])
@@ -291,7 +595,7 @@ impl AppWindow {
         let body = gtk::Paned::builder()
             .orientation(gtk::Orientation::Horizontal)
             .start_child(&sidebar.root)
-            .end_child(&content_area)
+            .end_child(&browser_area)
             .resize_start_child(false)
             .shrink_start_child(false)
             .build();
@@ -342,7 +646,7 @@ impl AppWindow {
             current_uri: RefCell::new(start_uri.clone()),
             back_stack: RefCell::new(Vec::new()),
             forward_stack: RefCell::new(Vec::new()),
-            entries: RefCell::new(Vec::new()),
+            entries,
             view_mode: Cell::new(state.layout),
             show_hidden: Cell::new(state.show_hidden),
             icon_size: Cell::new(state.icon_size),
@@ -361,7 +665,10 @@ impl AppWindow {
             list_scroll,
             flow_box,
             grid_scroll,
+            details_panel,
+            details_panel_visible: Cell::new(true),
             selected_indices,
+            selection_changed,
             anchor_index,
             status_label,
             filter_bar,
@@ -493,6 +800,11 @@ impl AppWindow {
         self.topbar
             .show_hidden_button
             .connect_toggled(move |button| this.set_show_hidden(button.is_active()));
+
+        let this = Rc::clone(self);
+        self.topbar
+            .details_button
+            .connect_toggled(move |button| this.set_details_panel_visible(button.is_active()));
 
         let this = Rc::clone(self);
         self.sidebar
@@ -1163,6 +1475,7 @@ impl AppWindow {
             &self.list_box,
             &self.flow_box,
             indices,
+            &self.selection_changed,
         );
 
         if selected_count == 0 {
@@ -1205,6 +1518,7 @@ impl AppWindow {
                 &self.list_box,
                 &self.flow_box,
                 [0].into_iter().collect(),
+                &self.selection_changed,
             );
         }
         self.update_filter_bar();
@@ -1361,7 +1675,12 @@ impl AppWindow {
         }
         *self.filter_text.borrow_mut() = String::new();
         self.update_filter_bar();
-        clear_entry_selection(&self.selected_indices, &self.list_box, &self.flow_box);
+        clear_entry_selection(
+            &self.selected_indices,
+            &self.list_box,
+            &self.flow_box,
+            &self.selection_changed,
+        );
 
         self.computer_page.refresh();
         self.render_computer_breadcrumb();
@@ -1384,7 +1703,12 @@ impl AppWindow {
         }
         *self.filter_text.borrow_mut() = String::new();
         self.update_filter_bar();
-        clear_entry_selection(&self.selected_indices, &self.list_box, &self.flow_box);
+        clear_entry_selection(
+            &self.selected_indices,
+            &self.list_box,
+            &self.flow_box,
+            &self.selection_changed,
+        );
 
         self.render_settings_breadcrumb();
         self.topbar.path_entry.set_text("Settings");
@@ -1443,6 +1767,10 @@ impl AppWindow {
         self.topbar.list_button.set_sensitive(true);
         self.topbar.icon_button.set_sensitive(true);
         self.topbar.show_hidden_button.set_sensitive(true);
+        self.topbar.details_button.set_sensitive(true);
+        self.topbar
+            .details_button
+            .set_active(self.details_panel_visible.get());
         self.topbar
             .show_hidden_button
             .set_active(self.show_hidden.get());
@@ -1450,6 +1778,7 @@ impl AppWindow {
         self.settings_page.set_view_mode(self.view_mode.get());
         self.settings_page.set_icon_size(self.icon_size.get());
         self.update_navigation_buttons();
+        self.update_details_panel_visibility();
     }
 
     fn set_computer_topbar_state(&self) {
@@ -1462,6 +1791,8 @@ impl AppWindow {
         self.topbar.list_button.set_sensitive(false);
         self.topbar.icon_button.set_sensitive(false);
         self.topbar.show_hidden_button.set_sensitive(false);
+        self.topbar.details_button.set_sensitive(false);
+        self.update_details_panel_visibility();
     }
 
     fn set_settings_topbar_state(&self) {
@@ -1474,9 +1805,11 @@ impl AppWindow {
         self.topbar.list_button.set_sensitive(false);
         self.topbar.icon_button.set_sensitive(false);
         self.topbar.show_hidden_button.set_sensitive(false);
+        self.topbar.details_button.set_sensitive(false);
         self.settings_page.set_show_hidden(self.show_hidden.get());
         self.settings_page.set_view_mode(self.view_mode.get());
         self.settings_page.set_icon_size(self.icon_size.get());
+        self.update_details_panel_visibility();
     }
 
     fn list_visible_items(&self, uri: &ProviderUri) -> Result<Vec<FileItem>, ProviderError> {
@@ -1597,6 +1930,7 @@ impl AppWindow {
             &self.list_box,
             &self.flow_box,
             self.allows_multiple_selection(),
+            self.selection_changed.clone(),
         );
         let list_columns = self.config.borrow().list_columns.clone();
         let context_menu_handler: views::EntryContextMenuHandler = {
@@ -1625,7 +1959,12 @@ impl AppWindow {
             selection_handler,
             context_menu_handler,
         );
-        clear_entry_selection(&self.selected_indices, &self.list_box, &self.flow_box);
+        clear_entry_selection(
+            &self.selected_indices,
+            &self.list_box,
+            &self.flow_box,
+            &self.selection_changed,
+        );
         self.queue_visible_thumbnail_load();
     }
 
@@ -1714,6 +2053,18 @@ impl AppWindow {
         self.save_ui_state();
     }
 
+    fn set_details_panel_visible(&self, visible: bool) {
+        self.details_panel_visible.set(visible);
+        self.topbar.details_button.set_active(visible);
+        self.update_details_panel_visibility();
+    }
+
+    fn update_details_panel_visibility(&self) {
+        self.details_panel.root.set_visible(
+            self.active_page.get() == AppPage::Files && self.details_panel_visible.get(),
+        );
+    }
+
     fn set_show_hidden(self: &Rc<Self>, show_hidden: bool) {
         if self.show_hidden.get() == show_hidden {
             return;
@@ -1797,6 +2148,7 @@ impl AppWindow {
                     &self.list_box,
                     &self.flow_box,
                     selected,
+                    &self.selection_changed,
                 );
             }
         }
@@ -1939,6 +2291,7 @@ impl AppWindow {
                 &self.list_box,
                 &self.flow_box,
                 [index].into_iter().collect(),
+                &self.selection_changed,
             );
         }
 
@@ -1961,6 +2314,7 @@ impl AppWindow {
                 &self.list_box,
                 &self.flow_box,
                 [index].into_iter().collect(),
+                &self.selection_changed,
             );
         }
 
@@ -2129,6 +2483,7 @@ impl AppWindow {
             &self.list_box,
             &self.flow_box,
             [next].into_iter().collect(),
+            &self.selection_changed,
         );
     }
 
@@ -2186,6 +2541,7 @@ impl AppWindow {
             &self.list_box,
             &self.flow_box,
             indices.clone(),
+            &self.selection_changed,
         );
         self.focus_entry_at(first_index);
 
@@ -2243,6 +2599,7 @@ impl AppWindow {
                 &self.list_box,
                 &self.flow_box,
                 [index].into_iter().collect(),
+                &self.selection_changed,
             );
         }
 
@@ -3899,16 +4256,40 @@ fn hex_digit(value: u8) -> Option<u8> {
 
 type ClearSelectionHandler = Rc<dyn Fn()>;
 type ApplySelectionHandler = Rc<dyn Fn(BTreeSet<usize>)>;
+type SelectionChangedHandler = Rc<dyn Fn()>;
+
+fn selection_changed_handler(
+    selected_indices: &Rc<RefCell<BTreeSet<usize>>>,
+    entries: &Rc<RefCell<Vec<FileItem>>>,
+    details_panel: &DetailsPanel,
+) -> SelectionChangedHandler {
+    let selected_indices = Rc::clone(selected_indices);
+    let entries = Rc::clone(entries);
+    let details_panel = details_panel.clone();
+    Rc::new(move || {
+        let selected_indices = selected_indices
+            .try_borrow()
+            .map(|selected| selected.clone())
+            .unwrap_or_default();
+        let entries = entries.borrow();
+        let selected_items = selected_indices
+            .into_iter()
+            .filter_map(|index| entries.get(index).cloned())
+            .collect::<Vec<_>>();
+        details_panel.set_items(&selected_items);
+    })
+}
 
 fn clear_selection_handler(
     selected_indices: &Rc<RefCell<BTreeSet<usize>>>,
     list: &gtk::ListBox,
     flow: &gtk::FlowBox,
+    selection_changed: SelectionChangedHandler,
 ) -> ClearSelectionHandler {
     let selected_indices = Rc::clone(selected_indices);
     let list = list.clone();
     let flow = flow.clone();
-    Rc::new(move || clear_entry_selection(&selected_indices, &list, &flow))
+    Rc::new(move || clear_entry_selection(&selected_indices, &list, &flow, &selection_changed))
 }
 
 fn apply_selection_handler(
@@ -3916,6 +4297,7 @@ fn apply_selection_handler(
     list: &gtk::ListBox,
     flow: &gtk::FlowBox,
     allow_multiple: bool,
+    selection_changed: SelectionChangedHandler,
 ) -> ApplySelectionHandler {
     let selected_indices = Rc::clone(selected_indices);
     let list = list.clone();
@@ -3924,7 +4306,7 @@ fn apply_selection_handler(
         if !allow_multiple && let Some(first) = indices.first().copied() {
             indices = [first].into_iter().collect();
         }
-        set_entry_selection(&selected_indices, &list, &flow, indices)
+        set_entry_selection(&selected_indices, &list, &flow, indices, &selection_changed)
     })
 }
 
@@ -3934,6 +4316,7 @@ fn entry_selection_handler(
     list: &gtk::ListBox,
     flow: &gtk::FlowBox,
     allow_multiple: bool,
+    selection_changed: SelectionChangedHandler,
 ) -> views::EntrySelectionHandler {
     let selected_indices = Rc::clone(selected_indices);
     let anchor_index = Rc::clone(anchor_index);
@@ -3973,6 +4356,7 @@ fn entry_selection_handler(
         drop(selected);
 
         sync_entry_selection(&selected_indices, &list, &flow);
+        selection_changed();
     })
 }
 
@@ -3980,6 +4364,7 @@ fn clear_entry_selection(
     selected_indices: &Rc<RefCell<BTreeSet<usize>>>,
     list: &gtk::ListBox,
     flow: &gtk::FlowBox,
+    selection_changed: &SelectionChangedHandler,
 ) {
     let Ok(mut selected) = selected_indices.try_borrow_mut() else {
         return;
@@ -3988,6 +4373,7 @@ fn clear_entry_selection(
     drop(selected);
 
     sync_entry_selection(selected_indices, list, flow);
+    selection_changed();
 }
 
 fn set_entry_selection(
@@ -3995,6 +4381,7 @@ fn set_entry_selection(
     list: &gtk::ListBox,
     flow: &gtk::FlowBox,
     indices: BTreeSet<usize>,
+    selection_changed: &SelectionChangedHandler,
 ) {
     let Ok(mut selected) = selected_indices.try_borrow_mut() else {
         return;
@@ -4003,6 +4390,7 @@ fn set_entry_selection(
     drop(selected);
 
     sync_entry_selection(selected_indices, list, flow);
+    selection_changed();
 }
 
 fn sync_entry_selection(

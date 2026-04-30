@@ -16,6 +16,7 @@ pub struct TopBar {
     pub list_button: gtk::ToggleButton,
     pub icon_button: gtk::ToggleButton,
     pub show_hidden_button: gtk::ToggleButton,
+    pub details_button: gtk::ToggleButton,
 }
 
 impl TopBar {
@@ -74,6 +75,12 @@ impl TopBar {
             .active(show_hidden)
             .build();
         show_hidden_button.set_focusable(false);
+        let details_button = gtk::ToggleButton::builder()
+            .icon_name("dialog-information-symbolic")
+            .tooltip_text("Details Pane")
+            .active(true)
+            .build();
+        details_button.set_focusable(false);
 
         match default_view {
             ViewMode::List => list_button.set_active(true),
@@ -93,6 +100,7 @@ impl TopBar {
             list_button.upcast_ref(),
             icon_button.upcast_ref(),
             show_hidden_button.upcast_ref(),
+            details_button.upcast_ref(),
         ]);
 
         root.append(&nav_group);
@@ -115,6 +123,7 @@ impl TopBar {
             list_button,
             icon_button,
             show_hidden_button,
+            details_button,
         }
     }
 }
