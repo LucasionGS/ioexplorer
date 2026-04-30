@@ -3474,7 +3474,7 @@ impl AppWindow {
         }
     }
 
-    fn accept_chooser(&self) {
+    fn accept_chooser(self: &Rc<Self>) {
         let Some(chooser) = &self.chooser else {
             return;
         };
@@ -3513,7 +3513,12 @@ impl AppWindow {
                     self.status_label.set_text("Enter a valid filename");
                     return;
                 }
-                vec![current_folder.join(name)]
+                let path = current_folder.join(name);
+                if path.exists() {
+                    self.show_save_overwrite_dialog(path);
+                    return;
+                }
+                vec![path]
             }
             SelectorMode::SaveFiles => {
                 let target_folder = self
@@ -3534,6 +3539,89 @@ impl AppWindow {
         };
 
         self.finish_chooser_with_paths(paths);
+    }
+
+    fn show_save_overwrite_dialog(self: &Rc<Self>, path: PathBuf) {
+        let display_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("that file")
+            .to_string();
+
+        let overwrite_window = gtk::Window::builder()
+            .title("Replace Existing File?")
+            .transient_for(&self.window)
+            .modal(true)
+            .default_width(420)
+            .resizable(false)
+            .build();
+
+        let content = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(12)
+            .margin_top(16)
+            .margin_bottom(14)
+            .margin_start(16)
+            .margin_end(16)
+            .build();
+
+        content.append(
+            &gtk::Label::builder()
+                .label(format!("An item named \"{display_name}\" already exists."))
+                .xalign(0.0)
+                .wrap(true)
+                .wrap_mode(gtk::pango::WrapMode::WordChar)
+                .build(),
+        );
+        content.append(
+            &gtk::Label::builder()
+                .label("Replacing it will overwrite its current contents.")
+                .xalign(0.0)
+                .wrap(true)
+                .wrap_mode(gtk::pango::WrapMode::WordChar)
+                .css_classes(["dim-label"])
+                .build(),
+        );
+
+        let button_row = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(8)
+            .halign(gtk::Align::End)
+            .build();
+        let cancel_button = gtk::Button::builder().label("Cancel").build();
+        let replace_button = gtk::Button::builder()
+            .label("Replace")
+            .css_classes(["destructive-action"])
+            .build();
+        button_row.append(&cancel_button);
+        button_row.append(&replace_button);
+        content.append(&button_row);
+        overwrite_window.set_child(Some(&content));
+
+        let cancel_window = overwrite_window.clone();
+        cancel_button.connect_clicked(move |_| cancel_window.close());
+
+        let this = Rc::clone(self);
+        let replace_window = overwrite_window.clone();
+        replace_button.connect_clicked(move |_| {
+            replace_window.close();
+            this.finish_chooser_with_paths(vec![path.clone()]);
+        });
+
+        let esc_controller = gtk::EventControllerKey::new();
+        let esc_window = overwrite_window.clone();
+        esc_controller.connect_key_pressed(move |_, key, _, _| {
+            if key == gtk::gdk::Key::Escape {
+                esc_window.close();
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
+            }
+        });
+        overwrite_window.add_controller(esc_controller);
+
+        overwrite_window.present();
+        replace_button.grab_focus();
     }
 
     fn cancel_chooser(&self) {
