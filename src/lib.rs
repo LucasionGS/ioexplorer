@@ -1,6 +1,7 @@
 pub mod app;
 pub mod file_manager;
 pub mod portal;
+pub mod start_menu;
 
 mod bookmarks;
 mod config;

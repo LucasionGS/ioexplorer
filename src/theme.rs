@@ -181,7 +181,8 @@ window {{\n\
 \n\
 .topbar,\n\
 .tab-strip,\n\
-.sidebar {{\n\
+.sidebar,\n\
+.start-menu-surface {{\n\
   background: {panel_background};\n\
   border-color: {border};\n\
 }}\n\
@@ -189,7 +190,12 @@ window {{\n\
 .toolbar-group,\n\
 .breadcrumbs,\n\
 .path-stack,\n\
-.file-tab {{\n\
+.file-tab,\n\
+.start-menu-search,\n\
+.start-menu-launcher,\n\
+.start-menu-result,\n\
+.start-menu-power,\n\
+.start-menu-footer {{\n\
   background: {muted_background};\n\
 }}\n\
 \n\
@@ -204,7 +210,12 @@ window {{\n\
 .context-menu,\n\
 .context-menu-item,\n\
 .file-tab,\n\
-.tab-new-button {{\n\
+.tab-new-button,\n\
+.start-menu-surface,\n\
+.start-menu-search,\n\
+.start-menu-launcher,\n\
+.start-menu-result,\n\
+.start-menu-power {{\n\
   border-radius: {radius}px;\n\
 }}\n\
 \n\
@@ -212,8 +223,42 @@ window {{\n\
 .sidebar-nav-button:checked,\n\
 .sidebar-list row:selected,\n\
 .content-list row.entry-selected,\n\
-.content-grid flowboxchild.entry-selected {{\n\
+.content-grid flowboxchild.entry-selected,\n\
+.start-menu-launcher:active,\n\
+.start-menu-result:active {{\n\
   background: {selection};\n\
+}}\n\
+\n\
+.start-menu-window,\n\
+.start-menu-surface,\n\
+.start-menu-search,\n\
+.start-menu-launcher,\n\
+.start-menu-result,\n\
+.start-menu-user,\n\
+.start-menu-section-title {{\n\
+    color: {text};\n\
+}}\n\
+\n\
+.start-menu-surface {{\n\
+    box-shadow: 0 26px 58px alpha(black, 0.36);\n\
+}}\n\
+\n\
+.start-menu-backdrop {{\n\
+    background: alpha({window_background}, 0.4);\n\
+}}\n\
+\n\
+.start-menu-search,\n\
+.start-menu-launcher,\n\
+.start-menu-result,\n\
+.start-menu-power,\n\
+.start-menu-footer {{\n\
+    border: 1px solid alpha({border}, 0.9);\n\
+}}\n\
+\n\
+.start-menu-launcher:hover,\n\
+.start-menu-result:hover,\n\
+.start-menu-power:hover {{\n\
+    background: alpha({accent}, 0.18);\n\
 }}\n\
 \n\
 .computer-volume-progress progress {{\n\
@@ -390,5 +435,14 @@ mod tests {
 
         assert!(css.contains(".sidebar-nav-button:checked,"));
         assert!(css.contains(".sidebar-list row:selected,"));
+    }
+
+    #[test]
+    fn generated_theme_css_applies_theme_to_start_menu() {
+        let css = generated_theme_css(&ThemeSettings::default());
+
+        assert!(css.contains(".start-menu-surface {"));
+        assert!(css.contains(".start-menu-search,"));
+        assert!(css.contains(".start-menu-launcher:hover,"));
     }
 }

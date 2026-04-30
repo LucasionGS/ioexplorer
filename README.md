@@ -23,7 +23,7 @@ It is developed with customization and ricing in mind, as well as efficiency nav
 Install a Rust toolchain plus GTK4 development libraries. On Arch-derived systems:
 
 ```sh
-sudo pacman -S rust gtk4 glib2 pkgconf desktop-file-utils appstream flatpak flatpak-builder
+sudo pacman -S rust gtk4 gtk4-layer-shell glib2 pkgconf desktop-file-utils appstream flatpak flatpak-builder
 ```
 
 ## Build And Run
@@ -45,6 +45,25 @@ cargo run -- --chooser --chooser-mode open
 cargo run -- --chooser --chooser-mode save --current-name example.txt
 ```
 
+The start menu binary can be launched directly as a one-shot popup:
+
+```sh
+cargo run --bin ioexplorer-start
+cargo run --bin ioexplorer-start -- --left --top
+cargo run --bin ioexplorer-start -- --center --top
+cargo run --bin ioexplorer-start -- --center
+```
+
+To keep a layer-shell start menu process running and toggle it from later invocations:
+
+```sh
+cargo run --bin ioexplorer-start -- --server
+cargo run --bin ioexplorer-start
+cargo run --bin ioexplorer-start -- --left --top
+```
+
+In server mode, later `ioexplorer-start` calls send the requested placement to the running instance and exit immediately.
+
 ## Desktop Portal File Chooser
 
 IoExplorer includes an `ioexplorer-portal` backend for `org.freedesktop.impl.portal.FileChooser` so portal-aware apps can use IoExplorer for Open and Save dialogs.
@@ -54,6 +73,7 @@ Install the two binaries plus the portal metadata in the standard locations:
 ```sh
 cargo build --release
 install -Dm755 target/release/ioexplorer ~/.local/bin/ioexplorer
+install -Dm755 target/release/ioexplorer-start ~/.local/bin/ioexplorer-start
 install -Dm755 target/release/ioexplorer-portal ~/.local/bin/ioexplorer-portal
 install -Dm644 data/ioexplorer.portal ~/.local/share/xdg-desktop-portal/portals/ioexplorer.portal
 install -Dm644 data/org.freedesktop.impl.portal.desktop.ioexplorer.service ~/.local/share/dbus-1/services/org.freedesktop.impl.portal.desktop.ioexplorer.service
