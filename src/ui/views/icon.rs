@@ -585,13 +585,26 @@ pub fn is_previewable_video(name: &str) -> bool {
     )
 }
 
+pub fn is_previewable_audio(name: &str) -> bool {
+    let Some(extension) = name.rsplit_once('.').map(|(_, extension)| extension) else {
+        return false;
+    };
+
+    matches!(
+        extension.to_ascii_lowercase().as_str(),
+        "aac" | "aiff" | "alac" | "flac" | "m4a" | "mp3" | "oga" | "ogg" | "opus" | "wav" | "wma"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
     use crate::providers::{FileItem, FileKind, ProviderUri};
 
-    use super::{ThumbnailValidation, is_previewable_image, is_previewable_video};
+    use super::{
+        ThumbnailValidation, is_previewable_audio, is_previewable_image, is_previewable_video,
+    };
 
     #[test]
     fn detects_common_image_extensions() {
@@ -609,6 +622,15 @@ mod tests {
         assert!(is_previewable_video("capture.webm"));
         assert!(!is_previewable_video("photo.jpg"));
         assert!(!is_previewable_video("README"));
+    }
+
+    #[test]
+    fn detects_common_audio_extensions() {
+        assert!(is_previewable_audio("track.MP3"));
+        assert!(is_previewable_audio("voice.ogg"));
+        assert!(is_previewable_audio("podcast.opus"));
+        assert!(!is_previewable_audio("clip.mp4"));
+        assert!(!is_previewable_audio("README"));
     }
 
     #[test]

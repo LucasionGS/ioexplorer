@@ -1,6 +1,6 @@
 use std::{
     cell::{Cell, RefCell},
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap},
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -165,11 +165,11 @@ impl DetailsPanel {
         }
     }
 
-    fn set_items(&self, items: &[FileItem]) {
+    fn set_items(&self, items: &[FileItem], media_details_cache: &MediaDetailsCache) {
         match items {
             [] => self.clear(),
-            [item] => self.set_single_item(item),
-            _ => self.set_multiple_items(items),
+            [item] => self.set_single_item(item, media_details_cache),
+            _ => self.set_multiple_items(items, media_details_cache),
         }
     }
 
@@ -181,18 +181,26 @@ impl DetailsPanel {
         views::clear_box_children(&self.rows);
     }
 
-    fn set_single_item(&self, item: &FileItem) {
+    fn set_single_item(&self, item: &FileItem, media_details_cache: &MediaDetailsCache) {
         views::clear_box_children(&self.rows);
         views::set_image_for_item(&self.icon, item, 56);
+        let media = media_details_for_item(item, media_details_cache);
+        let type_label = media
+            .as_ref()
+            .map(|details| details.kind.label())
+            .unwrap_or(item.kind.label());
         self.title_label.set_text(item.display_name());
-        self.subtitle_label.set_text(item.kind.label());
+        self.subtitle_label.set_text(type_label);
 
         if item.display_name() != item.name {
             self.append_row("File name", &item.name);
         }
-        self.append_row("Type", item.kind.label());
+        self.append_row("Type", type_label);
         if let Some(size) = item.size {
             self.append_row("Size", &views::format_bytes(size));
+        }
+        if let Some(media) = media {
+            self.append_media_rows(&media);
         }
         let modified = views::format_modified(item.modified);
         self.append_row("Modified", &modified);
@@ -202,7 +210,7 @@ impl DetailsPanel {
         }
     }
 
-    fn set_multiple_items(&self, items: &[FileItem]) {
+    fn set_multiple_items(&self, items: &[FileItem], media_details_cache: &MediaDetailsCache) {
         views::clear_box_children(&self.rows);
         self.icon.set_icon_name(Some("edit-select-all-symbolic"));
         self.icon.set_pixel_size(56);
@@ -218,10 +226,36 @@ impl DetailsPanel {
         if let Some(size) = selected_items_size(items) {
             self.append_row("Size", &views::format_bytes(size));
         }
+        if let Some(duration) = combined_media_duration(items, media_details_cache) {
+            self.append_row("Duration", &format_media_duration(duration));
+        }
         let modified = views::format_modified(latest_modified(items));
         self.append_row("Latest", &modified);
         if let Some(location) = common_item_location(items) {
             self.append_row("Location", &location);
+        }
+    }
+
+    fn append_media_rows(&self, media: &MediaDetails) {
+        match media.kind {
+            MediaKind::Image => {
+                if let Some(dimensions) = media.dimensions {
+                    self.append_row("Dimensions", &format_dimensions(dimensions));
+                }
+            }
+            MediaKind::Audio => {
+                if let Some(duration) = media.duration {
+                    self.append_row("Duration", &format_media_duration(duration));
+                }
+            }
+            MediaKind::Video => {
+                if let Some(dimensions) = media.dimensions {
+                    self.append_row("Resolution", &format_dimensions(dimensions));
+                }
+                if let Some(duration) = media.duration {
+                    self.append_row("Duration", &format_media_duration(duration));
+                }
+            }
         }
     }
 
@@ -356,6 +390,204 @@ fn push_count_summary(parts: &mut Vec<String>, count: usize, singular: &str, plu
     parts.push(format!("{count} {label}"));
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum MediaKind {
+    #[default]
+    Image,
+    Audio,
+    Video,
+}
+
+impl MediaKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Image => "Image",
+            Self::Audio => "Audio",
+            Self::Video => "Video",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct MediaDetails {
+    kind: MediaKind,
+    duration: Option<Duration>,
+    dimensions: Option<(i32, i32)>,
+}
+
+type MediaDetailsCache = Rc<RefCell<HashMap<PathBuf, Option<MediaDetails>>>>;
+
+fn media_details_for_item(
+    item: &FileItem,
+    media_details_cache: &MediaDetailsCache,
+) -> Option<MediaDetails> {
+    if item.kind != FileKind::File {
+        return None;
+    }
+
+    let path = item.uri.local_path().ok()?;
+    if let Some(cached) = media_details_cache.borrow().get(&path) {
+        return *cached;
+    }
+
+    let kind = media_kind_for_name(&item.name);
+    let probed = match kind {
+        Some(MediaKind::Image) => ProbedMediaMetadata {
+            duration: None,
+            dimensions: image_dimensions_for_path(&path),
+        },
+        Some(MediaKind::Audio | MediaKind::Video) => probe_media_metadata(&path),
+        None => ProbedMediaMetadata::default(),
+    };
+
+    let details = kind.map(|kind| MediaDetails {
+        kind,
+        duration: probed.duration,
+        dimensions: match kind {
+            MediaKind::Image | MediaKind::Video => probed.dimensions,
+            MediaKind::Audio => None,
+        },
+    });
+    media_details_cache.borrow_mut().insert(path, details);
+    details
+}
+
+fn media_kind_for_name(name: &str) -> Option<MediaKind> {
+    if views::icon::is_previewable_image(name) {
+        Some(MediaKind::Image)
+    } else if views::icon::is_previewable_video(name) {
+        Some(MediaKind::Video)
+    } else if views::icon::is_previewable_audio(name) {
+        Some(MediaKind::Audio)
+    } else {
+        None
+    }
+}
+
+fn image_dimensions_for_path(path: &Path) -> Option<(i32, i32)> {
+    let pixbuf = gdk_pixbuf::Pixbuf::from_file(path).ok()?;
+    Some((pixbuf.width(), pixbuf.height()))
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ProbedMediaMetadata {
+    duration: Option<Duration>,
+    dimensions: Option<(i32, i32)>,
+}
+
+fn probe_media_metadata(path: &Path) -> ProbedMediaMetadata {
+    ffprobe_output_for_path(path)
+        .as_deref()
+        .map(parse_ffprobe_output)
+        .unwrap_or_default()
+}
+
+fn ffprobe_output_for_path(path: &Path) -> Option<String> {
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration:stream=width,height",
+            "-of",
+            "default=noprint_wrappers=1:nokey=0",
+        ])
+        .arg(path)
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn parse_ffprobe_output(output: &str) -> ProbedMediaMetadata {
+    let mut duration = None;
+    let mut width = None;
+    let mut height = None;
+
+    for line in output.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        let value = value.trim();
+        match key {
+            "duration" if duration.is_none() => duration = parse_ffprobe_duration(value),
+            "width" if width.is_none() => width = parse_ffprobe_dimension(value),
+            "height" if height.is_none() => height = parse_ffprobe_dimension(value),
+            _ => {}
+        }
+    }
+
+    ProbedMediaMetadata {
+        duration,
+        dimensions: width.zip(height),
+    }
+}
+
+fn parse_ffprobe_duration(value: &str) -> Option<Duration> {
+    let seconds = value.parse::<f64>().ok()?;
+    if !seconds.is_finite() || seconds < 0.0 {
+        return None;
+    }
+
+    Some(Duration::from_secs_f64(seconds))
+}
+
+fn parse_ffprobe_dimension(value: &str) -> Option<i32> {
+    value.parse::<i32>().ok().filter(|dimension| *dimension > 0)
+}
+
+fn combined_media_duration(
+    items: &[FileItem],
+    media_details_cache: &MediaDetailsCache,
+) -> Option<Duration> {
+    let mut total = Duration::default();
+    let mut has_duration = false;
+
+    for duration in items
+        .iter()
+        .filter_map(|item| media_duration_for_item(item, media_details_cache))
+    {
+        has_duration = true;
+        total = total.checked_add(duration).unwrap_or(Duration::MAX);
+    }
+
+    has_duration.then_some(total)
+}
+
+fn media_duration_for_item(
+    item: &FileItem,
+    media_details_cache: &MediaDetailsCache,
+) -> Option<Duration> {
+    matches!(
+        media_kind_for_name(&item.name),
+        Some(MediaKind::Audio | MediaKind::Video)
+    )
+    .then_some(())?;
+    media_details_for_item(item, media_details_cache)?.duration
+}
+
+fn format_dimensions((width, height): (i32, i32)) -> String {
+    format!("{width} x {height}")
+}
+
+fn format_media_duration(duration: Duration) -> String {
+    let rounded_seconds = duration.as_secs_f64().round() as u64;
+    let hours = rounded_seconds / 3600;
+    let minutes = (rounded_seconds % 3600) / 60;
+    let seconds = rounded_seconds % 60;
+
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
+}
+
 impl FileTab {
     fn new(uri: ProviderUri) -> Self {
         Self {
@@ -375,6 +607,7 @@ pub struct AppWindow {
     back_stack: RefCell<Vec<ProviderUri>>,
     forward_stack: RefCell<Vec<ProviderUri>>,
     entries: Rc<RefCell<Vec<FileItem>>>,
+    media_details_cache: MediaDetailsCache,
     view_mode: Cell<ViewMode>,
     show_hidden: Cell<bool>,
     icon_size: Cell<i32>,
@@ -458,6 +691,7 @@ impl AppWindow {
         );
         let live_theme = theme::LiveTheme::new();
         let entries = Rc::new(RefCell::new(Vec::new()));
+        let media_details_cache = Rc::new(RefCell::new(HashMap::new()));
         let selected_indices = Rc::new(RefCell::new(BTreeSet::new()));
         let anchor_index = Rc::new(Cell::new(None::<usize>));
         let list_box = gtk::ListBox::builder()
@@ -485,8 +719,12 @@ impl AppWindow {
             .build();
         let details_panel = DetailsPanel::new();
         details_panel.clear();
-        let selection_changed =
-            selection_changed_handler(&selected_indices, &entries, &details_panel);
+        let selection_changed = selection_changed_handler(
+            &selected_indices,
+            &entries,
+            &details_panel,
+            &media_details_cache,
+        );
 
         let list_rubberband = rubberband_widget();
         let list_overlay = gtk::Overlay::builder().child(&list_scroll).build();
@@ -647,6 +885,7 @@ impl AppWindow {
             back_stack: RefCell::new(Vec::new()),
             forward_stack: RefCell::new(Vec::new()),
             entries,
+            media_details_cache,
             view_mode: Cell::new(state.layout),
             show_hidden: Cell::new(state.show_hidden),
             icon_size: Cell::new(state.icon_size),
@@ -1634,6 +1873,7 @@ impl AppWindow {
                 }
 
                 *self.current_uri.borrow_mut() = uri.clone();
+                self.media_details_cache.borrow_mut().clear();
                 self.watch_current_folder(&uri);
                 // Cancel any pending debounce timer and clear filter on navigation
                 self.cancel_pending_filter();
@@ -1881,6 +2121,7 @@ impl AppWindow {
         let uri = self.current_uri.borrow().clone();
         match self.list_visible_items(&uri) {
             Ok(items) => {
+                self.media_details_cache.borrow_mut().clear();
                 *self.all_entries.borrow_mut() = items;
                 self.topbar.path_entry.set_text(&uri.display_path());
                 self.render_breadcrumbs();
@@ -4262,10 +4503,12 @@ fn selection_changed_handler(
     selected_indices: &Rc<RefCell<BTreeSet<usize>>>,
     entries: &Rc<RefCell<Vec<FileItem>>>,
     details_panel: &DetailsPanel,
+    media_details_cache: &MediaDetailsCache,
 ) -> SelectionChangedHandler {
     let selected_indices = Rc::clone(selected_indices);
     let entries = Rc::clone(entries);
     let details_panel = details_panel.clone();
+    let media_details_cache = Rc::clone(media_details_cache);
     Rc::new(move || {
         let selected_indices = selected_indices
             .try_borrow()
@@ -4276,7 +4519,7 @@ fn selection_changed_handler(
             .into_iter()
             .filter_map(|index| entries.get(index).cloned())
             .collect::<Vec<_>>();
-        details_panel.set_items(&selected_items);
+        details_panel.set_items(&selected_items, &media_details_cache);
     })
 }
 
@@ -5536,8 +5779,9 @@ mod tests {
     use super::{
         FileClipboardOperation, copy_path_into, drop_target_is_selected, dropped_file_name_for_uri,
         file_clipboard_payload, file_uri_list_payload, folder_monitor_event_affects_listing,
-        is_desktop_entry_file, is_gif_image_path, move_path_into, new_folder_target,
-        next_tab_index_after_close, partition_drop_uris, tab_title,
+        format_media_duration, is_desktop_entry_file, is_gif_image_path, move_path_into,
+        new_folder_target, next_tab_index_after_close, parse_ffprobe_output, partition_drop_uris,
+        tab_title,
     };
 
     #[test]
@@ -5560,6 +5804,30 @@ mod tests {
     fn detects_gif_paths_for_animation_viewer() {
         assert!(is_gif_image_path(Path::new("/tmp/clip.GIF")));
         assert!(!is_gif_image_path(Path::new("/tmp/photo.png")));
+    }
+
+    #[test]
+    fn parses_ffprobe_duration_and_dimensions() {
+        let metadata = parse_ffprobe_output("width=1920\nheight=1080\nduration=123.6\n");
+
+        assert_eq!(metadata.dimensions, Some((1920, 1080)));
+        assert_eq!(metadata.duration.map(|value| value.as_secs()), Some(123));
+    }
+
+    #[test]
+    fn formats_media_duration_with_hours() {
+        assert_eq!(
+            format_media_duration(std::time::Duration::from_secs(59)),
+            "0:59"
+        );
+        assert_eq!(
+            format_media_duration(std::time::Duration::from_secs(61)),
+            "1:01"
+        );
+        assert_eq!(
+            format_media_duration(std::time::Duration::from_secs(3661)),
+            "1:01:01"
+        );
     }
 
     #[test]
