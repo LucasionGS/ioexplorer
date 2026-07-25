@@ -252,7 +252,8 @@ window {{\n\
 .spotlight-row-title,\n\
 .spotlight-section-label,\n\
 .spotlight-chat-text,\n\
-.spotlight-chat-code {{\n\
+.spotlight-chat-code-text,\n\
+.spotlight-chat-heading {{\n\
     color: {text};\n\
 }}\n\
 \n\
@@ -507,6 +508,9 @@ mod tests {
         assert!(css.contains(".spotlight-chat-text,"));
         assert!(css.contains(".spotlight-chat-role,"));
         assert!(css.contains(".spotlight-chat-status {"));
+        // Markdown blocks follow the palette too.
+        assert!(css.contains(".spotlight-chat-code-text,"));
+        assert!(css.contains(".spotlight-chat-heading {"));
     }
 
     /// The error bubble keeps its own red so it stays legible under any

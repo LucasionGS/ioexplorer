@@ -11,6 +11,7 @@
 //! rather than a runtime surprise.
 
 mod claude;
+pub mod markdown;
 mod mock;
 mod ndjson;
 mod ollama;

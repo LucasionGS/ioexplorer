@@ -683,8 +683,53 @@ window {
   padding: 8px 10px;
   border-radius: 8px;
   background: rgba(0, 0, 0, 0.28);
+}
+
+.spotlight-chat-code,
+.spotlight-chat-code > viewport {
+  background: rgba(0, 0, 0, 0.28);
+}
+
+.spotlight-chat-code-text {
   font-family: monospace;
   font-size: 0.88em;
+}
+
+.spotlight-chat-heading {
+  font-weight: 700;
+  margin-top: 4px;
+}
+
+.spotlight-chat-h1 {
+  font-size: 1.24em;
+}
+
+.spotlight-chat-h2 {
+  font-size: 1.12em;
+}
+
+.spotlight-chat-h3 {
+  font-size: 1.02em;
+}
+
+.spotlight-chat-list-row {
+  margin: 1px 0;
+}
+
+.spotlight-chat-bullet {
+  min-width: 16px;
+  opacity: 0.7;
+}
+
+.spotlight-chat-quote {
+  padding-left: 10px;
+  border-left: 2px solid rgba(255, 255, 255, 0.22);
+  font-style: italic;
+}
+
+.spotlight-chat-rule {
+  margin: 4px 0;
+  background: rgba(255, 255, 255, 0.14);
 }
 
 .spotlight-chat-status {

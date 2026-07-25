@@ -167,6 +167,10 @@ Typing `ai how do I rotate a PDF` opens a chat that grows out of the card and st
 
 The conversation is kept in memory by the `--server` daemon, so closing and reopening spotlight resumes it. Nothing is written to disk, and it is gone when the daemon restarts. Starting a new query from the search list begins a fresh conversation.
 
+Replies are rendered as Markdown once they finish: headings, `**bold**`, `*italic*`, `` `code` ``, `~~strikethrough~~`, bullet and numbered lists, block quotes, horizontal rules, and fenced code blocks (which scroll sideways rather than wrapping). Text streams in plain and formats when complete — a half-arrived `**bold` would otherwise show a literal `**` until its closing pair caught up.
+
+Two deliberate limits: `_underscores_` are left alone so `snake_case_names` survive, and links render as underlined text without being clickable.
+
 **The API key never goes in `config.toml`** — the settings UI rewrites that file in full whenever you save, so a key placed there would be persisted in plaintext. There are two supported places for it.
 
 **A key file (recommended).** `config.toml` holds only the path, which is not a secret:

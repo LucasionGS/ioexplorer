@@ -18,7 +18,7 @@ use crate::{
     },
     spotlight::{
         ToggleRequest,
-        ai::{AiError, AiEvent, AiProvider, AiSession, ChatMessage, Provider},
+        ai::{AiError, AiEvent, AiProvider, AiSession, ChatMessage, Provider, markdown},
         file_search::{FileHit, FileSearch, SearchEvent},
         keys::{self, Action},
         layout,
@@ -93,6 +93,8 @@ pub struct SpotlightWindow {
     chat: RefCell<Option<ChatState>>,
     /// The label currently receiving deltas; `None` when not streaming.
     streaming_label: RefCell<Option<gtk::Label>>,
+    /// The label a just-completed reply landed in, awaiting Markdown rendering.
+    finished_label: RefCell<Option<gtk::Label>>,
     /// Deltas are accumulated here and flushed once per tick.
     streaming_text: RefCell<String>,
     mode: Cell<keys::Mode>,
@@ -289,6 +291,7 @@ impl SpotlightWindow {
             ai_session: AiSession::new(),
             chat: RefCell::new(None),
             streaming_label: RefCell::new(None),
+            finished_label: RefCell::new(None),
             streaming_text: RefCell::new(String::new()),
             mode: Cell::new(keys::Mode::Search),
             chat_follow: Cell::new(true),
@@ -919,6 +922,9 @@ impl SpotlightWindow {
         }
         self.ai_session.cancel();
         self.finalize_streaming_label();
+        // A stopped reply is still worth formatting — the partial is what the
+        // user chose to keep.
+        self.render_markdown();
         self.set_streaming(false);
         self.note("Stopped.");
     }
@@ -1014,6 +1020,10 @@ impl SpotlightWindow {
     fn finish_stream(self: &Rc<Self>, stop_reason: Option<String>) {
         let text = self.finalize_streaming_label();
         self.set_streaming(false);
+        // Formatting is applied now rather than per delta: a half-arrived
+        // `**bold` would otherwise render as a literal `**` until its closing
+        // pair showed up, which reads worse than plain text.
+        self.render_markdown();
 
         if !text.is_empty()
             && let Some(chat) = self.chat.borrow_mut().as_mut()
@@ -1040,6 +1050,10 @@ impl SpotlightWindow {
                 .remove(&label.parent().unwrap_or_else(|| label.clone().upcast()));
         }
         self.finalize_streaming_label();
+        // Formats whatever arrived before the failure, and — importantly —
+        // consumes `finished_label` so a later reply cannot render into this
+        // now-stale one.
+        self.render_markdown();
         self.set_streaming(false);
         self.append_message("Error", &error.to_string(), "spotlight-chat-error");
         self.scroll_chat_to_bottom();
@@ -1047,10 +1061,14 @@ impl SpotlightWindow {
     }
 
     /// Strips the caret and detaches the streaming label, returning its text.
+    ///
+    /// The label is handed to `finished_label` so [`Self::render_markdown`] can
+    /// replace it once the reply is known to be complete.
     fn finalize_streaming_label(self: &Rc<Self>) -> String {
         let text = std::mem::take(&mut *self.streaming_text.borrow_mut());
         if let Some(label) = self.streaming_label.borrow_mut().take() {
             label.set_text(&text);
+            *self.finished_label.borrow_mut() = Some(label);
         }
         text
     }
@@ -1061,6 +1079,30 @@ impl SpotlightWindow {
             .as_ref()
             .map(|chat| chat.label.clone())
             .unwrap_or_else(|| "Assistant".to_string())
+    }
+
+    /// Replaces the just-finished reply's plain label with rendered Markdown.
+    ///
+    /// Leaves the transcript untouched when the reply has no block structure
+    /// worth rendering, so a one-line answer keeps its single selectable label.
+    fn render_markdown(self: &Rc<Self>) {
+        let Some(label) = self.finished_label.borrow_mut().take() else {
+            return;
+        };
+        let Some(row) = label.parent().and_downcast::<gtk::Box>() else {
+            return;
+        };
+
+        let text = label.text().to_string();
+        let blocks = markdown::parse(&text);
+        if blocks.is_empty() {
+            return;
+        }
+
+        row.remove(&label);
+        for block in blocks {
+            row.append(&widget_for_block(&block));
+        }
     }
 
     /// Appends a role caption plus a body label, returning the body label so a
@@ -1189,6 +1231,106 @@ fn footer(keys: &[(&str, &str)]) -> gtk::Box {
     }
 
     footer
+}
+
+/// Builds the widget for one Markdown block.
+///
+/// Every text run goes through `markdown::inline_markup`, which escapes XML —
+/// so a reply containing `<span …>` renders as those characters rather than
+/// becoming real Pango markup.
+fn widget_for_block(block: &markdown::Block) -> gtk::Widget {
+    match block {
+        markdown::Block::Heading { level, text } => {
+            let class = match level {
+                1 => "spotlight-chat-h1",
+                2 => "spotlight-chat-h2",
+                _ => "spotlight-chat-h3",
+            };
+            markup_label(text, &["spotlight-chat-heading", class]).upcast()
+        }
+        markdown::Block::Paragraph(text) => markup_label(text, &["spotlight-chat-text"]).upcast(),
+        markdown::Block::Quote(text) => {
+            markup_label(text, &["spotlight-chat-text", "spotlight-chat-quote"]).upcast()
+        }
+        markdown::Block::Bullet { indent, text } => {
+            list_row("•", *indent, text, &["spotlight-chat-text"]).upcast()
+        }
+        markdown::Block::Numbered {
+            indent,
+            marker,
+            text,
+        } => list_row(
+            &format!("{marker}."),
+            *indent,
+            text,
+            &["spotlight-chat-text"],
+        )
+        .upcast(),
+        markdown::Block::Code { body, .. } => code_block(body).upcast(),
+        markdown::Block::Rule => gtk::Separator::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .css_classes(["spotlight-chat-rule"])
+            .build()
+            .upcast(),
+    }
+}
+
+fn markup_label(text: &str, css_classes: &[&str]) -> gtk::Label {
+    let label = gtk::Label::builder()
+        .xalign(0.0)
+        .wrap(true)
+        .wrap_mode(gtk::pango::WrapMode::WordChar)
+        .selectable(true)
+        .css_classes(css_classes.to_vec())
+        .build();
+    label.set_markup(&markdown::inline_markup(text));
+    label.set_focus_on_click(false);
+    label
+}
+
+/// A bullet or number in its own column so wrapped text stays aligned under
+/// the text, not under the marker.
+fn list_row(marker: &str, indent: usize, text: &str, css_classes: &[&str]) -> gtk::Box {
+    let row = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .margin_start((indent as i32).min(8) * 3)
+        .css_classes(["spotlight-chat-list-row"])
+        .build();
+    row.append(
+        &gtk::Label::builder()
+            .label(marker)
+            .xalign(0.0)
+            .valign(gtk::Align::Start)
+            .css_classes(["spotlight-chat-bullet"])
+            .build(),
+    );
+
+    let body = markup_label(text, css_classes);
+    body.set_hexpand(true);
+    row.append(&body);
+    row
+}
+
+/// Code scrolls horizontally rather than wrapping — character-wrapped code is
+/// unreadable, and letting it size the card would blow the layout out.
+fn code_block(body: &str) -> gtk::ScrolledWindow {
+    let label = gtk::Label::builder()
+        .label(body)
+        .xalign(0.0)
+        .wrap(false)
+        .selectable(true)
+        .css_classes(["spotlight-chat-code-text"])
+        .build();
+    label.set_focus_on_click(false);
+
+    gtk::ScrolledWindow::builder()
+        .child(&label)
+        .hscrollbar_policy(gtk::PolicyType::Automatic)
+        .vscrollbar_policy(gtk::PolicyType::Never)
+        .propagate_natural_height(true)
+        .css_classes(["spotlight-chat-code"])
+        .build()
 }
 
 /// Generous slack: a partly-rendered final line should still count as "at the
