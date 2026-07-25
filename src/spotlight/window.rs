@@ -18,6 +18,7 @@ use crate::{
     },
     spotlight::{
         ToggleRequest,
+        ai::{AiError, AiEvent, AiProvider, AiSession, ChatMessage, Provider},
         file_search::{FileHit, FileSearch, SearchEvent},
         keys::{self, Action},
         layout,
@@ -27,13 +28,46 @@ use crate::{
     },
 };
 
-/// One tick drains both the toggle socket and the filesystem walker.
+/// A live conversation. Plain data — no GObjects — so borrows stay short.
+struct ChatState {
+    provider: Provider,
+    label: String,
+    history: Vec<ChatMessage>,
+    streaming: bool,
+}
+
+/// One tick drains the toggle socket, the filesystem walker and the AI stream.
 const TICK_INTERVAL: Duration = Duration::from_millis(24);
 /// Height at which the result list starts scrolling instead of growing.
 const MAX_LIST_HEIGHT: i32 = 420;
+/// Height at which the transcript starts scrolling instead of growing.
+const MAX_CHAT_HEIGHT: i32 = 520;
 const ROW_ICON_SIZE: i32 = 28;
 /// Rows reachable via Alt+1..9.
 const QUICK_PICK_ROWS: usize = 9;
+/// Shown at the end of the streaming message so it reads as still going.
+const STREAM_CARET: char = '▍';
+/// Header, status line, footer and the card's own padding — everything above
+/// and below the scrolling area.
+const CARD_CHROME_HEIGHT: i32 = 200;
+/// The tallest the card can ever get. Used to place it, so the offset never
+/// depends on how tall the card happens to be right now.
+const MAX_CARD_HEIGHT: i32 = MAX_CHAT_HEIGHT + CARD_CHROME_HEIGHT;
+
+const FOOTER_SEARCH_KEYS: &[(&str, &str)] = &[
+    ("↑↓", "Navigate"),
+    ("Enter", "Open"),
+    ("Tab", "Complete"),
+    ("?", "Prefixes"),
+    ("Esc", "Close"),
+];
+
+const FOOTER_CHAT_KEYS: &[(&str, &str)] = &[
+    ("Enter", "Send"),
+    ("Ctrl+C", "Stop"),
+    ("Ctrl+Y", "Copy"),
+    ("Esc", "Back"),
+];
 
 pub struct SpotlightWindow {
     app: gtk::Application,
@@ -42,11 +76,37 @@ pub struct SpotlightWindow {
     entry: gtk::Entry,
     prefix_badge: gtk::Label,
     hint_label: gtk::Label,
+    spinner: gtk::Spinner,
+    body: gtk::Stack,
+    footers: gtk::Stack,
     list: gtk::ListBox,
     scroller: gtk::ScrolledWindow,
+    chat_scroller: gtk::ScrolledWindow,
+    transcript: gtk::Box,
+    status_label: gtk::Label,
     empty_label: gtk::Label,
     config: SpotlightConfig,
     prefix_table: PrefixTable,
+    ai_providers: Vec<AiProvider>,
+    ai_session: AiSession,
+    /// The live conversation, kept in memory so hide/show resumes it.
+    chat: RefCell<Option<ChatState>>,
+    /// The label currently receiving deltas; `None` when not streaming.
+    streaming_label: RefCell<Option<gtk::Label>>,
+    /// Deltas are accumulated here and flushed once per tick.
+    streaming_text: RefCell<String>,
+    mode: Cell<keys::Mode>,
+    /// Whether the transcript should stay pinned to the bottom as it grows.
+    /// Cleared when the user scrolls away, restored when they scroll back.
+    chat_follow: Cell<bool>,
+    /// Last margin `apply_top_offset` returned, to skip redundant re-layout.
+    applied_top_margin: Cell<i32>,
+    /// Last surface height seen, so a layout pass we caused ourselves does not
+    /// trigger another one.
+    last_window_height: Cell<i32>,
+    /// Re-entrancy guard: `reflow` sets a margin, which can synchronously run
+    /// another layout pass. Without this the two can ping-pong.
+    reflowing: Cell<bool>,
     live_index: Rc<LiveAppIndex>,
     frecency: RefCell<Frecency>,
     file_search: FileSearch,
@@ -66,6 +126,7 @@ impl SpotlightWindow {
         app: &gtk::Application,
         config: SpotlightConfig,
         prefix_table: PrefixTable,
+        ai_providers: Vec<AiProvider>,
         server_mode: bool,
     ) -> Rc<Self> {
         let card = gtk::Box::builder()
@@ -106,6 +167,12 @@ impl SpotlightWindow {
             .build();
         header.append(&entry);
 
+        let spinner = gtk::Spinner::builder()
+            .visible(false)
+            .css_classes(["spotlight-chat-spinner"])
+            .build();
+        header.append(&spinner);
+
         let hint_label = gtk::Label::builder()
             .visible(false)
             .css_classes(["spotlight-hint", "dim-label"])
@@ -126,7 +193,31 @@ impl SpotlightWindow {
             .propagate_natural_height(true)
             .css_classes(["spotlight-scroll"])
             .build();
-        card.append(&scroller);
+
+        let transcript = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(10)
+            .css_classes(["spotlight-chat-transcript"])
+            .build();
+        let chat_scroller = gtk::ScrolledWindow::builder()
+            .child(&transcript)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .max_content_height(MAX_CHAT_HEIGHT)
+            .propagate_natural_height(true)
+            .css_classes(["spotlight-chat-scroll"])
+            .build();
+
+        // Crossfade, never slide: a slide animates the stack's allocation and
+        // fights `apply_top_offset`, which shows up as the card jumping.
+        let body = gtk::Stack::builder()
+            .transition_type(gtk::StackTransitionType::Crossfade)
+            .transition_duration(120)
+            .css_classes(["spotlight-body"])
+            .build();
+        body.add_named(&scroller, Some("results"));
+        body.add_named(&chat_scroller, Some("chat"));
+        body.set_visible_child_name("results");
+        card.append(&body);
 
         let empty_label = gtk::Label::builder()
             .label("No results")
@@ -135,7 +226,23 @@ impl SpotlightWindow {
             .css_classes(["spotlight-empty", "dim-label"])
             .build();
         card.append(&empty_label);
-        card.append(&footer());
+
+        let status_label = gtk::Label::builder()
+            .xalign(0.0)
+            .visible(false)
+            .wrap(true)
+            .css_classes(["spotlight-chat-status", "dim-label"])
+            .build();
+        card.append(&status_label);
+
+        let footers = gtk::Stack::builder()
+            .transition_type(gtk::StackTransitionType::Crossfade)
+            .transition_duration(120)
+            .build();
+        footers.add_named(&footer(FOOTER_SEARCH_KEYS), Some("results"));
+        footers.add_named(&footer(FOOTER_CHAT_KEYS), Some("chat"));
+        footers.set_visible_child_name("results");
+        card.append(&footers);
 
         let root = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
@@ -167,11 +274,27 @@ impl SpotlightWindow {
             entry,
             prefix_badge,
             hint_label,
+            spinner,
+            body,
+            footers,
             list,
             scroller,
+            chat_scroller,
+            transcript,
+            status_label,
             empty_label,
             config,
             prefix_table,
+            ai_providers,
+            ai_session: AiSession::new(),
+            chat: RefCell::new(None),
+            streaming_label: RefCell::new(None),
+            streaming_text: RefCell::new(String::new()),
+            mode: Cell::new(keys::Mode::Search),
+            chat_follow: Cell::new(true),
+            applied_top_margin: Cell::new(0),
+            last_window_height: Cell::new(0),
+            reflowing: Cell::new(false),
             live_index: LiveAppIndex::new(),
             frecency: RefCell::new(Frecency::load()),
             file_search: FileSearch::new(),
@@ -240,10 +363,31 @@ impl SpotlightWindow {
             });
         }
 
+        // Sticky-bottom scrolling for the transcript.
+        //
+        // `changed` fires when the content size updates — that is, once the
+        // streaming label has actually re-laid-out — which is the only moment
+        // the new bottom is known. Scrolling from the flush itself, or from an
+        // idle callback, races that layout and lands short.
+        let adjustment = self.chat_scroller.vadjustment();
+
         let this = Rc::clone(self);
-        self.window.connect_map(move |window| {
-            layout::apply_top_offset(window, &this.card, this.config.clamped_top_ratio());
+        adjustment.connect_changed(move |adjustment| {
+            if this.chat_follow.get() {
+                adjustment.set_value(adjustment.upper() - adjustment.page_size());
+            }
         });
+
+        // `value_changed` fires only when someone actually scrolls, so growth
+        // alone never disturbs the flag — following stops when the user scrolls
+        // up and resumes when they come back to the bottom.
+        let this = Rc::clone(self);
+        adjustment.connect_value_changed(move |adjustment| {
+            this.chat_follow.set(is_at_bottom(adjustment));
+        });
+
+        let this = Rc::clone(self);
+        self.window.connect_map(move |_| this.reflow());
 
         let this = Rc::clone(self);
         self.window.connect_realize(move |window| {
@@ -251,11 +395,18 @@ impl SpotlightWindow {
                 return;
             };
             let this = Rc::clone(&this);
-            let window = window.clone();
-            // Re-run on every layout so the offset follows a monitor or
-            // resolution change rather than sticking to the first output.
-            surface.connect_layout(move |_, _, _| {
-                layout::apply_top_offset(&window, &this.card, this.config.clamped_top_ratio());
+            // Follows a monitor or resolution change — but *only* on a real
+            // size change. Reflowing on every layout pass is a feedback loop:
+            // `reflow` sets a margin, which requests another layout, which
+            // measures a card whose height has meanwhile changed, and GTK
+            // eventually gives up with "layout continuously requested".
+            //
+            // The surface is anchored to all four edges, so its height changes
+            // only when the output does — never because of our own margin.
+            surface.connect_layout(move |_, _, height| {
+                if this.last_window_height.replace(height) != height {
+                    this.reflow();
+                }
             });
         });
 
@@ -273,7 +424,26 @@ impl SpotlightWindow {
         self.live_index.connect_changed(move |_| this.rebuild());
     }
 
-    /// Installs the single tick that drains the toggle socket and the walker.
+    /// Re-applies the top offset, skipping the work when nothing moved.
+    ///
+    /// Setting a margin requests a layout, and a layout can call back into
+    /// here — the guard stops that becoming a loop.
+    fn reflow(&self) {
+        if self.reflowing.replace(true) {
+            return;
+        }
+        let margin = layout::apply_top_offset(
+            &self.window,
+            &self.card,
+            self.config.clamped_top_ratio(),
+            MAX_CARD_HEIGHT,
+        );
+        self.applied_top_margin.set(margin);
+        self.reflowing.set(false);
+    }
+
+    /// Installs the single tick that drains the toggle socket, the walker and
+    /// the AI stream.
     pub fn install_tick(self: &Rc<Self>, receiver: Option<mpsc::Receiver<ToggleRequest>>) {
         let this = Rc::clone(self);
         glib::timeout_add_local(TICK_INTERVAL, move || {
@@ -283,6 +453,7 @@ impl SpotlightWindow {
                 }
             }
             this.drain_file_search();
+            this.drain_ai();
             glib::ControlFlow::Continue
         });
     }
@@ -292,9 +463,25 @@ impl SpotlightWindow {
         key: gtk::gdk::Key,
         state: gtk::gdk::ModifierType,
     ) -> glib::Propagation {
-        match keys::resolve(key, state) {
+        match keys::resolve(key, state, self.mode.get()) {
             Action::Close => {
                 self.close();
+                glib::Propagation::Stop
+            }
+            Action::Back => {
+                self.leave_chat();
+                glib::Propagation::Stop
+            }
+            Action::Send => {
+                self.send_follow_up();
+                glib::Propagation::Stop
+            }
+            Action::Cancel => {
+                self.cancel_stream();
+                glib::Propagation::Stop
+            }
+            Action::CopyLast => {
+                self.copy_last_reply();
                 glib::Propagation::Stop
             }
             Action::Move(delta) => {
@@ -313,13 +500,32 @@ impl SpotlightWindow {
                 self.activate(index, false);
                 glib::Propagation::Stop
             }
-            Action::Pass => glib::Propagation::Proceed,
+            Action::Pass => {
+                // A selectable transcript label is focusable, so clicking one
+                // moves focus off the entry and the next keystroke goes nowhere.
+                //
+                // This runs in the capture phase, before the entry sees the key,
+                // and plain `grab_focus` on a GtkEntry *selects all its text* —
+                // which would make every keystroke replace the whole reply
+                // instead of appending to it.
+                if self.mode.get() == keys::Mode::Chat && !self.entry.has_focus() {
+                    self.entry.grab_focus_without_selecting();
+                }
+                glib::Propagation::Proceed
+            }
         }
     }
 
     // -- results -----------------------------------------------------------
 
     fn rebuild(self: &Rc<Self>) {
+        // Load-bearing: `entry.set_text` fires `connect_changed`, and that
+        // happens on every send, on enter/leave chat, and on show/hide. Without
+        // this guard each follow-up keystroke re-renders a hidden results list.
+        if self.mode.get() == keys::Mode::Chat {
+            return;
+        }
+
         let raw = self.entry.text().to_string();
         let parsed = query::parse(&raw, &self.prefix_table);
         let limit = self.config.clamped_result_limit();
@@ -367,6 +573,23 @@ impl SpotlightWindow {
         {
             results.insert(0, results::hint_result(prefix));
             results.truncate(limit);
+        }
+
+        // A plain query with a `default = true` provider also offers to ask it.
+        if let Query::Plain(text) = &parsed.query
+            && !text.trim().is_empty()
+            && let Some((index, provider)) = self
+                .ai_providers
+                .iter()
+                .enumerate()
+                .find(|(_, provider)| provider.default)
+        {
+            results.push(results::default_ai_result(
+                index,
+                &provider.label,
+                &provider.icon,
+                text,
+            ));
         }
 
         self.update_header(active_prefix, parsed.hint.as_deref());
@@ -540,6 +763,11 @@ impl SpotlightWindow {
             self.set_entry_text(text);
             return;
         }
+        // Opening a chat keeps the window up, so it returns before `close()`.
+        if let Activation::AskAi { provider, prompt } = &activation {
+            self.enter_chat(*provider, prompt);
+            return;
+        }
         if matches!(activation, Activation::Inert) {
             return;
         }
@@ -577,8 +805,310 @@ impl SpotlightWindow {
                 display.clipboard().set_text(text);
                 Ok(())
             }
-            Activation::Replace(_) | Activation::Inert => Ok(()),
+            // Both are handled before `perform` is reached.
+            Activation::Replace(_) | Activation::AskAi { .. } | Activation::Inert => Ok(()),
         }
+    }
+
+    // -- chat --------------------------------------------------------------
+
+    /// Switches to the transcript and sends the first prompt.
+    ///
+    /// A prompt from the results list always starts a fresh conversation;
+    /// re-entering without one resumes whatever is already there.
+    fn enter_chat(self: &Rc<Self>, provider_index: usize, prompt: &str) {
+        let Some(provider) = self.ai_providers.get(provider_index) else {
+            return;
+        };
+
+        let restarting = self
+            .chat
+            .borrow()
+            .as_ref()
+            .is_none_or(|chat| chat.provider != provider.provider);
+        if restarting {
+            *self.chat.borrow_mut() = Some(ChatState {
+                provider: provider.provider.clone(),
+                label: provider.label.clone(),
+                history: Vec::new(),
+                streaming: false,
+            });
+            icons::clear_box_children(&self.transcript);
+        }
+
+        self.set_mode(keys::Mode::Chat);
+        self.prefix_badge.set_text(&provider.label);
+        self.prefix_badge.set_visible(true);
+        self.send_prompt(prompt.to_string());
+    }
+
+    /// Returns to the results list, cancelling any stream.
+    ///
+    /// Never routes to `close()` — that quits the process in one-shot mode.
+    fn leave_chat(self: &Rc<Self>) {
+        if self.mode.get() != keys::Mode::Chat {
+            self.close();
+            return;
+        }
+
+        self.cancel_stream();
+        self.set_mode(keys::Mode::Search);
+        self.set_entry_text("");
+        self.rebuild();
+        self.reflow();
+    }
+
+    fn set_mode(self: &Rc<Self>, mode: keys::Mode) {
+        self.mode.set(mode);
+        match mode {
+            keys::Mode::Chat => {
+                self.body.set_visible_child_name("chat");
+                self.footers.set_visible_child_name("chat");
+                self.empty_label.set_visible(false);
+                self.entry.set_placeholder_text(Some("Reply…"));
+                self.hint_label.set_visible(false);
+            }
+            keys::Mode::Search => {
+                self.body.set_visible_child_name("results");
+                self.footers.set_visible_child_name("results");
+                self.entry
+                    .set_placeholder_text(Some("Search apps, folders and commands"));
+                self.status_label.set_visible(false);
+                self.set_streaming(false);
+            }
+        }
+    }
+
+    fn send_follow_up(self: &Rc<Self>) {
+        let prompt = self.entry.text().trim().to_string();
+        if prompt.is_empty() {
+            return;
+        }
+        self.send_prompt(prompt);
+    }
+
+    /// Appends the prompt to the transcript and starts a request.
+    fn send_prompt(self: &Rc<Self>, prompt: String) {
+        // A second send supersedes the first; the old worker sees the bumped
+        // generation and unwinds on its own.
+        self.finalize_streaming_label();
+
+        let Some((provider, history)) = self.chat.borrow_mut().as_mut().map(|chat| {
+            chat.history.push(ChatMessage::user(prompt.clone()));
+            chat.streaming = true;
+            (chat.provider.clone(), chat.history.clone())
+        }) else {
+            return;
+        };
+
+        self.append_message("You", &prompt, "spotlight-chat-user");
+        self.set_entry_text("");
+        // Appending to the transcript can move focus; take it back so the next
+        // follow-up can be typed straight away.
+        self.entry.grab_focus_without_selecting();
+        self.set_streaming(true);
+        self.status_label.set_visible(false);
+        self.ai_session.start(provider, history);
+        self.scroll_chat_to_bottom();
+    }
+
+    /// Stops generating but stays in the transcript, keeping partial text.
+    fn cancel_stream(self: &Rc<Self>) {
+        if !self.is_streaming() {
+            return;
+        }
+        self.ai_session.cancel();
+        self.finalize_streaming_label();
+        self.set_streaming(false);
+        self.note("Stopped.");
+    }
+
+    fn copy_last_reply(self: &Rc<Self>) {
+        let last = self.chat.borrow().as_ref().and_then(|chat| {
+            chat.history
+                .iter()
+                .rev()
+                .find(|message| matches!(message.role, crate::spotlight::ai::Role::Assistant))
+                .map(|message| message.text.clone())
+        });
+
+        let Some(text) = last else {
+            return;
+        };
+        if let Some(display) = gtk::gdk::Display::default() {
+            display.clipboard().set_text(&text);
+            self.note("Copied the last reply.");
+        }
+    }
+
+    fn is_streaming(&self) -> bool {
+        self.chat
+            .borrow()
+            .as_ref()
+            .is_some_and(|chat| chat.streaming)
+    }
+
+    fn set_streaming(&self, streaming: bool) {
+        if let Some(chat) = self.chat.borrow_mut().as_mut() {
+            chat.streaming = streaming;
+        }
+        self.spinner.set_visible(streaming);
+        self.spinner.set_spinning(streaming);
+    }
+
+    /// Drains this tick's stream events, issuing exactly one `set_text`.
+    fn drain_ai(self: &Rc<Self>) {
+        let events = self.ai_session.drain();
+        if events.is_empty() {
+            return;
+        }
+
+        let mut grew = false;
+        for event in events {
+            match event {
+                AiEvent::Started { .. } => self.set_streaming(true),
+                AiEvent::Thinking { .. } => {
+                    // Accurate on Claude: reasoning can run for seconds with no
+                    // visible output, and this is the only signal of it.
+                    self.status_label.set_text("Thinking…");
+                    self.status_label.set_visible(true);
+                }
+                AiEvent::Delta { text, .. } => {
+                    self.streaming_text.borrow_mut().push_str(&text);
+                    grew = true;
+                }
+                AiEvent::Done { stop_reason, .. } => self.finish_stream(stop_reason),
+                AiEvent::Failed { error, .. } => self.fail_stream(&error),
+            }
+        }
+
+        if grew {
+            self.status_label.set_visible(false);
+            self.flush_streaming_text();
+        }
+    }
+
+    /// Writes the accumulated text in one shot — Pango re-lays-out the whole
+    /// label on every `set_text`, so doing it per delta would be wasteful.
+    fn flush_streaming_text(self: &Rc<Self>) {
+        let text = self.streaming_text.borrow().clone();
+        if text.is_empty() {
+            return;
+        }
+
+        let label = self.streaming_label.borrow().clone();
+        let label = match label {
+            Some(label) => label,
+            None => {
+                let label = self.append_message(&self.chat_label(), "", "spotlight-chat-assistant");
+                *self.streaming_label.borrow_mut() = Some(label.clone());
+                label
+            }
+        };
+
+        // No scrolling here: setting the text triggers a re-layout, and the
+        // adjustment's `changed` handler pins the bottom once that lands.
+        label.set_text(&format!("{text}{STREAM_CARET}"));
+    }
+
+    fn finish_stream(self: &Rc<Self>, stop_reason: Option<String>) {
+        let text = self.finalize_streaming_label();
+        self.set_streaming(false);
+
+        if !text.is_empty()
+            && let Some(chat) = self.chat.borrow_mut().as_mut()
+        {
+            chat.history.push(ChatMessage::assistant(text));
+        }
+
+        match stop_reason.as_deref() {
+            Some("max_tokens") => {
+                self.note("Cut off at the token limit — raise `max_tokens` in [[spotlight.ai]].");
+            }
+            _ => self.status_label.set_visible(false),
+        }
+        self.reflow();
+    }
+
+    fn fail_stream(self: &Rc<Self>, error: &AiError) {
+        // A refusal arrives after any content blocks, so discard the partial
+        // rather than leaving a half-answer standing above the explanation.
+        if matches!(error, AiError::Refused { .. })
+            && let Some(label) = self.streaming_label.borrow_mut().take()
+        {
+            self.transcript
+                .remove(&label.parent().unwrap_or_else(|| label.clone().upcast()));
+        }
+        self.finalize_streaming_label();
+        self.set_streaming(false);
+        self.append_message("Error", &error.to_string(), "spotlight-chat-error");
+        self.scroll_chat_to_bottom();
+        self.reflow();
+    }
+
+    /// Strips the caret and detaches the streaming label, returning its text.
+    fn finalize_streaming_label(self: &Rc<Self>) -> String {
+        let text = std::mem::take(&mut *self.streaming_text.borrow_mut());
+        if let Some(label) = self.streaming_label.borrow_mut().take() {
+            label.set_text(&text);
+        }
+        text
+    }
+
+    fn chat_label(&self) -> String {
+        self.chat
+            .borrow()
+            .as_ref()
+            .map(|chat| chat.label.clone())
+            .unwrap_or_else(|| "Assistant".to_string())
+    }
+
+    /// Appends a role caption plus a body label, returning the body label so a
+    /// streaming reply can keep writing into it.
+    fn append_message(&self, role: &str, text: &str, css_class: &str) -> gtk::Label {
+        let row = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(2)
+            .css_classes(["spotlight-chat-row", css_class])
+            .build();
+        row.append(
+            &gtk::Label::builder()
+                .label(role)
+                .xalign(0.0)
+                .css_classes(["spotlight-chat-role"])
+                .build(),
+        );
+
+        let body = gtk::Label::builder()
+            .label(text)
+            .xalign(0.0)
+            .wrap(true)
+            .wrap_mode(gtk::pango::WrapMode::WordChar)
+            .selectable(true)
+            .css_classes(["spotlight-chat-text"])
+            .build();
+        // `selectable` makes a label focusable, so clicking one would otherwise
+        // pull focus out of the entry. Text stays mouse-selectable; the click
+        // just no longer moves keyboard focus.
+        body.set_focus_on_click(false);
+        row.append(&body);
+        self.transcript.append(&row);
+        body
+    }
+
+    fn note(&self, text: &str) {
+        self.status_label.set_text(text);
+        self.status_label.set_visible(true);
+    }
+
+    /// Jumps to the bottom and resumes following, whatever the user last did.
+    fn scroll_chat_to_bottom(self: &Rc<Self>) {
+        self.chat_follow.set(true);
+        let adjustment = self.chat_scroller.vadjustment();
+        // Deferred so the freshly appended row is measured first.
+        glib::idle_add_local_once(move || {
+            adjustment.set_value(adjustment.upper() - adjustment.page_size());
+        });
     }
 
     // -- visibility --------------------------------------------------------
@@ -594,7 +1124,7 @@ impl SpotlightWindow {
     pub fn show(self: &Rc<Self>) {
         self.entry.set_text("");
         self.rebuild();
-        layout::apply_top_offset(&self.window, &self.card, self.config.clamped_top_ratio());
+        self.reflow();
         self.window.present();
 
         let entry = self.entry.clone();
@@ -603,9 +1133,18 @@ impl SpotlightWindow {
         });
     }
 
+    /// Hiding keeps the conversation: reopening and re-entering chat resumes it.
+    /// The daemon holds it in memory only — nothing is written to disk, and it
+    /// is gone on restart.
     pub fn hide(&self) {
         self.file_search.cancel();
         self.file_hits.borrow_mut().clear();
+        // A stream would otherwise keep appending into a hidden transcript.
+        self.ai_session.cancel();
+        if let Some(chat) = self.chat.borrow_mut().as_mut() {
+            chat.streaming = false;
+        }
+        self.spinner.set_spinning(false);
         self.entry.set_text("");
         self.window.set_visible(false);
     }
@@ -622,20 +1161,14 @@ impl SpotlightWindow {
     }
 }
 
-fn footer() -> gtk::Box {
+fn footer(keys: &[(&str, &str)]) -> gtk::Box {
     let footer = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(14)
         .css_classes(["spotlight-footer"])
         .build();
 
-    for (keycap, description) in [
-        ("↑↓", "Navigate"),
-        ("Enter", "Open"),
-        ("Tab", "Complete"),
-        ("?", "Prefixes"),
-        ("Esc", "Close"),
-    ] {
+    for (keycap, description) in keys.iter().copied() {
         let group = gtk::Box::builder()
             .orientation(gtk::Orientation::Horizontal)
             .spacing(5)
@@ -656,6 +1189,14 @@ fn footer() -> gtk::Box {
     }
 
     footer
+}
+
+/// Generous slack: a partly-rendered final line should still count as "at the
+/// bottom", or a fast stream would keep unsticking itself.
+const AUTOSCROLL_SLACK: f64 = 48.0;
+
+fn is_at_bottom(adjustment: &gtk::Adjustment) -> bool {
+    adjustment.value() + adjustment.page_size() >= adjustment.upper() - AUTOSCROLL_SLACK
 }
 
 fn row_for(result: &SpotlightResult, index: usize) -> gtk::ListBoxRow {

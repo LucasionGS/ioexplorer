@@ -28,6 +28,11 @@ pub enum Activation {
     CopyText(String),
     /// Rewrite the entry text, e.g. accepting a prefix hint or a path completion.
     Replace(String),
+    /// Open the chat view and send `prompt` to the provider at this index.
+    AskAi {
+        provider: usize,
+        prompt: String,
+    },
     /// Informational rows such as the help listing.
     Inert,
 }
@@ -285,7 +290,50 @@ pub fn prefixed_results(
         PrefixKind::Command { command, terminal } => {
             command_results(prefix, command, *terminal, arg)
         }
+        PrefixKind::Ai(index) => ai_results(prefix, *index, arg),
     }
+}
+
+/// The single row that opens a chat. Enter on it hands the prompt to the model.
+fn ai_results(prefix: &Prefix, index: usize, arg: &str) -> Vec<SpotlightResult> {
+    let icon = IconRef::from_icon_name(prefix.icon.clone());
+
+    if arg.trim().is_empty() {
+        return vec![SpotlightResult::new(
+            prefix.label.clone(),
+            format!("{} · type a question", prefix.description),
+            icon,
+        )];
+    }
+
+    let mut result = SpotlightResult::new(arg.to_string(), format!("Ask {}", prefix.label), icon);
+    result.primary = Activation::AskAi {
+        provider: index,
+        prompt: arg.to_string(),
+    };
+    result.frecency_key = Some(format!("ai:{}", prefix.key));
+    vec![result]
+}
+
+/// The trailing "Ask …" row offered on a plain query when a provider is marked
+/// `default = true`. Sorted last so it never displaces a real match.
+pub fn default_ai_result(
+    provider_index: usize,
+    label: &str,
+    icon: &str,
+    prompt: &str,
+) -> SpotlightResult {
+    let mut result = SpotlightResult::new(
+        format!("Ask {label}"),
+        prompt.to_string(),
+        IconRef::from_icon_name(icon),
+    );
+    result.primary = Activation::AskAi {
+        provider: provider_index,
+        prompt: prompt.to_string(),
+    };
+    result.score = i32::MIN + 1;
+    result
 }
 
 fn shell_results(arg: &str) -> Vec<SpotlightResult> {
@@ -489,7 +537,7 @@ mod tests {
     use crate::spotlight::prefixes;
 
     fn table() -> PrefixTable {
-        prefixes::resolve(&SpotlightConfig::default())
+        prefixes::resolve_with_ai(&SpotlightConfig::default()).0
     }
 
     #[test]

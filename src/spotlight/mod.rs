@@ -4,6 +4,7 @@
 //! Like the start menu, running the command a second time toggles a `--server`
 //! instance closed rather than opening a second window.
 
+mod ai;
 mod calc;
 mod file_search;
 mod keys;
@@ -88,8 +89,14 @@ fn run_application(mode: LaunchMode) -> glib::ExitCode {
 
     app.connect_activate(move |app| {
         let config = AppConfig::load();
-        let prefix_table = prefixes::resolve(&config.spotlight);
-        let window = SpotlightWindow::new(app, config.spotlight, prefix_table, mode.is_server());
+        let (prefix_table, ai_providers) = prefixes::resolve_with_ai(&config.spotlight);
+        let window = SpotlightWindow::new(
+            app,
+            config.spotlight,
+            prefix_table,
+            ai_providers,
+            mode.is_server(),
+        );
 
         match &mode {
             LaunchMode::Server(receiver) => {

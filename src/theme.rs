@@ -199,7 +199,9 @@ window {{\n\
 .start-menu-footer,\n\
 .spotlight-row,\n\
 .spotlight-prefix-badge,\n\
-.spotlight-footer-key {{\n\
+.spotlight-footer-key,\n\
+.spotlight-chat-user,\n\
+.spotlight-chat-code {{\n\
   background: {muted_background};\n\
 }}\n\
 \n\
@@ -221,7 +223,9 @@ window {{\n\
 .start-menu-result,\n\
 .start-menu-power,\n\
 .spotlight-surface,\n\
-.spotlight-row {{\n\
+.spotlight-row,\n\
+.spotlight-chat-user,\n\
+.spotlight-chat-code {{\n\
   border-radius: {radius}px;\n\
 }}\n\
 \n\
@@ -246,7 +250,9 @@ window {{\n\
 .spotlight-surface,\n\
 .spotlight-entry,\n\
 .spotlight-row-title,\n\
-.spotlight-section-label {{\n\
+.spotlight-section-label,\n\
+.spotlight-chat-text,\n\
+.spotlight-chat-code {{\n\
     color: {text};\n\
 }}\n\
 \n\
@@ -272,7 +278,8 @@ window {{\n\
 .start-menu-power,\n\
 .start-menu-footer,\n\
 .spotlight-hint,\n\
-.spotlight-footer-key {{\n\
+.spotlight-footer-key,\n\
+.spotlight-chat-code {{\n\
     border: 1px solid alpha({border}, 0.9);\n\
 }}\n\
 \n\
@@ -299,7 +306,9 @@ window {{\n\
 .settings-value,\n\
 .settings-action-command,\n\
 .spotlight-row-subtitle,\n\
-.spotlight-hint {{\n\
+.spotlight-hint,\n\
+.spotlight-chat-role,\n\
+.spotlight-chat-status {{\n\
   color: alpha({text}, 0.72);\n\
 }}"
     )
@@ -487,5 +496,25 @@ mod tests {
         assert!(css.contains(".spotlight-row:selected {"));
         assert!(css.contains(".spotlight-backdrop {"));
         assert!(css.contains(".spotlight-row:hover {"));
+    }
+
+    #[test]
+    fn generated_theme_css_applies_theme_to_the_chat_view() {
+        let css = generated_theme_css(&ThemeSettings::default());
+
+        assert!(css.contains(".spotlight-chat-user,"));
+        assert!(css.contains(".spotlight-chat-code {"));
+        assert!(css.contains(".spotlight-chat-text,"));
+        assert!(css.contains(".spotlight-chat-role,"));
+        assert!(css.contains(".spotlight-chat-status {"));
+    }
+
+    /// The error bubble keeps its own red so it stays legible under any
+    /// palette; if someone themes it later this test should fail loudly.
+    #[test]
+    fn generated_theme_css_leaves_the_chat_error_untouched() {
+        let css = generated_theme_css(&ThemeSettings::default());
+
+        assert!(!css.contains(".spotlight-chat-error"));
     }
 }

@@ -11,6 +11,8 @@ use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
 /// Smallest gap between the top of the screen and the card.
 const MIN_TOP_MARGIN: i32 = 24;
+/// Smallest gap left below a tall card, so it never runs off the output.
+const MIN_BOTTOM_MARGIN: i32 = 24;
 /// Used only until the window has a real allocation.
 const FALLBACK_SCREEN_HEIGHT: i32 = 1080;
 
@@ -35,15 +37,37 @@ pub fn configure_layer_shell(window: &gtk::ApplicationWindow) -> bool {
     true
 }
 
-/// Positions the card `ratio` of the way down the screen.
-pub fn apply_top_offset(window: &gtk::ApplicationWindow, card: &gtk::Box, ratio: f64) {
+/// Positions the card `ratio` of the way down the screen, leaving room for a
+/// *fully grown* card rather than the current one.
+///
+/// `max_card_height` is deliberately a fixed budget, not a measurement. The
+/// margin controls how much space the card gets, which controls how tall it is
+/// allocated — so clamping against the card's live height makes the offset
+/// depend on a value it is itself an input to, and the two oscillate. Budgeting
+/// for the worst case makes the result a pure function of the output size: the
+/// entry sits still while the reply grows downward beneath it, which is the
+/// behaviour we want anyway.
+///
+/// Returns the margin applied so callers can detect a real change.
+pub fn apply_top_offset(
+    window: &gtk::ApplicationWindow,
+    card: &gtk::Box,
+    ratio: f64,
+    max_card_height: i32,
+) -> i32 {
     let height = match window.height() {
         height if height > 0 => height,
         _ => monitor_height_hint().unwrap_or(FALLBACK_SCREEN_HEIGHT),
     };
 
-    let margin = (f64::from(height) * ratio).round() as i32;
-    card.set_margin_top(margin.max(MIN_TOP_MARGIN));
+    let ideal = (f64::from(height) * ratio).round() as i32;
+    let highest = (height - max_card_height - MIN_BOTTOM_MARGIN).max(MIN_TOP_MARGIN);
+    let margin = ideal.clamp(MIN_TOP_MARGIN, highest);
+
+    if card.margin_top() != margin {
+        card.set_margin_top(margin);
+    }
+    margin
 }
 
 /// Tallest monitor height, in logical pixels — the same units layer-shell

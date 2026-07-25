@@ -134,6 +134,78 @@ Newly installed applications appear without restarting the daemon. Launch histor
 
 Known limitation: because spotlight intercepts `Enter` before the text entry sees it, IME candidate confirmation for CJK input is not supported.
 
+### AI chat
+
+Add one `[[spotlight.ai]]` block per provider. Each gets its own prefix, so you choose per query; mark one `default = true` to also offer it on plain searches.
+
+```toml
+[[spotlight.ai]]
+enabled  = true
+prefix   = "ai"
+provider = "claude"
+model    = "claude-opus-5"
+default  = true
+effort   = "low"          # low | medium | high | xhigh | max
+max_tokens = 8192
+
+[[spotlight.ai]]
+enabled  = true
+prefix   = "ol"
+provider = "ollama"
+model    = "llama3.2"
+endpoint = "http://localhost:11434"
+```
+
+Typing `ai how do I rotate a PDF` opens a chat that grows out of the card and streams the reply.
+
+| Keys | Action |
+| --- | --- |
+| `Enter` | Send a follow-up |
+| `Ctrl+C` | Stop generating, keep what arrived |
+| `Ctrl+Y` | Copy the last reply |
+| `Esc` | Back to the search list; `Esc` again closes |
+
+The conversation is kept in memory by the `--server` daemon, so closing and reopening spotlight resumes it. Nothing is written to disk, and it is gone when the daemon restarts. Starting a new query from the search list begins a fresh conversation.
+
+**The API key never goes in `config.toml`** — the settings UI rewrites that file in full whenever you save, so a key placed there would be persisted in plaintext. There are two supported places for it.
+
+**A key file (recommended).** `config.toml` holds only the path, which is not a secret:
+
+```toml
+api_key_file = "~/.config/ioexplorer/anthropic-key"
+```
+
+```sh
+install -m600 /dev/null ~/.config/ioexplorer/anthropic-key
+printf '%s' 'sk-ant-...' > ~/.config/ioexplorer/anthropic-key
+```
+
+**An environment variable.** `config.toml` holds only the variable's name:
+
+```toml
+api_key_env = "ANTHROPIC_API_KEY"   # the default for provider = "claude"
+```
+
+The daemon inherits the *compositor's* environment, so exporting in your shell profile will not reach it — put it where the session picks it up and re-login:
+
+```sh
+# ~/.config/environment.d/ioexplorer.conf
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+Either way the key is read when you send a message, not at startup, so you can create the file or fix the variable without restarting anything.
+
+To try the chat with no key and no local model, use the built-in mock provider — it runs entirely offline:
+
+```toml
+[[spotlight.ai]]
+enabled  = true
+prefix   = "ai"
+provider = "mock"
+```
+
+Ask it something containing `slow` to watch the stream token by token, or `error` to see how a failure renders.
+
 ## Desktop Portal File Chooser
 
 IoExplorer includes an `ioexplorer-portal` backend for `org.freedesktop.impl.portal.FileChooser` so portal-aware apps can use IoExplorer for Open and Save dialogs.

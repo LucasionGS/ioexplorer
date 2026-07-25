@@ -97,7 +97,7 @@ mod tests {
                 .collect(),
             ..Default::default()
         };
-        prefixes::resolve(&config)
+        prefixes::resolve_with_ai(&config).0
     }
 
     fn prefixed(key: &str, arg: &str) -> Query {
