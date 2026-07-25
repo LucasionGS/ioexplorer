@@ -1,27 +1,31 @@
 use std::{
     cell::{Cell, RefCell},
-    collections::HashSet,
-    env, fs,
-    io::{self, Read, Write},
-    os::unix::net::{UnixListener, UnixStream},
+    env, io,
     path::{Path, PathBuf},
     process::Command,
     rc::Rc,
     sync::mpsc,
     thread,
-    time::Duration,
 };
 
-use directories::{ProjectDirs, UserDirs};
-use gio::prelude::*;
+use directories::UserDirs;
 use gtk::prelude::*;
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use tracing_subscriber::{EnvFilter, fmt};
 
-use crate::{config::AppConfig, theme};
+use crate::{
+    config::AppConfig,
+    launcher::{
+        app_index::{AppIndex, IconRef, LiveAppIndex},
+        icons, spawn,
+        toggle::{self, ToggleMessage},
+    },
+    theme,
+};
 
 const START_MENU_APP_ID: &str = "io.github.ionix.IoExplorer.StartMenu";
 const START_MENU_SOCKET: &str = "start-menu.sock";
+const START_MENU_SOCKET_FALLBACK: &str = "ioexplorer-start.sock";
 const PINNED_APP_LIMIT: usize = 12;
 const SEARCH_RESULT_LIMIT: usize = 18;
 const PANEL_WIDTH: i32 = 700;
@@ -42,9 +46,13 @@ pub fn run() -> glib::ExitCode {
         return run_server();
     }
 
-    if send_toggle_request(ToggleRequest {
-        placement: args.placement,
-    })
+    if toggle::send(
+        START_MENU_SOCKET,
+        START_MENU_SOCKET_FALLBACK,
+        &ToggleRequest {
+            placement: args.placement,
+        },
+    )
     .is_ok()
     {
         return glib::ExitCode::SUCCESS;
@@ -54,18 +62,19 @@ pub fn run() -> glib::ExitCode {
 }
 
 fn run_server() -> glib::ExitCode {
-    let (listener, _socket_guard) = match bind_start_menu_socket() {
-        Ok(Some(listener)) => listener,
-        Ok(None) => {
-            tracing::info!("ioexplorer-start server already running");
-            return glib::ExitCode::SUCCESS;
-        }
-        Err(error) => {
-            tracing::error!(%error, "failed to start ioexplorer-start server");
-            return glib::ExitCode::FAILURE;
-        }
-    };
-    let receiver = spawn_server_listener(listener);
+    let (listener, _socket_guard) =
+        match toggle::bind(START_MENU_SOCKET, START_MENU_SOCKET_FALLBACK) {
+            Ok(Some(bound)) => bound,
+            Ok(None) => {
+                tracing::info!("ioexplorer-start server already running");
+                return glib::ExitCode::SUCCESS;
+            }
+            Err(error) => {
+                tracing::error!(%error, "failed to start ioexplorer-start server");
+                return glib::ExitCode::FAILURE;
+            }
+        };
+    let receiver = toggle::spawn_listener::<ToggleRequest>(listener);
 
     run_application(
         LaunchMode::Server(Rc::new(RefCell::new(Some(receiver)))),
@@ -187,8 +196,8 @@ struct ToggleRequest {
     placement: StartPlacement,
 }
 
-impl ToggleRequest {
-    fn serialize(self) -> String {
+impl ToggleMessage for ToggleRequest {
+    fn serialize(&self) -> String {
         format!(
             "toggle {} {}\n",
             self.placement.horizontal.as_str(),
@@ -311,90 +320,13 @@ impl VerticalPlacement {
     }
 }
 
-fn bind_start_menu_socket() -> io::Result<Option<(UnixListener, SocketFileGuard)>> {
-    let path = socket_path().ok_or_else(|| io::Error::other("missing socket path"))?;
-    if let Some(parent) = path.parent()
-        && let Err(error) = fs::create_dir_all(parent)
-    {
-        return Err(error);
-    }
-
-    if path.exists() {
-        if UnixStream::connect(&path).is_ok() {
-            return Ok(None);
-        }
-
-        let _ = fs::remove_file(&path);
-    }
-
-    let listener = UnixListener::bind(&path)?;
-    Ok(Some((listener, SocketFileGuard { path })))
-}
-
-fn socket_path() -> Option<PathBuf> {
-    let project_dirs = ProjectDirs::from("io.github", "ionix", "ioexplorer");
-    project_dirs
-        .as_ref()
-        .and_then(|dirs| dirs.runtime_dir().map(|dir| dir.join(START_MENU_SOCKET)))
-        .or_else(|| {
-            project_dirs
-                .as_ref()
-                .and_then(|dirs| dirs.state_dir().map(|dir| dir.join(START_MENU_SOCKET)))
-        })
-        .or_else(|| Some(env::temp_dir().join("ioexplorer-start.sock")))
-}
-
-fn send_toggle_request(request: ToggleRequest) -> io::Result<()> {
-    let path = socket_path().ok_or_else(|| io::Error::other("missing socket path"))?;
-    let mut stream = UnixStream::connect(path)?;
-    stream.write_all(request.serialize().as_bytes())?;
-    stream.flush()?;
-    Ok(())
-}
-
-fn spawn_server_listener(listener: UnixListener) -> mpsc::Receiver<ToggleRequest> {
-    let (sender, receiver) = mpsc::channel();
-    thread::spawn(move || {
-        loop {
-            match listener.accept() {
-                Ok((mut stream, _)) => {
-                    let mut request = String::new();
-                    match stream.read_to_string(&mut request) {
-                        Ok(_) => {
-                            if let Some(request) = ToggleRequest::parse(&request) {
-                                let _ = sender.send(request);
-                            }
-                        }
-                        Err(error) => tracing::warn!(%error, "failed to read start-menu request"),
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "start-menu listener stopped");
-                    break;
-                }
-            }
-        }
-    });
-    receiver
-}
-
-struct SocketFileGuard {
-    path: PathBuf,
-}
-
-impl Drop for SocketFileGuard {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
 #[derive(Clone)]
 struct StartEntry {
     id: Option<String>,
     title: String,
     subtitle: String,
     search_text: String,
-    icon: StartIcon,
+    icon: IconRef,
     action: StartAction,
 }
 
@@ -405,24 +337,18 @@ impl StartEntry {
 }
 
 #[derive(Clone)]
-enum StartIcon {
-    GIcon(gio::Icon),
-    IconName(String),
-}
-
-#[derive(Clone)]
 enum StartAction {
-    LaunchApp(gio::AppInfo),
+    LaunchApp(String),
     OpenPath(PathBuf),
 }
 
 impl StartAction {
     fn launch(&self) -> Result<(), String> {
         match self {
-            Self::LaunchApp(app) => app
-                .launch(&[], None::<&gio::AppLaunchContext>)
-                .map_err(|error| format!("failed to launch app: {error}")),
-            Self::OpenPath(path) => launch_in_ioexplorer(path)
+            Self::LaunchApp(desktop_id) => {
+                crate::launcher::app_index::launch_desktop_id(desktop_id)
+            }
+            Self::OpenPath(path) => spawn::launch_in_ioexplorer(path)
                 .map_err(|error| format!("failed to open {}: {error}", path.display())),
         }
     }
@@ -436,7 +362,9 @@ struct StartMenuWindow {
     content_stack: gtk::Stack,
     results_box: gtk::Box,
     empty_label: gtk::Label,
-    all_entries: Vec<StartEntry>,
+    pinned_grid: gtk::FlowBox,
+    all_entries: RefCell<Vec<StartEntry>>,
+    live_index: Rc<LiveAppIndex>,
     server_mode: bool,
     placement: Cell<StartPlacement>,
     power_menu_visible: Rc<Cell<bool>>,
@@ -444,7 +372,8 @@ struct StartMenuWindow {
 
 impl StartMenuWindow {
     fn new(app: &gtk::Application, server_mode: bool, placement: StartPlacement) -> Rc<Self> {
-        let all_entries = all_start_entries();
+        let live_index = LiveAppIndex::new();
+        let all_entries = entries_from_index(&live_index.snapshot());
         let pinned_entries = pinned_entries(&all_entries);
         let recommended_entries = recommended_entries();
 
@@ -572,7 +501,9 @@ impl StartMenuWindow {
             content_stack,
             results_box,
             empty_label,
-            all_entries,
+            pinned_grid: pinned_grid.clone(),
+            all_entries: RefCell::new(all_entries),
+            live_index,
             server_mode,
             placement: Cell::new(placement),
             power_menu_visible: Rc::new(Cell::new(false)),
@@ -625,16 +556,32 @@ impl StartMenuWindow {
                 glib::Propagation::Proceed
             }
         });
+
+        // A long-running server would otherwise never see newly installed apps.
+        let this = Rc::clone(self);
+        self.live_index.connect_changed(move |index| {
+            *this.all_entries.borrow_mut() = entries_from_index(index);
+            this.rebuild_pinned();
+            this.update_search_results();
+        });
     }
 
     fn install_server_listener(self: &Rc<Self>, receiver: mpsc::Receiver<ToggleRequest>) {
         let this = Rc::clone(self);
-        glib::timeout_add_local(Duration::from_millis(24), move || {
-            while let Ok(request) = receiver.try_recv() {
-                this.toggle_menu(request.placement);
-            }
-            glib::ControlFlow::Continue
+        toggle::install_receiver(receiver, move |request: ToggleRequest| {
+            this.toggle_menu(request.placement);
         });
+    }
+
+    fn rebuild_pinned(self: &Rc<Self>) {
+        while let Some(child) = self.pinned_grid.first_child() {
+            self.pinned_grid.remove(&child);
+        }
+
+        for entry in pinned_entries(&self.all_entries.borrow()) {
+            self.pinned_grid
+                .insert(&self.launcher_button(entry, false), -1);
+        }
     }
 
     fn toggle_menu(&self, placement: StartPlacement) {
@@ -685,9 +632,11 @@ impl StartMenuWindow {
             return;
         }
 
-        clear_box_children(&self.results_box);
+        icons::clear_box_children(&self.results_box);
+        // Collected before any widget work so the borrow is never held across it.
         let matches = self
             .all_entries
+            .borrow()
             .iter()
             .filter(|entry| entry.matches(&query))
             .take(SEARCH_RESULT_LIMIT)
@@ -925,7 +874,7 @@ fn launcher_button_content(entry: &StartEntry, compact: bool) -> gtk::Button {
         .spacing(if compact { 12 } else { 8 })
         .hexpand(true)
         .build();
-    let icon = image_for_entry(&entry.icon, if compact { 28 } else { 32 });
+    let icon = icons::image_for(&entry.icon, if compact { 28 } else { 32 });
     icon.add_css_class("start-menu-launcher-icon");
     content.append(&icon);
 
@@ -970,50 +919,27 @@ fn launcher_button_content(entry: &StartEntry, compact: bool) -> gtk::Button {
     button
 }
 
-fn image_for_entry(icon: &StartIcon, pixel_size: i32) -> gtk::Image {
-    let image = match icon {
-        StartIcon::GIcon(icon) => gtk::Image::from_gicon(icon),
-        StartIcon::IconName(icon_name) => gtk::Image::from_icon_name(icon_name),
-    };
-    image.set_pixel_size(pixel_size);
-    image
-}
-
-fn all_start_entries() -> Vec<StartEntry> {
-    let mut seen = HashSet::new();
-    let mut entries = gio::AppInfo::all()
-        .into_iter()
-        .filter(|app| app.should_show())
-        .filter_map(|app| {
-            let title = app.display_name().to_string();
-            if title.trim().is_empty() {
-                return None;
-            }
-
-            let id = app.id().map(|id| id.to_string());
-            let key = id
-                .clone()
-                .unwrap_or_else(|| title.to_lowercase().replace(' ', "-"));
-            seen.insert(key).then_some(())?;
-
+fn entries_from_index(index: &AppIndex) -> Vec<StartEntry> {
+    let mut entries = index
+        .entries()
+        .iter()
+        .map(|entry| {
             let subtitle = "Installed app".to_string();
             let search_text = format!(
                 "{} {} {}",
-                title.to_lowercase(),
+                entry.name.to_lowercase(),
                 subtitle.to_lowercase(),
-                id.as_deref().unwrap_or_default().to_lowercase()
+                entry.desktop_id.to_lowercase()
             );
 
-            Some(StartEntry {
-                id,
-                title,
+            StartEntry {
+                id: Some(entry.desktop_id.clone()),
+                title: entry.name.clone(),
                 subtitle,
                 search_text,
-                icon: app.icon().map(StartIcon::GIcon).unwrap_or_else(|| {
-                    StartIcon::IconName("application-x-executable-symbolic".to_string())
-                }),
-                action: StartAction::LaunchApp(app),
-            })
+                icon: entry.icon.clone(),
+                action: StartAction::LaunchApp(entry.desktop_id.clone()),
+            }
         })
         .collect::<Vec<_>>();
 
@@ -1131,17 +1057,9 @@ fn folder_entry(title: &str, path: PathBuf, icon_name: &str) -> StartEntry {
         title: title.to_string(),
         subtitle: path.display().to_string(),
         search_text: format!("{} {}", title.to_lowercase(), path.display()),
-        icon: StartIcon::IconName(icon_name.to_string()),
+        icon: IconRef::from_icon_name(icon_name),
         action: StartAction::OpenPath(path),
     }
-}
-
-fn launch_in_ioexplorer(path: &Path) -> io::Result<()> {
-    let mut child = Command::new(ioexplorer_binary()).arg(path).spawn()?;
-    thread::spawn(move || {
-        let _ = child.wait();
-    });
-    Ok(())
 }
 
 fn launch_system_power_action(verb: &str) -> io::Result<()> {
@@ -1152,23 +1070,6 @@ fn launch_system_power_action(verb: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn ioexplorer_binary() -> PathBuf {
-    if let Some(path) = env::var_os("IOEXPLORER_APP") {
-        return PathBuf::from(path);
-    }
-
-    if let Ok(current_exe) = env::current_exe()
-        && let Some(parent) = current_exe.parent()
-    {
-        let sibling = parent.join("ioexplorer");
-        if sibling.exists() {
-            return sibling;
-        }
-    }
-
-    PathBuf::from("ioexplorer")
-}
-
 fn user_display_name() -> String {
     env::var("USER")
         .ok()
@@ -1176,16 +1077,11 @@ fn user_display_name() -> String {
         .unwrap_or_else(|| "User".to_string())
 }
 
-fn clear_box_children(container: &gtk::Box) {
-    while let Some(child) = container.first_child() {
-        child.unparent();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        HorizontalPlacement, StartMenuArgs, StartPlacement, ToggleRequest, VerticalPlacement,
+        HorizontalPlacement, StartMenuArgs, StartPlacement, ToggleMessage, ToggleRequest,
+        VerticalPlacement,
     };
 
     #[test]

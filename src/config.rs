@@ -31,6 +31,80 @@ pub struct CustomActionConfig {
     pub filters: Vec<String>,
 }
 
+/// A user-defined spotlight prefix, e.g. `g cats` running a web search.
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SpotlightPrefixConfig {
+    pub prefix: String,
+    pub label: String,
+    pub command: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub terminal: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
+pub struct SpotlightConfig {
+    #[serde(default)]
+    pub prefixes: Vec<SpotlightPrefixConfig>,
+    /// Built-in prefix keys to remove, e.g. `["="]` to drop the calculator.
+    #[serde(default)]
+    pub disabled_builtins: Vec<String>,
+    #[serde(default = "default_result_limit")]
+    pub result_limit: usize,
+    /// Distance from the top of the screen, as a fraction of its height.
+    #[serde(default = "default_top_ratio")]
+    pub top_ratio: f64,
+    #[serde(default = "default_spotlight_width")]
+    pub width: i32,
+}
+
+fn default_result_limit() -> usize {
+    12
+}
+
+fn default_top_ratio() -> f64 {
+    0.22
+}
+
+fn default_spotlight_width() -> i32 {
+    640
+}
+
+// Deliberately hand-written: `#[serde(default)]` on `AppConfig::spotlight` calls
+// this for every user without a `[spotlight]` block, and a derived `Default`
+// would hand them a zero-width window showing zero results.
+impl Default for SpotlightConfig {
+    fn default() -> Self {
+        Self {
+            prefixes: Vec::new(),
+            disabled_builtins: Vec::new(),
+            result_limit: default_result_limit(),
+            top_ratio: default_top_ratio(),
+            width: default_spotlight_width(),
+        }
+    }
+}
+
+impl SpotlightConfig {
+    pub const MIN_WIDTH: i32 = 320;
+    pub const MAX_WIDTH: i32 = 1200;
+
+    pub fn clamped_width(&self) -> i32 {
+        self.width.clamp(Self::MIN_WIDTH, Self::MAX_WIDTH)
+    }
+
+    pub fn clamped_top_ratio(&self) -> f64 {
+        self.top_ratio.clamp(0.0, 0.8)
+    }
+
+    pub fn clamped_result_limit(&self) -> usize {
+        self.result_limit.clamp(1, 50)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AppConfig {
     pub default_view: ViewMode,
@@ -41,6 +115,8 @@ pub struct AppConfig {
     pub list_columns: ListColumns,
     #[serde(default)]
     pub actions: Vec<CustomActionConfig>,
+    #[serde(default)]
+    pub spotlight: SpotlightConfig,
 }
 
 impl Default for AppConfig {
@@ -57,6 +133,7 @@ impl Default for AppConfig {
                 modified: true,
             },
             actions: Vec::new(),
+            spotlight: SpotlightConfig::default(),
         }
     }
 }
@@ -132,6 +209,100 @@ filters = ["*.txt", "*.md"]
         assert_eq!(parsed.actions.len(), 1);
         assert_eq!(parsed.actions[0].label, "Open in Editor");
         assert!(parsed.actions[0].run_on_each);
+    }
+
+    #[test]
+    fn missing_spotlight_section_uses_working_defaults() {
+        let parsed: AppConfig = toml::from_str(
+            r#"
+default_view = "icon"
+show_hidden = false
+icon_size = 128
+sidebar_width = 220
+
+[list_columns]
+size = true
+kind = true
+modified = true
+"#,
+        )
+        .expect("valid config");
+
+        assert_eq!(parsed.spotlight.width, 640);
+        assert_eq!(parsed.spotlight.result_limit, 12);
+        assert_eq!(parsed.spotlight.top_ratio, 0.22);
+        assert!(parsed.spotlight.prefixes.is_empty());
+    }
+
+    #[test]
+    fn parses_spotlight_prefixes() {
+        let parsed: AppConfig = toml::from_str(
+            r#"
+default_view = "icon"
+show_hidden = false
+icon_size = 128
+sidebar_width = 220
+
+[list_columns]
+size = true
+kind = true
+modified = true
+
+[spotlight]
+width = 720
+disabled_builtins = ["/"]
+
+[[spotlight.prefixes]]
+prefix = "g"
+label = "Google search"
+command = "xdg-open 'https://google.com/search?q={query_url}'"
+"#,
+        )
+        .expect("valid config");
+
+        assert_eq!(parsed.spotlight.width, 720);
+        assert_eq!(parsed.spotlight.result_limit, 12);
+        assert_eq!(parsed.spotlight.disabled_builtins, vec!["/".to_string()]);
+        assert_eq!(parsed.spotlight.prefixes.len(), 1);
+        assert_eq!(parsed.spotlight.prefixes[0].prefix, "g");
+        assert!(!parsed.spotlight.prefixes[0].terminal);
+    }
+
+    #[test]
+    fn spotlight_config_round_trips_through_toml() {
+        let config = AppConfig {
+            spotlight: SpotlightConfig {
+                prefixes: vec![SpotlightPrefixConfig {
+                    prefix: "g".to_string(),
+                    label: "Google search".to_string(),
+                    command: "xdg-open 'https://google.com/search?q={query_url}'".to_string(),
+                    description: None,
+                    icon: None,
+                    terminal: false,
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let contents = toml::to_string_pretty(&config).expect("serializable config");
+        let parsed: AppConfig = toml::from_str(&contents).expect("valid config");
+
+        assert_eq!(parsed.spotlight, config.spotlight);
+    }
+
+    #[test]
+    fn clamps_spotlight_bounds() {
+        let config = SpotlightConfig {
+            width: 10_000,
+            top_ratio: 5.0,
+            result_limit: 0,
+            ..Default::default()
+        };
+
+        assert_eq!(config.clamped_width(), SpotlightConfig::MAX_WIDTH);
+        assert_eq!(config.clamped_top_ratio(), 0.8);
+        assert_eq!(config.clamped_result_limit(), 1);
     }
 
     #[test]

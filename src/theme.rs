@@ -182,7 +182,8 @@ window {{\n\
 .topbar,\n\
 .tab-strip,\n\
 .sidebar,\n\
-.start-menu-surface {{\n\
+.start-menu-surface,\n\
+.spotlight-surface {{\n\
   background: {panel_background};\n\
   border-color: {border};\n\
 }}\n\
@@ -195,7 +196,10 @@ window {{\n\
 .start-menu-launcher,\n\
 .start-menu-result,\n\
 .start-menu-power,\n\
-.start-menu-footer {{\n\
+.start-menu-footer,\n\
+.spotlight-row,\n\
+.spotlight-prefix-badge,\n\
+.spotlight-footer-key {{\n\
   background: {muted_background};\n\
 }}\n\
 \n\
@@ -215,7 +219,9 @@ window {{\n\
 .start-menu-search,\n\
 .start-menu-launcher,\n\
 .start-menu-result,\n\
-.start-menu-power {{\n\
+.start-menu-power,\n\
+.spotlight-surface,\n\
+.spotlight-row {{\n\
   border-radius: {radius}px;\n\
 }}\n\
 \n\
@@ -225,7 +231,8 @@ window {{\n\
 .content-list row.entry-selected,\n\
 .content-grid flowboxchild.entry-selected,\n\
 .start-menu-launcher:active,\n\
-.start-menu-result:active {{\n\
+.start-menu-result:active,\n\
+.spotlight-row:selected {{\n\
   background: {selection};\n\
 }}\n\
 \n\
@@ -235,7 +242,11 @@ window {{\n\
 .start-menu-launcher,\n\
 .start-menu-result,\n\
 .start-menu-user,\n\
-.start-menu-section-title {{\n\
+.start-menu-section-title,\n\
+.spotlight-surface,\n\
+.spotlight-entry,\n\
+.spotlight-row-title,\n\
+.spotlight-section-label {{\n\
     color: {text};\n\
 }}\n\
 \n\
@@ -243,21 +254,40 @@ window {{\n\
     box-shadow: 0 26px 58px alpha(black, 0.36);\n\
 }}\n\
 \n\
+.spotlight-surface {{\n\
+    box-shadow: 0 26px 58px alpha(black, 0.36);\n\
+}}\n\
+\n\
 .start-menu-backdrop {{\n\
     background: alpha({window_background}, 0.4);\n\
+}}\n\
+\n\
+.spotlight-backdrop {{\n\
+    background: alpha({window_background}, 0.34);\n\
 }}\n\
 \n\
 .start-menu-search,\n\
 .start-menu-launcher,\n\
 .start-menu-result,\n\
 .start-menu-power,\n\
-.start-menu-footer {{\n\
+.start-menu-footer,\n\
+.spotlight-hint,\n\
+.spotlight-footer-key {{\n\
     border: 1px solid alpha({border}, 0.9);\n\
+}}\n\
+\n\
+.spotlight-footer {{\n\
+    border-top: 1px solid alpha({border}, 0.9);\n\
+}}\n\
+\n\
+.spotlight-prefix-badge {{\n\
+    background: alpha({accent}, 0.24);\n\
 }}\n\
 \n\
 .start-menu-launcher:hover,\n\
 .start-menu-result:hover,\n\
-.start-menu-power:hover {{\n\
+.start-menu-power:hover,\n\
+.spotlight-row:hover {{\n\
     background: alpha({accent}, 0.18);\n\
 }}\n\
 \n\
@@ -267,7 +297,9 @@ window {{\n\
 \n\
 .status-label,\n\
 .settings-value,\n\
-.settings-action-command {{\n\
+.settings-action-command,\n\
+.spotlight-row-subtitle,\n\
+.spotlight-hint {{\n\
   color: alpha({text}, 0.72);\n\
 }}"
     )
@@ -444,5 +476,16 @@ mod tests {
         assert!(css.contains(".start-menu-surface {"));
         assert!(css.contains(".start-menu-search,"));
         assert!(css.contains(".start-menu-launcher:hover,"));
+    }
+
+    #[test]
+    fn generated_theme_css_applies_theme_to_spotlight() {
+        let css = generated_theme_css(&ThemeSettings::default());
+
+        assert!(css.contains(".spotlight-surface,"));
+        assert!(css.contains(".spotlight-surface {"));
+        assert!(css.contains(".spotlight-row:selected {"));
+        assert!(css.contains(".spotlight-backdrop {"));
+        assert!(css.contains(".spotlight-row:hover {"));
     }
 }

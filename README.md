@@ -64,6 +64,76 @@ cargo run --bin ioexplorer-start -- --left --top
 
 In server mode, later `ioexplorer-start` calls send the requested placement to the running instance and exit immediately.
 
+## Spotlight
+
+`ioexplorer-spotlight` is a keyboard-driven launcher. It opens centred and slightly above the middle of the screen, and grows downward as results appear.
+
+```sh
+cargo run --bin ioexplorer-spotlight
+```
+
+Like the start menu it can run as a daemon, so the same command toggles it open and closed:
+
+```sh
+cargo run --bin ioexplorer-spotlight -- --server
+cargo run --bin ioexplorer-spotlight   # opens
+cargo run --bin ioexplorer-spotlight   # closes
+```
+
+Bind that second command to a hotkey in your compositor for a Spotlight-style launcher.
+
+### Keyboard
+
+| Keys | Action |
+| --- | --- |
+| `↑` / `↓`, `Ctrl+P` / `Ctrl+N` | Move the selection |
+| `Page Up` / `Page Down` | Move by eight rows |
+| `Ctrl+Home` / `Ctrl+End` | Jump to the first or last result |
+| `Enter` | Activate the selected result |
+| `Ctrl+Enter` / `Shift+Enter` | Secondary action (open the parent folder, run in a terminal) |
+| `Tab` | Accept a prefix, or complete the selected path |
+| `Alt+1` … `Alt+9` | Activate that row directly |
+| `Esc` | Close |
+
+With no prefix, spotlight searches installed applications, your XDG user folders, and your IoExplorer bookmarks, ranked by fuzzy match quality and how often you launch each entry.
+
+### Prefixes
+
+| Prefix | Action |
+| --- | --- |
+| `!` | Run a shell command (`Ctrl+Enter` runs it in a terminal) |
+| `>` | Browse to a path, with `Tab` completion |
+| `=` | Evaluate an expression; `Enter` copies the result |
+| `/` | Search your folders and bookmarks by filename |
+| `?` | List every available prefix |
+
+Add your own prefixes in `~/.config/ioexplorer/config.toml`. `{query}` is substituted shell-quoted, and `{query_url}` percent-encoded for use inside a URL. A template with neither placeholder gets the quoted query appended.
+
+```toml
+[spotlight]
+width = 640          # card width in pixels
+top_ratio = 0.22     # distance from the top of the screen, as a fraction of its height
+result_limit = 12
+disabled_builtins = []   # e.g. ["/"] to drop the file search prefix
+
+[[spotlight.prefixes]]
+prefix = "g"
+label = "Google search"
+command = "xdg-open 'https://google.com/search?q={query_url}'"
+
+[[spotlight.prefixes]]
+prefix = "top"
+label = "Process monitor"
+command = "htop"
+terminal = true
+```
+
+Alphanumeric prefixes such as `g` require a following space, so typing `go` still searches normally; typing `g` on its own offers the prefix as a `Tab`-completable row. Symbolic prefixes bind directly, so `=1+2` works without a space. Declaring a prefix that matches a built-in overrides it.
+
+Newly installed applications appear without restarting the daemon. Launch history is kept in `~/.local/state/ioexplorer/spotlight-usage.toml`.
+
+Known limitation: because spotlight intercepts `Enter` before the text entry sees it, IME candidate confirmation for CJK input is not supported.
+
 ## Desktop Portal File Chooser
 
 IoExplorer includes an `ioexplorer-portal` backend for `org.freedesktop.impl.portal.FileChooser` so portal-aware apps can use IoExplorer for Open and Save dialogs.
@@ -74,6 +144,7 @@ Install the two binaries plus the portal metadata in the standard locations:
 cargo build --release
 install -Dm755 target/release/ioexplorer ~/.local/bin/ioexplorer
 install -Dm755 target/release/ioexplorer-start ~/.local/bin/ioexplorer-start
+install -Dm755 target/release/ioexplorer-spotlight ~/.local/bin/ioexplorer-spotlight
 install -Dm755 target/release/ioexplorer-portal ~/.local/bin/ioexplorer-portal
 install -Dm644 data/ioexplorer.portal ~/.local/share/xdg-desktop-portal/portals/ioexplorer.portal
 install -Dm644 data/org.freedesktop.impl.portal.desktop.ioexplorer.service ~/.local/share/dbus-1/services/org.freedesktop.impl.portal.desktop.ioexplorer.service

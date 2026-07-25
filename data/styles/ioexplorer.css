@@ -524,6 +524,132 @@ window {
   border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
+.spotlight-window {
+  background: transparent;
+}
+
+.spotlight-backdrop {
+  background: rgba(10, 12, 16, 0.3);
+}
+
+.spotlight-surface {
+  padding: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 18px;
+  background: rgba(13, 15, 20, 0.9);
+  box-shadow: 0 28px 62px rgba(0, 0, 0, 0.34);
+}
+
+.spotlight-header {
+  padding: 4px 12px;
+}
+
+.spotlight-search-icon {
+  opacity: 0.6;
+}
+
+.spotlight-prefix-badge {
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: rgba(82, 145, 238, 0.24);
+  font-size: 0.86em;
+  font-weight: 700;
+}
+
+.spotlight-entry {
+  min-height: 44px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  outline: none;
+  font-size: 1.24em;
+}
+
+.spotlight-entry:focus {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  outline: none;
+}
+
+.spotlight-hint {
+  padding: 2px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 5px;
+  font-size: 0.8em;
+  font-weight: 700;
+}
+
+.spotlight-scroll,
+.spotlight-scroll > viewport {
+  background: transparent;
+}
+
+.spotlight-results {
+  background: transparent;
+}
+
+.spotlight-row {
+  min-height: 46px;
+  padding: 7px 12px;
+  border-radius: 10px;
+}
+
+.spotlight-row:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.spotlight-row:selected {
+  background: rgba(67, 123, 214, 0.34);
+}
+
+.spotlight-row:selected:hover {
+  background: rgba(82, 145, 238, 0.44);
+}
+
+.spotlight-row-title {
+  font-weight: 600;
+}
+
+.spotlight-row-subtitle {
+  font-size: 0.86em;
+}
+
+.spotlight-row-accel {
+  font-size: 0.78em;
+  font-weight: 700;
+}
+
+.spotlight-section-label {
+  padding: 6px 12px 2px;
+  font-size: 0.82em;
+  font-weight: 700;
+}
+
+.spotlight-empty {
+  padding: 18px 12px;
+}
+
+.spotlight-footer {
+  padding: 8px 12px 4px;
+  border-top: 1px solid rgba(255, 255, 255, 0.09);
+}
+
+.spotlight-footer-key {
+  min-width: 20px;
+  padding: 1px 6px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.05);
+  font-size: 0.76em;
+  font-weight: 700;
+}
+
+.spotlight-footer-label {
+  font-size: 0.78em;
+}
+
 .image-viewer-button {
   min-width: 34px;
   min-height: 32px;
