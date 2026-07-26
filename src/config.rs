@@ -154,6 +154,23 @@ pub struct SpotlightAiConfig {
     /// Ollama has no equivalent.
     #[serde(default)]
     pub web_search: bool,
+    /// Replaces the built-in system prompt outright.
+    ///
+    /// The built-in one is what makes the model work a problem through with its
+    /// tools instead of stopping to ask; an override is the whole prompt, so it
+    /// has to say that itself if that behaviour is wanted.
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+    /// How many rounds of tool calls one prompt may take before the model has to
+    /// answer with what it has. Generous, because the point of the tools is that
+    /// it can keep digging rather than hand the work back.
+    #[serde(default = "default_ai_max_tool_rounds")]
+    pub max_tool_rounds: usize,
+    /// Seconds a single command may run before it is stopped. A long build or
+    /// download needs a bigger number; the command runs on a worker, so raising
+    /// it never blocks the overlay.
+    #[serde(default = "default_ai_command_timeout")]
+    pub command_timeout: u64,
     /// User-defined tools, as `[[spotlight.ai.tools]]`.
     #[serde(default)]
     pub tools: Vec<SpotlightAiToolConfig>,
@@ -278,6 +295,18 @@ fn default_true() -> bool {
 /// this budget with the visible answer, so a small cap truncates the reply.
 fn default_ai_max_tokens() -> u32 {
     8192
+}
+
+/// High enough that a real investigation — look, read, try, check — finishes on
+/// its own. It is a runaway guard, not a budget.
+fn default_ai_max_tool_rounds() -> usize {
+    25
+}
+
+/// Long enough for a package query or a short build, short enough that a
+/// genuinely stuck command does not hold a tool round open all afternoon.
+fn default_ai_command_timeout() -> u64 {
+    60
 }
 
 fn default_result_limit() -> usize {
@@ -701,6 +730,9 @@ confirm = "never"
                     builtin_tools: true,
                     run_command: true,
                     web_search: true,
+                    system_prompt: None,
+                    max_tool_rounds: 25,
+                    command_timeout: 60,
                     tools: vec![SpotlightAiToolConfig {
                         name: "play_music".to_string(),
                         description: String::new(),
@@ -801,6 +833,9 @@ modified = true
                     builtin_tools: false,
                     run_command: false,
                     web_search: false,
+                    system_prompt: None,
+                    max_tool_rounds: 25,
+                    command_timeout: 60,
                     tools: Vec::new(),
                 }],
                 ..Default::default()
@@ -841,6 +876,9 @@ modified = true
                     builtin_tools: false,
                     run_command: false,
                     web_search: false,
+                    system_prompt: None,
+                    max_tool_rounds: 25,
+                    command_timeout: 60,
                     tools: Vec::new(),
                 }],
                 ..Default::default()

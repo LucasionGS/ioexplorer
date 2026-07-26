@@ -6,16 +6,18 @@
 //!   run automatically, on a worker thread, because they do real I/O and a slow
 //!   mount must never freeze a `KeyboardMode::Exclusive` overlay.
 //! * **Side-effecting** tools change something — open, launch, run. They always
-//!   ask first, and then run on the main thread, because every one of them is a
-//!   fire-and-forget spawn that returns immediately (and two of them need GTK,
-//!   which is main-thread-only anyway).
+//!   ask first. `open_path` and `launch_app` then run on the main thread, being
+//!   fire-and-forget spawns that return immediately (and both need GTK, which is
+//!   main-thread-only anyway). Commands go to the worker instead: see
+//!   [`shell`] for why their output has to be waited for.
 //!
 //! The split is what makes the approval gate cheap: there is no path by which a
 //! side-effecting tool executes without the card having been shown.
 
 pub mod schema;
+pub mod shell;
 
-use std::{fs, path::Path, path::PathBuf};
+use std::{fs, path::Path, path::PathBuf, time::Duration};
 
 use crate::{
     config::{SpotlightAiConfig, SpotlightAiToolConfig, SpotlightAiToolParam},
@@ -604,7 +606,7 @@ fn search_files(query: &str) -> ToolOutcome {
         }
     }
 
-    hits.sort_by(|left, right| right.0.cmp(&left.0));
+    hits.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
     hits.truncate(MAX_ENTRIES);
 
     match hits.is_empty() {
@@ -620,13 +622,22 @@ fn search_files(query: &str) -> ToolOutcome {
 
 // -- side-effecting execution (main thread, post-approval) -----------------
 
-/// Runs a side-effecting tool. Every one of these is a fire-and-forget spawn
-/// that returns immediately, so it is safe on the main loop — and two of them
-/// need GTK, which is main-thread-only.
+/// Whether this tool runs a command line, and so must go to the worker with its
+/// output captured rather than being spawned and forgotten.
+pub fn is_command(kind: &ToolKind) -> bool {
+    matches!(kind, ToolKind::RunCommand | ToolKind::Custom { .. })
+}
+
+/// Runs an approved side-effecting tool that is *not* a command.
+///
+/// Both of these are fire-and-forget spawns that return immediately, so they are
+/// safe on the main loop — and both need GTK, which is main-thread-only.
+/// Commands go through [`shell::run`] on a worker instead; [`is_command`]
+/// decides which path a call takes.
 pub fn run_side_effecting(
     kind: &ToolKind,
     input: &serde_json::Value,
-    expanded: &str,
+    _expanded: &str,
 ) -> ToolOutcome {
     match kind {
         ToolKind::OpenPath => match resolve(input, "path") {
@@ -643,14 +654,10 @@ pub fn run_side_effecting(
             },
             None => ToolOutcome::Error("desktop_id is required".to_string()),
         },
+        // Unreachable via the window, which routes these to the worker, but a
+        // silent success here would be the worst possible failure mode.
         ToolKind::RunCommand | ToolKind::Custom { .. } => {
-            if expanded.trim().is_empty() {
-                return ToolOutcome::Error("nothing to run".to_string());
-            }
-            match spawn::spawn_shell_line(expanded, "ioexplorer-spotlight") {
-                Ok(()) => ToolOutcome::Ok(format!("Started: {expanded}")),
-                Err(error) => ToolOutcome::Error(format!("cannot run: {error}")),
-            }
+            ToolOutcome::Error("a command must run on the worker".to_string())
         }
         _ => ToolOutcome::Error("not a side-effecting tool".to_string()),
     }
@@ -706,10 +713,31 @@ impl ToolRunner {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
 
+        self.spawn(id, generation, move || run_read_only(&kind, &input, &apps));
+    }
+
+    /// Runs an approved command line, capturing what it prints.
+    ///
+    /// Side-effecting, so it has already been through the approval card — but it
+    /// still cannot run on the main thread, because unlike the other
+    /// side-effecting tools its result is only known once the command exits.
+    pub fn start_command(&self, id: String, line: String, timeout: Duration) {
+        let generation = self
+            .generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+
+        self.spawn(id, generation, move || shell::run(&line, timeout));
+    }
+
+    fn spawn<F>(&self, id: String, generation: u64, work: F)
+    where
+        F: FnOnce() -> ToolOutcome + Send + 'static,
+    {
         let sender = self.sender.clone();
         let counter = std::sync::Arc::clone(&self.generation);
         std::thread::spawn(move || {
-            let outcome = run_read_only(&kind, &input, &apps);
+            let outcome = work();
             if counter.load(std::sync::atomic::Ordering::Relaxed) == generation {
                 let _ = sender.send(ToolEvent {
                     generation,
@@ -955,6 +983,38 @@ mod tests {
         }
     }
 
+    /// Which side of the fork a tool takes decides whether the model ever learns
+    /// what happened. Everything `is_command` claims must reach [`shell::run`],
+    /// which waits and reports; everything it disclaims is spawned and forgotten.
+    #[test]
+    fn every_tool_that_runs_a_command_line_is_routed_to_the_worker() {
+        let config = SpotlightAiConfig {
+            builtin_tools: true,
+            run_command: true,
+            tools: vec![SpotlightAiToolConfig {
+                name: "play_music".to_string(),
+                description: String::new(),
+                command: "playerctl {query}".to_string(),
+                confirm: AiToolConfirm::Always,
+                params: params(&["query"]),
+            }],
+            ..base_config()
+        };
+
+        for tool in definitions(&config) {
+            let expected = matches!(tool.kind, ToolKind::RunCommand | ToolKind::Custom { .. });
+            assert_eq!(is_command(&tool.kind), expected, "{}", tool.name);
+        }
+    }
+
+    /// The main-thread path must never quietly succeed for a command: it cannot
+    /// capture output, so a silent `Ok` there is exactly the bug this fixes.
+    #[test]
+    fn the_main_thread_path_refuses_to_run_a_command() {
+        let outcome = run_side_effecting(&ToolKind::RunCommand, &serde_json::json!({}), "uname -a");
+        assert!(outcome.is_error(), "{}", outcome.text());
+    }
+
     #[test]
     fn confirm_never_downgrades_a_custom_tool_to_auto_run() {
         let always = custom_tool(&SpotlightAiToolConfig {
@@ -1192,6 +1252,9 @@ mod tests {
             builtin_tools: false,
             run_command: false,
             web_search: false,
+            system_prompt: None,
+            max_tool_rounds: 25,
+            command_timeout: 60,
             tools: Vec::new(),
         }
     }

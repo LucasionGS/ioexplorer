@@ -699,6 +699,9 @@ mod tests {
             builtin_tools: false,
             run_command: false,
             web_search: false,
+            system_prompt: None,
+            max_tool_rounds: 25,
+            command_timeout: 60,
             tools: Vec::new(),
         }
     }

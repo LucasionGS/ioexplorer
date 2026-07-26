@@ -47,10 +47,19 @@ struct ChatState {
     /// prompt cache on every round.
     tools: Vec<ToolDef>,
     web_search: bool,
-    /// Tool rounds used so far, against [`MAX_TOOL_ROUNDS`].
+    /// Resolved with the tools and for the same reason: it renders at the front
+    /// of the prompt, so it must not change between rounds.
+    system: Option<String>,
+    /// Tool rounds used so far, against `max_rounds`.
     rounds: usize,
+    /// This provider's round budget, from `max_tool_rounds`.
+    max_rounds: usize,
+    /// How long a single command may run before it is stopped.
+    command_timeout: Duration,
     /// Server-side `pause_turn` resumes used, against [`MAX_PAUSE_RESUMES`].
     resumes: usize,
+    /// Self-issued "carry on" prompts used, against [`MAX_CONTINUATIONS`].
+    continuations: usize,
     /// The call waiting on the approval card.
     pending: Option<PendingApproval>,
     /// Calls from this round that have not run yet.
@@ -101,12 +110,21 @@ const PREVIEW_DEBOUNCE: Duration = Duration::from_millis(120);
 /// snapshot rather than spawning a compositor query per keystroke, short enough
 /// that a window opened a moment ago is still found.
 const WINDOW_LIST_TTL: Duration = Duration::from_millis(1_500);
-/// Cap on tool rounds in one turn. A model that keeps asking for tools stops
-/// here with a note rather than looping until the user closes the window.
-const MAX_TOOL_ROUNDS: usize = 10;
 /// Cap on `pause_turn` resumes. The server-side tool loop hit its own iteration
 /// limit and wants to continue; this bounds how often we let it.
 const MAX_PAUSE_RESUMES: usize = 5;
+/// Cap on self-issued continuations after a reply hit the token limit.
+///
+/// Low on purpose: a truncated answer is worth finishing, but a model that keeps
+/// filling its whole budget is not converging on anything, and each continuation
+/// resends the entire conversation.
+const MAX_CONTINUATIONS: usize = 3;
+/// Fallback command timeout, for the impossible case of a tool running with no
+/// conversation behind it.
+const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
+/// What the model is told to make it finish a reply that hit the token limit.
+const CONTINUE_PROMPT: &str = "Your reply was cut off at the token limit. Carry on from exactly where you \
+     stopped, without repeating or summarising what you already wrote.";
 /// Rows reachable via Alt+1..9.
 const QUICK_PICK_ROWS: usize = 9;
 /// Shown at the end of the streaming message so it reads as still going.
@@ -1607,8 +1625,12 @@ impl SpotlightWindow {
                 streaming: false,
                 tools: provider.tools.clone(),
                 web_search: provider.web_search,
+                system: provider.system.clone(),
                 rounds: 0,
+                max_rounds: provider.max_tool_rounds,
+                command_timeout: provider.command_timeout,
                 resumes: 0,
+                continuations: 0,
                 pending: None,
                 queue: std::collections::VecDeque::new(),
                 results: Vec::new(),
@@ -1685,9 +1707,10 @@ impl SpotlightWindow {
             .as_mut()
             .map(|chat| {
                 chat.history.push(ChatMessage::user(prompt.clone()));
-                // A new prompt is a new turn: the round budget starts again.
+                // A new prompt is a new turn: every budget starts again.
                 chat.rounds = 0;
                 chat.resumes = 0;
+                chat.continuations = 0;
             })
             .is_some();
         if !sent {
@@ -1718,6 +1741,7 @@ impl SpotlightWindow {
                 history: chat.history.clone(),
                 tools: chat.tools.clone(),
                 web_search: chat.web_search,
+                system: chat.system.clone(),
             }
         }) else {
             return;
@@ -1854,7 +1878,34 @@ impl SpotlightWindow {
         }
 
         match stop_reason.as_deref() {
+            // The reply ran out of budget mid-sentence. Rather than leaving a
+            // half-answer standing, the loop prompts itself to finish it — the
+            // one case where "not done yet" is unambiguous enough to act on
+            // without asking.
             Some("max_tokens") => {
+                let continuing = self
+                    .chat
+                    .borrow_mut()
+                    .as_mut()
+                    .map(|chat| {
+                        chat.continuations += 1;
+                        // A new user turn rather than a prefilled assistant one:
+                        // the API rejects a trailing assistant message with
+                        // trailing whitespace, and a streamed reply routinely
+                        // ends in some.
+                        let carry_on = chat.continuations <= MAX_CONTINUATIONS;
+                        if carry_on {
+                            chat.history
+                                .push(ChatMessage::user(CONTINUE_PROMPT.to_string()));
+                        }
+                        carry_on
+                    })
+                    .unwrap_or(false);
+                if continuing {
+                    self.note("Continuing…");
+                    self.start_turn();
+                    return;
+                }
                 self.note("Cut off at the token limit — raise `max_tokens` in [[spotlight.ai]].");
             }
             // The server-side tool loop hit its own iteration cap and wants to
@@ -1890,7 +1941,10 @@ impl SpotlightWindow {
     fn begin_tool_round(self: &Rc<Self>, text: &str, calls: Vec<ToolCall>) {
         self.finalize_streaming_label();
         self.render_markdown();
-        self.set_streaming(false);
+        // The spinner deliberately stays on. The request is over, but the turn
+        // is not, and a command may take a minute — with nothing spinning the
+        // overlay reads as finished, and `Ctrl+C`, which tests this same flag,
+        // would decline to stop anything.
 
         let over_budget = {
             let mut chat = self.chat.borrow_mut();
@@ -1920,14 +1974,19 @@ impl SpotlightWindow {
             chat.rounds += 1;
             chat.results.clear();
             chat.queue = calls.into_iter().collect();
-            chat.rounds > MAX_TOOL_ROUNDS
+            (chat.rounds > chat.max_rounds).then_some(chat.max_rounds)
         };
 
-        if over_budget {
+        if let Some(limit) = over_budget {
             // Every call still needs an answer, or the follow-up request is
             // rejected outright — so refuse them rather than dropping them.
             self.answer_remaining("Tool round limit reached; nothing was run.");
-            self.note(&format!("Stopped after {MAX_TOOL_ROUNDS} tool rounds."));
+            // Recorded but deliberately *not* sent. Sending would give the model
+            // another turn, in which it would ask for another tool and land back
+            // here — a loop of API calls that only stops when the user notices.
+            self.commit_tool_results();
+            self.set_streaming(false);
+            self.note(&format!("Stopped after {limit} tool rounds."));
             return;
         }
 
@@ -1950,8 +2009,20 @@ impl SpotlightWindow {
 
     /// Hands the accumulated results back as one user turn and continues.
     fn send_tool_results(self: &Rc<Self>) {
-        let ready = self
-            .chat
+        if self.commit_tool_results() {
+            self.start_turn();
+        }
+    }
+
+    /// Moves this round's results into the history. Returns whether there were
+    /// any.
+    ///
+    /// Separate from sending them because the round-limit path has to record the
+    /// answers without granting another turn: the API rejects a later request
+    /// that leaves a `tool_use` unanswered, so the results must land in the
+    /// history even when the loop stops here.
+    fn commit_tool_results(self: &Rc<Self>) -> bool {
+        self.chat
             .borrow_mut()
             .as_mut()
             .map(|chat| {
@@ -1967,11 +2038,7 @@ impl SpotlightWindow {
                 });
                 true
             })
-            .unwrap_or(false);
-
-        if ready {
-            self.start_turn();
-        }
+            .unwrap_or(false)
     }
 
     /// Decides how a single call is handled: run it, or ask first.
@@ -2007,11 +2074,18 @@ impl SpotlightWindow {
         if !definition.needs_approval() {
             // `confirm = "never"` on this specific tool — the user's explicit,
             // per-tool choice, not a general bypass.
-            let outcome = tools::run_side_effecting(&definition.kind, &call.input, &expanded);
-            self.append_tool_note(&format!("{}: {}", definition.name, outcome.text()));
-            return self.finish_tool(call.id, outcome);
+            return self.dispatch_side_effecting(
+                call.id,
+                &definition.name,
+                &definition.kind,
+                &call.input,
+                &expanded,
+            );
         }
 
+        // Nothing is happening until the user decides, so the spinner stops —
+        // the one point in a tool round where waiting is on them, not on us.
+        self.set_streaming(false);
         self.show_approval_card(&definition.name, &expanded);
         if let Some(chat) = self.chat.borrow_mut().as_mut() {
             chat.pending = Some(PendingApproval {
@@ -2038,18 +2112,57 @@ impl SpotlightWindow {
             self.transcript.remove(&card);
         }
         self.set_mode(keys::Mode::Chat);
+        // The wait is ours again, whichever way they decided.
+        self.set_streaming(true);
 
-        let outcome = match approved {
-            true => {
-                tools::run_side_effecting(&pending.kind, &pending.call.input, &pending.expanded)
-            }
+        if !approved {
             // A denial is reported as a result, not as silence — the model can
             // then adapt instead of waiting for an answer that never arrives.
-            false => ToolOutcome::Error("The user declined to run this.".to_string()),
-        };
+            let outcome = ToolOutcome::Error("The user declined to run this.".to_string());
+            self.append_tool_note(&format!("{}: {}", pending.call.name, outcome.text()));
+            return self.finish_tool(pending.call.id, outcome);
+        }
 
-        self.append_tool_note(&format!("{}: {}", pending.call.name, outcome.text()));
-        self.finish_tool(pending.call.id, outcome);
+        self.dispatch_side_effecting(
+            pending.call.id,
+            &pending.call.name,
+            &pending.kind,
+            &pending.call.input,
+            &pending.expanded,
+        );
+    }
+
+    /// Runs an approved side-effecting call by whichever route its kind needs.
+    ///
+    /// A command goes to the worker with its output captured, and answers later
+    /// through [`Self::drain_tools`]. Anything else is a spawn that returns at
+    /// once and is answered here. The split matters: a command's *output is the
+    /// answer*, so reporting "Started: uname -a" and moving on would leave the
+    /// model to guess at — or ask the user about — something it just ran.
+    fn dispatch_side_effecting(
+        self: &Rc<Self>,
+        id: String,
+        name: &str,
+        kind: &ToolKind,
+        input: &serde_json::Value,
+        expanded: &str,
+    ) {
+        if tools::is_command(kind) {
+            let timeout = self
+                .chat
+                .borrow()
+                .as_ref()
+                .map(|chat| chat.command_timeout)
+                .unwrap_or(DEFAULT_COMMAND_TIMEOUT);
+            self.append_tool_note(&format!("$ {expanded}"));
+            self.tool_runner
+                .start_command(id, expanded.to_string(), timeout);
+            return;
+        }
+
+        let outcome = tools::run_side_effecting(kind, input, expanded);
+        self.append_tool_note(&format!("{name}: {}", outcome.text()));
+        self.finish_tool(id, outcome);
     }
 
     /// Records one call's answer and moves on.

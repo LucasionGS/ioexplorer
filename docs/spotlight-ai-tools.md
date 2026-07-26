@@ -12,6 +12,8 @@ api_key_file = "~/.config/ioexplorer/anthropic-key"
 builtin_tools = true      # the built-in set, minus run_command
 run_command = false       # gated separately; see below
 web_search = true         # Anthropic's server-side search and fetch
+max_tool_rounds = 25      # how long it may keep working on one question
+command_timeout = 60      # seconds before a command is stopped
 ```
 
 | Key | Default | Meaning |
@@ -19,7 +21,33 @@ web_search = true         # Anthropic's server-side search and fetch
 | `builtin_tools` | `false` | Enable the built-in tools |
 | `run_command` | `false` | Additionally allow arbitrary shell commands |
 | `web_search` | `false` | Declare Anthropic's server-side web search and fetch |
+| `max_tool_rounds` | `25` | Tool calls one prompt may take before it must answer |
+| `command_timeout` | `60` | Seconds a single command may run |
+| `system_prompt` | built-in | Replaces the prompt described in [Working unattended](#working-unattended) |
 | `[[spotlight.ai.tools]]` | none | Your own tools — see [Custom tools](#custom-tools) |
+
+## Working unattended
+
+With tools available, a model's default instinct is the wrong one: answer what
+was asked and hand anything uncertain back. A system prompt corrects that. It
+tells the model to settle questions with tools rather than guessing, to chain as
+many calls as the job needs, to diagnose a failed command and try again instead
+of reporting the failure, and to ask only when it genuinely cannot continue —
+never for permission, which the approval card already handles.
+
+`max_tool_rounds` is what makes that possible: a real investigation is *look,
+read, try, check*, and a tight budget turns it back into a question for you.
+Hitting the limit answers the outstanding calls and stops there rather than
+granting another turn — a model that is still asking for tools at the limit would
+otherwise loop.
+
+A reply cut off at `max_tokens` is finished rather than left hanging: the loop
+prompts itself to carry on, up to three times, before giving up and telling you
+to raise the limit.
+
+`system_prompt` replaces the built-in one outright — it does not extend it, so an
+override wanting this behaviour has to ask for it. `system_prompt = ""` sends no
+system prompt at all.
 
 ## The approval model
 
@@ -59,6 +87,27 @@ run before deciding.
 `run_command` is gated separately from the rest because no other built-in can do
 unbounded damage, and it is the tool a prompt-injection payload would aim for.
 Turning on `builtin_tools` never turns it on.
+
+### What a command reports back
+
+The model gets what the command actually printed — merged stdout and stderr, plus
+the exit status. That is the whole value of the tool: a `uname -a` answered with
+"started" tells it nothing, so it guesses, or asks you something it could have
+found out itself.
+
+Consequences worth knowing:
+
+- **Commands are waited for**, so unlike every other side-effecting tool they run
+  on a worker rather than the main thread. The overlay stays responsive and
+  `Ctrl+C` still stops the round.
+- **There is no terminal.** stdin is `/dev/null`, so a command that would stop to
+  ask something gets EOF instead of hanging until the timeout.
+- **A command outliving `command_timeout` is killed** and reported as such, with
+  whatever it printed first — often the only clue about where it got stuck. Only
+  the direct child is killed, so a pipeline's other members can survive.
+- **Long-running or graphical programs should be backgrounded** with `&`, which
+  returns immediately. `launch_app` is the better tool for an application.
+- Output over 64 KiB is truncated, with a note, rather than refused.
 
 ### What `read_file` refuses
 
@@ -133,7 +182,10 @@ on, rather than being treated as a transport error.
 
 | Limit | Value |
 | --- | --- |
-| Tool rounds per turn | 10 |
+| Tool rounds per turn | 25 (`max_tool_rounds`) |
+| Command runtime | 60s (`command_timeout`) |
+| Captured command output | 64 KiB, truncated |
+| `max_tokens` self-continuations | 3 |
 | `pause_turn` continuations | 5 |
 | `read_file` size | 256 KiB |
 | Entries from `list_directory` / `search_files` / `list_apps` | 200 |
@@ -155,9 +207,12 @@ Execution is split by cost:
 - **Read-only tools run on a worker.** They do real I/O, and a `read_file` on a
   stalled network mount must never freeze the overlay — which uses
   `KeyboardMode::Exclusive`, so a blocked main loop cannot even be escaped.
-- **Side-effecting tools run on the main thread**, after approval. Every one is
-  a fire-and-forget spawn that returns immediately, and two of them need GTK,
-  which is main-thread-only.
+- **Commands run on a worker too**, after approval, because their result is only
+  known once they exit and waiting for that on the main thread would freeze the
+  same overlay.
+- **`open_path` and `launch_app` run on the main thread**, after approval. Both
+  are fire-and-forget spawns that return immediately, and both need GTK, which is
+  main-thread-only.
 
 Requests set `disable_parallel_tool_use`, so the model asks for one tool at a
 time — one card, one command. The loop still tracks a queue of calls and answers

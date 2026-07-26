@@ -17,16 +17,27 @@ const MAX_ERROR_BODY: u64 = 64 * 1024;
 /// Cap on the model list quoted back when a model is missing.
 const MAX_LISTED_MODELS: usize = 8;
 
+pub struct Request<'a> {
+    pub model: &'a str,
+    pub endpoint: &'a str,
+    pub tools: &'a [ToolDef],
+    pub system: Option<&'a str>,
+}
+
 pub fn run(
-    model: &str,
-    endpoint: &str,
+    request: Request<'_>,
     history: &[ChatMessage],
-    tools: &[ToolDef],
     generation: u64,
     is_stale: &dyn Fn() -> bool,
     emit: &mut dyn FnMut(AiEvent) -> bool,
 ) {
-    let body = request_body(model, history, tools);
+    let Request {
+        model,
+        endpoint,
+        tools,
+        system,
+    } = request;
+    let body = request_body(model, history, tools, system);
 
     let response = ureq::post(format!("{endpoint}/api/chat"))
         .config()
@@ -168,11 +179,21 @@ fn stream_body(
     });
 }
 
-fn request_body(model: &str, history: &[ChatMessage], tools: &[ToolDef]) -> String {
-    let messages: Vec<serde_json::Value> = history
-        .iter()
-        .map(|message| serde_json::json!({ "role": message.api_role(), "content": message.text() }))
-        .collect();
+fn request_body(
+    model: &str,
+    history: &[ChatMessage],
+    tools: &[ToolDef],
+    system: Option<&str>,
+) -> String {
+    // Ollama has a real `system` role, so unlike Claude this goes in the message
+    // list — first, where every model that supports one expects to find it.
+    let mut messages: Vec<serde_json::Value> = Vec::with_capacity(history.len() + 1);
+    if let Some(system) = system.map(str::trim).filter(|text| !text.is_empty()) {
+        messages.push(serde_json::json!({ "role": "system", "content": system }));
+    }
+    messages.extend(history.iter().map(
+        |message| serde_json::json!({ "role": message.api_role(), "content": message.text() }),
+    ));
 
     let mut body = serde_json::json!({
         "model": model,
@@ -290,14 +311,50 @@ mod tests {
 
     #[test]
     fn builds_a_streaming_request_body() {
-        let body: serde_json::Value =
-            serde_json::from_str(&request_body("llama3.2", &[ChatMessage::user("hi")], &[]))
-                .expect("valid json");
+        let body: serde_json::Value = serde_json::from_str(&request_body(
+            "llama3.2",
+            &[ChatMessage::user("hi")],
+            &[],
+            None,
+        ))
+        .expect("valid json");
 
         assert_eq!(body["model"], "llama3.2");
         assert_eq!(body["stream"], true);
         assert_eq!(body["messages"][0]["role"], "user");
         assert_eq!(body["messages"][0]["content"], "hi");
+    }
+
+    /// Ollama does have a `system` role, so unlike Claude it goes in the message
+    /// list — and it has to be first, which is where every model that honours
+    /// one looks for it.
+    #[test]
+    fn the_system_prompt_leads_the_message_list() {
+        let body: serde_json::Value = serde_json::from_str(&request_body(
+            "llama3.2",
+            &[ChatMessage::user("hi")],
+            &[],
+            Some("Be terse."),
+        ))
+        .expect("valid json");
+
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(body["messages"][0]["content"], "Be terse.");
+        assert_eq!(body["messages"][1]["role"], "user");
+    }
+
+    #[test]
+    fn a_blank_system_prompt_adds_no_message() {
+        let body: serde_json::Value = serde_json::from_str(&request_body(
+            "llama3.2",
+            &[ChatMessage::user("hi")],
+            &[],
+            Some("  "),
+        ))
+        .expect("valid json");
+
+        assert_eq!(body["messages"].as_array().map(Vec::len), Some(1));
+        assert_eq!(body["messages"][0]["role"], "user");
     }
 
     #[test]

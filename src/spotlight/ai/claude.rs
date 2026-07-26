@@ -29,6 +29,7 @@ pub struct Request<'a> {
     pub api_key_file: Option<&'a Path>,
     pub tools: &'a [ToolDef],
     pub web_search: bool,
+    pub system: Option<&'a str>,
 }
 
 pub fn run(
@@ -340,6 +341,13 @@ fn request_body(request: &Request<'_>, history: &[ChatMessage]) -> String {
         "messages": messages,
     });
 
+    // A top-level field, not a message: Claude has no `system` role, and sending
+    // one as a user turn would put it inside the conversation where a later
+    // message could argue with it.
+    if let Some(system) = request.system.map(str::trim).filter(|s| !s.is_empty()) {
+        body["system"] = serde_json::Value::String(system.to_string());
+    }
+
     // `effort` is the supported latency lever — but only on models that have
     // it. Haiku and the 4.5-and-older line reject it outright.
     if let Some(effort) = effort_for(request.model, request.effort) {
@@ -468,6 +476,7 @@ mod tests {
             api_key_file: None,
             tools: &[],
             web_search: false,
+            system: None,
         }
     }
 
@@ -485,6 +494,32 @@ mod tests {
         assert_eq!(body["output_config"]["effort"], "low");
         assert_eq!(body["messages"][0]["role"], "user");
         assert_eq!(body["messages"][0]["content"], "hello");
+    }
+
+    /// Claude has no `system` role, so this belongs at the top level. Putting it
+    /// in `messages` would both be rejected and leave the instructions inside
+    /// the conversation, where a later turn could argue with them.
+    #[test]
+    fn the_system_prompt_is_a_top_level_field() {
+        let body: serde_json::Value = serde_json::from_str(&request_body(
+            &Request {
+                system: Some("Be terse."),
+                ..request()
+            },
+            &[ChatMessage::user("hello")],
+        ))
+        .expect("valid json");
+
+        assert_eq!(body["system"], "Be terse.");
+        assert_eq!(body["messages"].as_array().map(Vec::len), Some(1));
+    }
+
+    /// Absent rather than an empty string: sending `"system": ""` spends a field
+    /// on nothing and is not the same request as one with no system prompt.
+    #[test]
+    fn no_system_prompt_means_no_system_key() {
+        let body = body_json(&[ChatMessage::user("hello")]);
+        assert!(body.get("system").is_none());
     }
 
     #[test]
@@ -542,6 +577,7 @@ mod tests {
                 api_key_file: None,
                 tools: &[],
                 web_search: false,
+                system: None,
             },
             &[ChatMessage::user("hi")],
         ))

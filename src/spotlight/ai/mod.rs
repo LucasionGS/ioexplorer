@@ -15,6 +15,7 @@ pub mod markdown;
 mod mock;
 mod ndjson;
 mod ollama;
+pub mod prompt;
 mod sse;
 pub mod tools;
 
@@ -27,6 +28,7 @@ use std::{
         mpsc,
     },
     thread,
+    time::Duration,
 };
 
 use crate::config::{AiEffort, SpotlightAiConfig, SpotlightConfig};
@@ -301,6 +303,14 @@ pub struct AiProvider {
     /// Declare Anthropic's server-side web search and fetch. Claude only, so a
     /// non-Claude provider that asks for it is told rather than silently ignored.
     pub web_search: bool,
+    /// Sent ahead of the conversation. Resolved here, with the tools, for the
+    /// same reason: it renders at the front of the prompt and must be byte-stable
+    /// across the rounds of a tool loop or the prompt cache misses every time.
+    pub system: Option<String>,
+    /// Rounds of tool calls one prompt may take before the model has to answer.
+    pub max_tool_rounds: usize,
+    /// How long a single command may run before it is stopped.
+    pub command_timeout: Duration,
     pub provider: Provider,
 }
 
@@ -355,6 +365,11 @@ pub fn resolve_providers(config: &SpotlightConfig) -> Vec<AiProvider> {
             default: is_default,
             tools: tools::definitions(entry),
             web_search: web_search_for(entry, &provider),
+            system: prompt::resolve(entry),
+            // Zero would leave a tool-enabled provider unable to run anything,
+            // which reads as the tools being broken rather than as a setting.
+            max_tool_rounds: entry.max_tool_rounds.max(1),
+            command_timeout: Duration::from_secs(entry.command_timeout.max(1)),
             provider,
         });
     }
@@ -440,6 +455,8 @@ pub struct Turn {
     pub tools: Vec<tools::ToolDef>,
     /// Declare Anthropic's server-side web search and fetch.
     pub web_search: bool,
+    /// Sent ahead of `history`, unchanged for the life of the conversation.
+    pub system: Option<String>,
 }
 
 pub struct AiSession {
@@ -536,6 +553,7 @@ fn run_stream(
                 api_key_file: api_key_file.as_deref(),
                 tools: turn.tools.as_slice(),
                 web_search: turn.web_search,
+                system: turn.system.as_deref(),
             },
             history,
             generation,
@@ -543,10 +561,13 @@ fn run_stream(
             emit,
         ),
         Provider::Ollama { model, endpoint } => ollama::run(
-            model,
-            endpoint,
+            ollama::Request {
+                model,
+                endpoint,
+                tools: turn.tools.as_slice(),
+                system: turn.system.as_deref(),
+            },
             history,
-            turn.tools.as_slice(),
             generation,
             is_stale,
             emit,
@@ -705,6 +726,9 @@ mod tests {
             builtin_tools: false,
             run_command: false,
             web_search: false,
+            system_prompt: None,
+            max_tool_rounds: 25,
+            command_timeout: 60,
             tools: Vec::new(),
         }
     }
@@ -714,6 +738,36 @@ mod tests {
             ai: entries,
             ..Default::default()
         }
+    }
+
+    /// The agentic behaviour is carried entirely by these three: the prompt that
+    /// tells the model to keep going, the budget that lets it, and the timeout a
+    /// command is judged against. A provider resolved without them looks fine
+    /// and quietly answers "I'd need to check" to everything.
+    #[test]
+    fn a_provider_carries_the_agentic_defaults() {
+        let providers = resolve_providers(&config(vec![entry("ai", "claude")]));
+
+        assert_eq!(
+            providers[0].system.as_deref(),
+            Some(prompt::AGENTIC_SYSTEM_PROMPT)
+        );
+        assert_eq!(providers[0].max_tool_rounds, 25);
+        assert_eq!(providers[0].command_timeout, Duration::from_secs(60));
+    }
+
+    /// Zero rounds would leave a tool-enabled provider unable to run anything,
+    /// which reads as the tools being broken rather than as a setting.
+    #[test]
+    fn a_zero_budget_is_raised_to_one_rather_than_disabling_tools() {
+        let providers = resolve_providers(&config(vec![SpotlightAiConfig {
+            max_tool_rounds: 0,
+            command_timeout: 0,
+            ..entry("ai", "claude")
+        }]));
+
+        assert_eq!(providers[0].max_tool_rounds, 1);
+        assert_eq!(providers[0].command_timeout, Duration::from_secs(1));
     }
 
     #[test]
@@ -818,6 +872,9 @@ mod tests {
                 builtin_tools: false,
                 run_command: false,
                 web_search: false,
+                system_prompt: None,
+                max_tool_rounds: 25,
+                command_timeout: 60,
                 tools: Vec::new(),
                 ..entry("ai", "claude")
             },
@@ -826,6 +883,9 @@ mod tests {
                 builtin_tools: false,
                 run_command: false,
                 web_search: false,
+                system_prompt: None,
+                max_tool_rounds: 25,
+                command_timeout: 60,
                 tools: Vec::new(),
                 ..entry("ol", "ollama")
             },
