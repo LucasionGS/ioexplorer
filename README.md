@@ -134,6 +134,40 @@ Newly installed applications appear without restarting the daemon. Launch histor
 
 Known limitation: because spotlight intercepts `Enter` before the text entry sees it, IME candidate confirmation for CJK input is not supported.
 
+### Custom search results
+
+A prefix can also produce its own list of rows. Give it `get_results` instead of `command`, and it runs that command with the query, reads a JSON payload from its stdout, and shows one row per entry. `action` runs on whichever row you pick.
+
+```toml
+[[spotlight.prefixes]]
+prefix = "search"
+label = "Web search"
+get_results = "search_command {query}"
+action = "xdg-open {value}"
+delay = 0.5      # seconds of quiet typing before the command runs
+icon_size = 22   # bigger when the rows carry artwork rather than glyphs
+```
+
+```json
+{
+  "results": [
+    {
+      "title": "Result 1",
+      "value": "https://example.com/1",
+      "icon": "https://example.com/1.png",
+      "preview": { "type": "image", "content": "https://example.com/1-large.png" }
+    },
+    { "title": "Result 2", "value": "https://example.com/2" }
+  ]
+}
+```
+
+`{value}` is substituted shell-quoted, and `{value_escaped}` backslash-escaped for templates that need it unquoted. `icon` is optional, drawn at the right-hand edge of the row, and may be an icon name, an absolute path, a `file://` URI, or an `http(s)://` URL — remote ones are fetched in the background and cached, so the window never blocks on the network. Without an `action`, `Enter` copies the row's value.
+
+A row may also carry a `preview` — `type` of `text` or `image`, plus its `content` — shown in a large panel beside the card for whichever row you are hovering or have selected. Preview images load lazily and only for the row being looked at, so they can be full-size artwork rather than thumbnails.
+
+See [docs/custom-search-results.md](docs/custom-search-results.md) for the full field reference, placeholder rules, and the limits applied to a misbehaving command.
+
 ### AI chat
 
 Add one `[[spotlight.ai]]` block per provider. Each gets its own prefix, so you choose per query; mark one `default = true` to also offer it on plain searches.

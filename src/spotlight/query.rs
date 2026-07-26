@@ -90,9 +90,7 @@ mod tests {
                     prefix: (*key).to_string(),
                     label: "Custom".to_string(),
                     command: "echo {query}".to_string(),
-                    description: None,
-                    icon: None,
-                    terminal: false,
+                    ..Default::default()
                 })
                 .collect(),
             ..Default::default()

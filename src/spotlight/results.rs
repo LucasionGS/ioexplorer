@@ -13,8 +13,13 @@ use crate::{
     },
     spotlight::{
         calc,
+        custom_results::CustomResult,
         paths::{self, PathCandidate},
-        prefixes::{Prefix, PrefixKind, PrefixTable, build_command_line},
+        prefixes::{
+            DEFAULT_RESULTS_ICON_SIZE, Prefix, PrefixKind, PrefixTable, build_action_line,
+            build_command_line,
+        },
+        preview::Preview,
     },
 };
 
@@ -42,6 +47,15 @@ pub struct SpotlightResult {
     pub title: String,
     pub subtitle: String,
     pub icon: IconRef,
+    /// Drawn at the trailing edge of the row. Used by `get_results` prefixes,
+    /// whose rows carry their own artwork.
+    pub trailing_icon: Option<IconRef>,
+    /// Pixel size for `trailing_icon`, so a prefix returning photographs can
+    /// show them large enough to recognise.
+    pub trailing_icon_size: i32,
+    /// Shown in the panel beside the list while this row is selected or
+    /// hovered. Only `get_results` rows carry one.
+    pub preview: Option<Preview>,
     pub primary: Activation,
     pub secondary: Option<Activation>,
     /// Text Tab rewrites the entry to, when this row is selected.
@@ -56,6 +70,9 @@ impl SpotlightResult {
             title: title.into(),
             subtitle: subtitle.into(),
             icon,
+            trailing_icon: None,
+            trailing_icon_size: DEFAULT_RESULTS_ICON_SIZE,
+            preview: None,
             primary: Activation::Inert,
             secondary: None,
             completion: None,
@@ -287,6 +304,7 @@ pub fn prefixed_results(
         PrefixKind::Calculator => calculator_results(arg),
         PrefixKind::Help => help_results(table),
         PrefixKind::FileSearch => Vec::new(), // filled asynchronously by the walker
+        PrefixKind::CustomResults { .. } => Vec::new(), // filled asynchronously by the runner
         PrefixKind::Command { command, terminal } => {
             command_results(prefix, command, *terminal, arg)
         }
@@ -478,6 +496,67 @@ pub fn truncation_notice(shown: usize) -> SpotlightResult {
     // Below every real hit, so it always lands at the bottom.
     result.score = i32::MIN;
     result
+}
+
+/// Wraps the rows a `get_results` command returned.
+///
+/// The command's own ordering is preserved — it knows what is most relevant to
+/// its query, and nothing here can second-guess that.
+pub fn custom_result_rows(
+    prefix: &Prefix,
+    results: &[CustomResult],
+    action: Option<&str>,
+    terminal: bool,
+    icon_size: i32,
+    limit: usize,
+) -> Vec<SpotlightResult> {
+    results
+        .iter()
+        .take(limit)
+        .map(|item| {
+            let mut row = SpotlightResult::new(
+                item.title.clone(),
+                item.value.clone(),
+                IconRef::from_icon_name(prefix.icon.clone()),
+            );
+            row.trailing_icon = item.icon.clone().map(IconRef);
+            row.trailing_icon_size = icon_size;
+            row.preview = item.preview.clone();
+            match action {
+                Some(action) => {
+                    let line = build_action_line(action, &item.value);
+                    row.primary = if terminal {
+                        Activation::RunInTerminal(line.clone())
+                    } else {
+                        Activation::RunShell(line.clone())
+                    };
+                    row.secondary = Some(Activation::RunInTerminal(line));
+                }
+                // With no `action` there is nothing to run, so the value is at
+                // least worth putting on the clipboard.
+                None => row.primary = Activation::CopyText(item.value.clone()),
+            }
+            row
+        })
+        .collect()
+}
+
+/// The row shown before a `get_results` prefix has anything to show.
+pub fn custom_results_notice(prefix: &Prefix, note: &str) -> SpotlightResult {
+    SpotlightResult::new(
+        prefix.label.clone(),
+        note,
+        IconRef::from_icon_name(prefix.icon.clone()),
+    )
+}
+
+/// The row shown when a `get_results` command failed or returned nonsense.
+pub fn custom_results_error(error: &str) -> SpotlightResult {
+    SpotlightResult::new(
+        "Cannot get results",
+        error,
+        IconRef::from_icon_name("dialog-warning-symbolic"),
+    )
 }
 
 fn calculator_results(arg: &str) -> Vec<SpotlightResult> {

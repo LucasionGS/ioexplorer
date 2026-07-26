@@ -37,8 +37,9 @@ pub fn configure_layer_shell(window: &gtk::ApplicationWindow) -> bool {
     true
 }
 
-/// Positions the card `ratio` of the way down the screen, leaving room for a
-/// *fully grown* card rather than the current one.
+/// Positions `stage` — the card and anything flanking it — `ratio` of the way
+/// down the screen, leaving room for a *fully grown* card rather than the
+/// current one.
 ///
 /// `max_card_height` is deliberately a fixed budget, not a measurement. The
 /// margin controls how much space the card gets, which controls how tall it is
@@ -51,7 +52,7 @@ pub fn configure_layer_shell(window: &gtk::ApplicationWindow) -> bool {
 /// Returns the margin applied so callers can detect a real change.
 pub fn apply_top_offset(
     window: &gtk::ApplicationWindow,
-    card: &gtk::Box,
+    stage: &gtk::Box,
     ratio: f64,
     max_card_height: i32,
 ) -> i32 {
@@ -64,8 +65,8 @@ pub fn apply_top_offset(
     let highest = (height - max_card_height - MIN_BOTTOM_MARGIN).max(MIN_TOP_MARGIN);
     let margin = ideal.clamp(MIN_TOP_MARGIN, highest);
 
-    if card.margin_top() != margin {
-        card.set_margin_top(margin);
+    if stage.margin_top() != margin {
+        stage.set_margin_top(margin);
     }
     margin
 }

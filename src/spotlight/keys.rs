@@ -30,6 +30,9 @@ pub enum Action {
     Complete,
     /// Activate the row at this zero-based index.
     Pick(usize),
+    /// Step a paginated `get_results` prefix forward or back. Ignored by every
+    /// other kind of query.
+    Page(i32),
     /// Chat: send the entry text as a follow-up.
     Send,
     /// Chat: leave the transcript for the results list, cancelling any stream.
@@ -84,6 +87,13 @@ fn resolve_search(key: Key, state: ModifierType) -> Action {
         Key::Escape => Action::Close,
         Key::Down => Action::Move(1),
         Key::Up => Action::Move(-1),
+        // Two bindings for the same thing: Alt+arrows read as "forward" and
+        // "back", and Ctrl+Page is what a list of pages usually answers to.
+        // Both are checked before the plain arms below, which ignore modifiers.
+        Key::Right if alt => Action::Page(1),
+        Key::Left if alt => Action::Page(-1),
+        Key::Page_Down if ctrl => Action::Page(1),
+        Key::Page_Up if ctrl => Action::Page(-1),
         Key::Page_Down => Action::Move(PAGE_STEP),
         Key::Page_Up => Action::Move(-PAGE_STEP),
         Key::Home if ctrl => Action::Move(i32::MIN),
@@ -231,6 +241,48 @@ mod tests {
             resolve(Key::_9, ModifierType::ALT_MASK, Mode::Search),
             Action::Pick(8)
         );
+    }
+
+    #[test]
+    fn alt_arrows_and_ctrl_paging_step_through_pages() {
+        assert_eq!(
+            resolve(Key::Right, ModifierType::ALT_MASK, Mode::Search),
+            Action::Page(1)
+        );
+        assert_eq!(
+            resolve(Key::Left, ModifierType::ALT_MASK, Mode::Search),
+            Action::Page(-1)
+        );
+        assert_eq!(
+            resolve(Key::Page_Down, ModifierType::CONTROL_MASK, Mode::Search),
+            Action::Page(1)
+        );
+        assert_eq!(
+            resolve(Key::Page_Up, ModifierType::CONTROL_MASK, Mode::Search),
+            Action::Page(-1)
+        );
+    }
+
+    #[test]
+    fn unmodified_arrows_and_paging_still_move_the_selection() {
+        // The paging arms come first in the match and must not swallow these.
+        assert_eq!(resolve(Key::Right, NONE, Mode::Search), Action::Pass);
+        assert_eq!(resolve(Key::Left, NONE, Mode::Search), Action::Pass);
+        assert_eq!(
+            resolve(Key::Page_Down, NONE, Mode::Search),
+            Action::Move(PAGE_STEP)
+        );
+    }
+
+    #[test]
+    fn chat_never_pages() {
+        for key in [Key::Right, Key::Left, Key::Page_Down, Key::Page_Up] {
+            assert_eq!(
+                resolve(key, ModifierType::ALT_MASK, Mode::Chat),
+                Action::Pass,
+                "{key:?}"
+            );
+        }
     }
 
     #[test]

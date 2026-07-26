@@ -616,9 +616,36 @@ window {
   font-size: 0.86em;
 }
 
+.spotlight-row-trailing-icon {
+  border-radius: 4px;
+}
+
 .spotlight-row-accel {
   font-size: 0.78em;
   font-weight: 700;
+}
+
+/* The preview panel beside the card. Matches .spotlight-surface so the two
+   read as one object rather than a card with something stuck to it. */
+.spotlight-preview {
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 18px;
+  background: rgba(13, 15, 20, 0.9);
+  box-shadow: 0 28px 62px rgba(0, 0, 0, 0.34);
+}
+
+.spotlight-preview-image {
+  border-radius: 10px;
+}
+
+.spotlight-preview-text {
+  font-family: monospace;
+  font-size: 0.9em;
+}
+
+.spotlight-preview-status {
+  padding: 24px 12px;
 }
 
 .spotlight-section-label {

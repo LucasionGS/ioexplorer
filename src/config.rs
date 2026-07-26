@@ -31,11 +31,20 @@ pub struct CustomActionConfig {
     pub filters: Vec<String>,
 }
 
-/// A user-defined spotlight prefix, e.g. `g cats` running a web search.
-#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+/// A user-defined spotlight prefix.
+///
+/// Two shapes. A `command` prefix runs one fixed command line, e.g. `g cats`
+/// running a web search. A `get_results` prefix instead asks a command for a
+/// list of rows to pick from, and runs `action` on whichever the user chooses.
+///
+/// Not `Eq`: `delay` is a float, so only `PartialEq` is available.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Serialize)]
 pub struct SpotlightPrefixConfig {
     pub prefix: String,
+    /// Falls back to the prefix key when empty.
+    #[serde(default)]
     pub label: String,
+    #[serde(default)]
     pub command: String,
     #[serde(default)]
     pub description: Option<String>,
@@ -43,6 +52,26 @@ pub struct SpotlightPrefixConfig {
     pub icon: Option<String>,
     #[serde(default)]
     pub terminal: bool,
+    /// Command printing `{"results": [{"title", "value", "icon"}]}` on stdout.
+    /// Takes precedence over `command`.
+    #[serde(default)]
+    pub get_results: Option<String>,
+    /// Command run when a `get_results` row is activated. `{value}` is
+    /// substituted shell-quoted, `{value_escaped}` backslash-escaped.
+    #[serde(default)]
+    pub action: Option<String>,
+    /// Seconds of quiet typing before `get_results` runs, so the command is not
+    /// spawned on every keystroke. Defaults to 0.5.
+    #[serde(default)]
+    pub delay: Option<f64>,
+    /// Pixel size of the artwork a `get_results` row carries. Defaults to 22,
+    /// which suits a glyph; a provider returning photographs wants far more.
+    #[serde(default)]
+    pub icon_size: Option<i32>,
+    /// Lets the user page through a `get_results` command's output. Requires a
+    /// `{page}` in `get_results` — there is nowhere else to put the number.
+    #[serde(default)]
+    pub pagination: bool,
 }
 
 /// How hard the model should work before answering. Maps to the Claude API's
@@ -358,9 +387,7 @@ command = "xdg-open 'https://google.com/search?q={query_url}'"
                     prefix: "g".to_string(),
                     label: "Google search".to_string(),
                     command: "xdg-open 'https://google.com/search?q={query_url}'".to_string(),
-                    description: None,
-                    icon: None,
-                    terminal: false,
+                    ..Default::default()
                 }],
                 ..Default::default()
             },
@@ -371,6 +398,42 @@ command = "xdg-open 'https://google.com/search?q={query_url}'"
         let parsed: AppConfig = toml::from_str(&contents).expect("valid config");
 
         assert_eq!(parsed.spotlight, config.spotlight);
+    }
+
+    #[test]
+    fn parses_a_get_results_prefix() {
+        let parsed: AppConfig = toml::from_str(
+            r#"
+default_view = "icon"
+show_hidden = false
+icon_size = 128
+sidebar_width = 220
+
+[list_columns]
+size = true
+kind = true
+modified = true
+
+[[spotlight.prefixes]]
+prefix = "search"
+get_results = "search_command '{query}'"
+delay = 0.25
+action = "xdg-open '{value}'"
+"#,
+        )
+        .expect("valid config");
+
+        let prefix = &parsed.spotlight.prefixes[0];
+        assert_eq!(
+            prefix.get_results.as_deref(),
+            Some("search_command '{query}'")
+        );
+        assert_eq!(prefix.action.as_deref(), Some("xdg-open '{value}'"));
+        assert_eq!(prefix.delay, Some(0.25));
+        assert!(
+            prefix.label.is_empty() && prefix.command.is_empty(),
+            "neither is required alongside get_results"
+        );
     }
 
     #[test]

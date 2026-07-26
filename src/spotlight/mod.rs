@@ -6,11 +6,14 @@
 
 mod ai;
 mod calc;
+mod custom_results;
 mod file_search;
+mod image_cache;
 mod keys;
 mod layout;
 mod paths;
 mod prefixes;
+mod preview;
 mod query;
 mod results;
 mod window;

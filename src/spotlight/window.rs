@@ -2,6 +2,7 @@
 
 use std::{
     cell::{Cell, RefCell},
+    path::{Path, PathBuf},
     rc::Rc,
     sync::mpsc,
     time::Duration,
@@ -19,10 +20,13 @@ use crate::{
     spotlight::{
         ToggleRequest,
         ai::{AiError, AiEvent, AiProvider, AiSession, ChatMessage, Provider, markdown},
+        custom_results::{CustomResult, CustomResultsRunner, ResultsEvent},
         file_search::{FileHit, FileSearch, SearchEvent},
+        image_cache,
         keys::{self, Action},
         layout,
-        prefixes::{Prefix, PrefixKind, PrefixTable},
+        prefixes::{FIRST_PAGE, Prefix, PrefixKind, PrefixTable, build_results_line},
+        preview::{self, Preview, PreviewEvent, PreviewKind, PreviewLoader},
         query::{self, Query},
         results::{self, Activation, SpotlightResult},
     },
@@ -43,6 +47,19 @@ const MAX_LIST_HEIGHT: i32 = 420;
 /// Height at which the transcript starts scrolling instead of growing.
 const MAX_CHAT_HEIGHT: i32 = 520;
 const ROW_ICON_SIZE: i32 = 28;
+/// Width of the preview panel beside the card.
+const PREVIEW_WIDTH: i32 = 380;
+/// Gap between the preview panel and the card.
+const PREVIEW_GAP: i32 = 14;
+/// Largest square a preview image is drawn into. `GtkImage` scales the picture
+/// to fit while keeping its aspect ratio, so one number bounds both dimensions
+/// — which also stops a large photograph from dictating the panel's size.
+const PREVIEW_IMAGE_SIZE: i32 = 340;
+/// Height at which preview text starts scrolling instead of growing.
+const MAX_PREVIEW_HEIGHT: i32 = 460;
+/// Quiet time before a preview image is loaded. Holding an arrow key would
+/// otherwise decode — and for a remote image, download — every row passed over.
+const PREVIEW_DEBOUNCE: Duration = Duration::from_millis(120);
 /// Rows reachable via Alt+1..9.
 const QUICK_PICK_ROWS: usize = 9;
 /// Shown at the end of the streaming message so it reads as still going.
@@ -73,6 +90,15 @@ pub struct SpotlightWindow {
     app: gtk::Application,
     window: gtk::ApplicationWindow,
     card: gtk::Box,
+    /// Carries the top margin and holds the card between the preview panel and
+    /// its mirroring spacer.
+    stage: gtk::Box,
+    preview_panel: gtk::Box,
+    preview_spacer: gtk::Box,
+    preview_stack: gtk::Stack,
+    preview_image: gtk::Image,
+    preview_label: gtk::Label,
+    preview_status: gtk::Label,
     entry: gtk::Entry,
     prefix_badge: gtk::Label,
     hint_label: gtk::Label,
@@ -115,6 +141,31 @@ pub struct SpotlightWindow {
     file_hits: RefCell<Vec<FileHit>>,
     /// Set when the walker hit one of its bounds, so the UI can say so.
     file_search_truncated: Cell<bool>,
+    custom_results: CustomResultsRunner,
+    custom_rows: RefCell<Vec<CustomResult>>,
+    custom_error: RefCell<Option<String>>,
+    /// The command line the current rows belong to. Rebuilds fire for reasons
+    /// other than typing — an app-index change, a redraw after a drain — and
+    /// restarting on those would reset the debounce forever.
+    custom_line: RefCell<Option<String>>,
+    custom_pending: Cell<bool>,
+    /// The page a paginated prefix is showing.
+    custom_page: Cell<i64>,
+    /// Prefix and query the current page belongs to. A different one means the
+    /// user is asking a new question, which starts again at page one.
+    custom_page_key: RefCell<Option<String>>,
+    /// Set when the *user* changed page, to skip the typing debounce once —
+    /// a deliberate keypress should not wait as though it were a keystroke.
+    custom_immediate: Cell<bool>,
+    preview_loader: PreviewLoader,
+    /// The preview currently on screen, so an unchanged one is not rebuilt —
+    /// which would restart its crossfade on every keystroke.
+    preview_shown: RefCell<Option<Preview>>,
+    /// Bumped on every preview change; the debounce timeout drops itself when
+    /// it no longer matches, which is cheaper than tracking `SourceId`s.
+    preview_generation: Cell<u64>,
+    /// The row under the pointer, which takes precedence over the selected one.
+    hovered: Cell<Option<usize>>,
     results: RefCell<Vec<SpotlightResult>>,
     selected: Cell<usize>,
     /// Guards `connect_row_selected` against our own `select_row` calls.
@@ -246,12 +297,75 @@ impl SpotlightWindow {
         footers.set_visible_child_name("results");
         card.append(&footers);
 
+        let preview_image = gtk::Image::builder()
+            .pixel_size(PREVIEW_IMAGE_SIZE)
+            .css_classes(["spotlight-preview-image"])
+            .build();
+
+        let preview_label = gtk::Label::builder()
+            .xalign(0.0)
+            .yalign(0.0)
+            .wrap(true)
+            .wrap_mode(gtk::pango::WrapMode::WordChar)
+            // Never selectable: a selectable label takes focus, and the entry
+            // losing focus mid-search is the bug that ate follow-up keystrokes.
+            .selectable(false)
+            .css_classes(["spotlight-preview-text"])
+            .build();
+        let preview_text_scroller = gtk::ScrolledWindow::builder()
+            .child(&preview_label)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .max_content_height(MAX_PREVIEW_HEIGHT)
+            .propagate_natural_height(true)
+            .build();
+
+        let preview_status = gtk::Label::builder()
+            .wrap(true)
+            .css_classes(["spotlight-preview-status", "dim-label"])
+            .build();
+
+        let preview_stack = gtk::Stack::builder()
+            .transition_type(gtk::StackTransitionType::Crossfade)
+            .transition_duration(90)
+            .build();
+        preview_stack.add_named(&preview_image, Some("image"));
+        preview_stack.add_named(&preview_text_scroller, Some("text"));
+        preview_stack.add_named(&preview_status, Some("status"));
+        preview_stack.set_visible_child_name("status");
+
+        let preview_panel = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .valign(gtk::Align::Start)
+            .width_request(PREVIEW_WIDTH)
+            .visible(false)
+            .css_classes(["spotlight-preview"])
+            .build();
+        preview_panel.append(&preview_stack);
+
+        // Mirrors the panel's width on the other side so the card stays exactly
+        // centred. Without it the whole row re-centres as previews come and go,
+        // and the search entry slides sideways under the user's cursor.
+        let preview_spacer = gtk::Box::builder()
+            .width_request(PREVIEW_WIDTH)
+            .visible(false)
+            .build();
+
+        let stage = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(PREVIEW_GAP)
+            .halign(gtk::Align::Center)
+            .valign(gtk::Align::Start)
+            .build();
+        stage.append(&preview_panel);
+        stage.append(&card);
+        stage.append(&preview_spacer);
+
         let root = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .hexpand(true)
             .vexpand(true)
             .build();
-        root.append(&card);
+        root.append(&stage);
 
         let window = gtk::ApplicationWindow::builder()
             .application(app)
@@ -273,6 +387,13 @@ impl SpotlightWindow {
             app: app.clone(),
             window,
             card,
+            stage,
+            preview_panel,
+            preview_spacer,
+            preview_stack,
+            preview_image,
+            preview_label,
+            preview_status,
             entry,
             prefix_badge,
             hint_label,
@@ -303,6 +424,18 @@ impl SpotlightWindow {
             file_search: FileSearch::new(),
             file_hits: RefCell::new(Vec::new()),
             file_search_truncated: Cell::new(false),
+            custom_results: CustomResultsRunner::new(),
+            custom_rows: RefCell::new(Vec::new()),
+            custom_error: RefCell::new(None),
+            custom_line: RefCell::new(None),
+            custom_pending: Cell::new(false),
+            custom_page: Cell::new(FIRST_PAGE),
+            custom_page_key: RefCell::new(None),
+            custom_immediate: Cell::new(false),
+            preview_loader: PreviewLoader::new(),
+            preview_shown: RefCell::new(None),
+            preview_generation: Cell::new(0),
+            hovered: Cell::new(None),
             results: RefCell::new(Vec::new()),
             selected: Cell::new(0),
             updating: Cell::new(false),
@@ -348,9 +481,17 @@ impl SpotlightWindow {
             let gesture = gtk::GestureClick::new();
             let this = Rc::clone(self);
             let card = self.card.clone();
+            let preview_panel = self.preview_panel.clone();
             gesture.connect_pressed(move |_, _, x, y| {
-                let inside = card.compute_bounds(&this.window).is_some_and(|bounds| {
-                    bounds.contains_point(&gtk::graphene::Point::new(x as f32, y as f32))
+                let point = gtk::graphene::Point::new(x as f32, y as f32);
+                // The card and the panel, never the stage: the stage also spans
+                // the invisible spacer balancing the panel, and a click on what
+                // looks like empty backdrop should still dismiss.
+                let inside = [&card, &preview_panel].into_iter().any(|widget| {
+                    widget.is_visible()
+                        && widget
+                            .compute_bounds(&this.window)
+                            .is_some_and(|bounds| bounds.contains_point(&point))
                 });
                 if !inside {
                     this.close();
@@ -437,7 +578,7 @@ impl SpotlightWindow {
         }
         let margin = layout::apply_top_offset(
             &self.window,
-            &self.card,
+            &self.stage,
             self.config.clamped_top_ratio(),
             MAX_CARD_HEIGHT,
         );
@@ -456,6 +597,8 @@ impl SpotlightWindow {
                 }
             }
             this.drain_file_search();
+            this.drain_custom_results();
+            this.drain_previews();
             this.drain_ai();
             glib::ControlFlow::Continue
         });
@@ -503,6 +646,13 @@ impl SpotlightWindow {
                 self.activate(index, false);
                 glib::Propagation::Stop
             }
+            // Consumed either way. Letting Alt+Left through when nothing is
+            // paginated would move the entry's cursor instead, which reads as
+            // the shortcut misfiring rather than as it not applying.
+            Action::Page(delta) => {
+                self.change_page(delta);
+                glib::Propagation::Stop
+            }
             Action::Pass => {
                 // A selectable transcript label is focusable, so clicking one
                 // moves focus off the entry and the next keystroke goes nowhere.
@@ -536,7 +686,7 @@ impl SpotlightWindow {
         let mut active_prefix: Option<&Prefix> = None;
         let mut results = match &parsed.query {
             Query::Empty => {
-                self.file_search.cancel();
+                self.cancel_async_results();
                 results::default_results(
                     "",
                     &self.live_index.snapshot(),
@@ -546,7 +696,7 @@ impl SpotlightWindow {
                 )
             }
             Query::Plain(text) => {
-                self.file_search.cancel();
+                self.cancel_async_results();
                 results::default_results(
                     text,
                     &self.live_index.snapshot(),
@@ -561,12 +711,36 @@ impl SpotlightWindow {
                 };
                 active_prefix = Some(prefix);
 
-                if matches!(prefix.kind, PrefixKind::FileSearch) {
-                    self.start_file_search(arg);
-                    self.file_results(limit)
-                } else {
-                    self.file_search.cancel();
-                    results::prefixed_results(prefix, arg, &self.prefix_table, limit)
+                match &prefix.kind {
+                    PrefixKind::FileSearch => {
+                        self.cancel_custom_results();
+                        self.start_file_search(arg);
+                        self.file_results(limit)
+                    }
+                    PrefixKind::CustomResults {
+                        command,
+                        action,
+                        delay,
+                        terminal,
+                        icon_size,
+                        paginated,
+                    } => {
+                        self.file_search.cancel();
+                        self.sync_page(key, arg, *paginated);
+                        self.start_custom_results(command, *delay, arg);
+                        self.custom_results(
+                            prefix,
+                            arg,
+                            action.as_deref(),
+                            *terminal,
+                            *icon_size,
+                            limit,
+                        )
+                    }
+                    _ => {
+                        self.cancel_async_results();
+                        results::prefixed_results(prefix, arg, &self.prefix_table, limit)
+                    }
                 }
             }
         };
@@ -602,7 +776,16 @@ impl SpotlightWindow {
     fn update_header(&self, prefix: Option<&Prefix>, hint: Option<&str>) {
         match prefix {
             Some(prefix) => {
-                self.prefix_badge.set_text(&prefix.label);
+                // The page rides on the badge rather than getting a widget of
+                // its own: it is only ever meaningful next to the prefix it
+                // belongs to, and the header has no room to spare.
+                let page = self.custom_page.get();
+                match self.custom_page_key.borrow().is_some() && page > FIRST_PAGE {
+                    true => self
+                        .prefix_badge
+                        .set_text(&format!("{} · page {page}", prefix.label)),
+                    false => self.prefix_badge.set_text(&prefix.label),
+                }
                 self.prefix_badge.set_visible(true);
             }
             None => self.prefix_badge.set_visible(false),
@@ -620,9 +803,16 @@ impl SpotlightWindow {
     fn render(self: &Rc<Self>, results: Vec<SpotlightResult>) {
         self.updating.set(true);
         icons::clear_list_rows(&self.list);
+        // The rows about to be built are different ones, so an index recorded
+        // against the old list means nothing now.
+        self.hovered.set(None);
 
         for (index, result) in results.iter().enumerate() {
-            self.list.append(&row_for(result, index));
+            let row = row_for(result, index);
+            if result.preview.is_some() {
+                self.watch_hover(&row, index);
+            }
+            self.list.append(&row);
         }
 
         let is_empty = results.is_empty();
@@ -655,6 +845,151 @@ impl SpotlightWindow {
             // Deferred so the row has a current allocation to scroll to.
             glib::idle_add_local_once(move || scroll_into_view(&scroller, &list, &row));
         }
+
+        self.refresh_preview();
+    }
+
+    /// Makes a row show its preview while the pointer is over it.
+    fn watch_hover(self: &Rc<Self>, row: &gtk::ListBoxRow, index: usize) {
+        let motion = gtk::EventControllerMotion::new();
+
+        let this = Rc::clone(self);
+        motion.connect_enter(move |_, _, _| {
+            this.hovered.set(Some(index));
+            this.refresh_preview();
+        });
+
+        let this = Rc::clone(self);
+        motion.connect_leave(move |_| {
+            // Guarded: leaving a row the pointer has already left elsewhere
+            // would otherwise clear whichever row it has just entered.
+            if this.hovered.get() == Some(index) {
+                this.hovered.set(None);
+                this.refresh_preview();
+            }
+        });
+
+        row.add_controller(motion);
+    }
+
+    // -- preview panel -----------------------------------------------------
+
+    /// Points the panel at whichever row the user is currently indicating.
+    ///
+    /// The pointer wins over the keyboard: hovering is a deliberate act and is
+    /// always the more recent one, and the selection is still visible in the
+    /// list, so nothing is lost by showing what is under the cursor.
+    fn refresh_preview(self: &Rc<Self>) {
+        if self.mode.get() == keys::Mode::Chat {
+            self.show_preview(None);
+            return;
+        }
+
+        let index = self.hovered.get().unwrap_or_else(|| self.selected.get());
+        let preview = self
+            .results
+            .borrow()
+            .get(index)
+            .and_then(|result| result.preview.clone());
+        self.show_preview(preview);
+    }
+
+    fn show_preview(self: &Rc<Self>, preview: Option<Preview>) {
+        if *self.preview_shown.borrow() == preview {
+            return;
+        }
+        *self.preview_shown.borrow_mut() = preview.clone();
+
+        // Supersedes any pending debounce and any in-flight download.
+        let generation = self.preview_generation.get().wrapping_add(1);
+        self.preview_generation.set(generation);
+        self.preview_loader.cancel();
+
+        let Some(preview) = preview.filter(|_| self.preview_fits()) else {
+            self.preview_panel.set_visible(false);
+            self.preview_spacer.set_visible(false);
+            return;
+        };
+
+        self.preview_panel.set_visible(true);
+        self.preview_spacer.set_visible(true);
+
+        match preview.kind {
+            PreviewKind::Text => {
+                self.preview_label.set_text(&preview.content);
+                self.preview_stack.set_visible_child_name("text");
+            }
+            // A file already on disk costs a decode, not a round trip, so it
+            // still waits out the debounce — holding an arrow key past twenty
+            // photographs should not decode twenty photographs.
+            PreviewKind::Image => {
+                self.preview_status.set_text("Loading…");
+                self.preview_stack.set_visible_child_name("status");
+
+                let this = Rc::clone(self);
+                glib::timeout_add_local_once(PREVIEW_DEBOUNCE, move || {
+                    if this.preview_generation.get() == generation {
+                        this.load_preview_image(&preview.content);
+                    }
+                });
+            }
+        }
+    }
+
+    /// Shows an image preview, downloading it first when it is remote.
+    fn load_preview_image(self: &Rc<Self>, content: &str) {
+        if !image_cache::is_remote(content) {
+            let path = match content.starts_with("file://") {
+                true => gio::File::for_uri(content).path(),
+                false => Some(PathBuf::from(content)),
+            };
+            match path {
+                Some(path) => self.set_preview_image(&path),
+                None => {
+                    self.preview_status.set_text("Preview unavailable");
+                    self.preview_stack.set_visible_child_name("status");
+                }
+            }
+            return;
+        }
+
+        match preview::cached_image(content) {
+            Some(path) => self.set_preview_image(&path),
+            None => {
+                self.preview_loader.start(content.to_string());
+            }
+        }
+    }
+
+    fn set_preview_image(&self, path: &Path) {
+        self.preview_image.set_from_file(Some(path));
+        // `set_from_file` resets the storage type, which drops the pixel size
+        // with it — without this the picture falls back to a 16px icon.
+        self.preview_image.set_pixel_size(PREVIEW_IMAGE_SIZE);
+        self.preview_stack.set_visible_child_name("image");
+    }
+
+    fn drain_previews(self: &Rc<Self>) {
+        for event in self.preview_loader.drain() {
+            match event {
+                PreviewEvent::Ready { path, .. } => self.set_preview_image(&path),
+                PreviewEvent::Failed { .. } => {
+                    self.preview_status.set_text("Preview unavailable");
+                    self.preview_stack.set_visible_child_name("status");
+                }
+            }
+        }
+    }
+
+    /// Whether the output is wide enough for a panel on each side of the card.
+    ///
+    /// The spacer means the preview costs twice its own width. On a narrow
+    /// screen that would push the card off-centre or off-screen entirely, and a
+    /// launcher that cannot be read is worse than one without previews.
+    fn preview_fits(&self) -> bool {
+        let available = self.window.width();
+        available == 0
+            || available >= self.config.clamped_width() + 2 * (PREVIEW_WIDTH + PREVIEW_GAP)
     }
 
     fn move_selection(self: &Rc<Self>, delta: i32) {
@@ -728,6 +1063,189 @@ impl SpotlightWindow {
 
         let selected = self.selected.get();
         let results = self.file_results(self.config.clamped_result_limit());
+        self.render(results);
+        self.select(selected);
+    }
+
+    // -- custom results ----------------------------------------------------
+
+    /// Cancels both asynchronous result sources at once.
+    fn cancel_async_results(&self) {
+        self.file_search.cancel();
+        self.cancel_custom_results();
+    }
+
+    fn cancel_custom_results(&self) {
+        self.custom_results.cancel();
+        self.custom_rows.borrow_mut().clear();
+        *self.custom_error.borrow_mut() = None;
+        *self.custom_line.borrow_mut() = None;
+        self.custom_pending.set(false);
+    }
+
+    /// The rows for a `get_results` prefix: whatever the command last returned,
+    /// or a single row standing in for its state.
+    fn custom_results(
+        &self,
+        prefix: &Prefix,
+        arg: &str,
+        action: Option<&str>,
+        terminal: bool,
+        icon_size: i32,
+        limit: usize,
+    ) -> Vec<SpotlightResult> {
+        if let Some(error) = self.custom_error.borrow().as_deref() {
+            return vec![results::custom_results_error(error)];
+        }
+        if arg.trim().is_empty() {
+            return vec![results::custom_results_notice(prefix, "Type to search")];
+        }
+
+        let rows = self.custom_rows.borrow();
+        if rows.is_empty() && self.custom_pending.get() {
+            return vec![results::custom_results_notice(prefix, "Searching…")];
+        }
+        // Past the first page an empty result is the end of the list, not a
+        // query that matched nothing — saying "No results" there would read as
+        // though the search itself had failed.
+        if rows.is_empty() && self.custom_page.get() > FIRST_PAGE {
+            return vec![results::custom_results_notice(
+                prefix,
+                "No more results — Alt+← for the previous page",
+            )];
+        }
+
+        results::custom_result_rows(prefix, &rows, action, terminal, icon_size, limit)
+    }
+
+    fn start_custom_results(&self, command: &str, delay: Duration, arg: &str) {
+        let arg = arg.trim();
+        let line = build_results_line(command, arg, self.custom_page.get());
+        if self.custom_line.borrow().as_deref() == Some(line.as_str()) {
+            return;
+        }
+        // Only a run that actually starts consumes it, or the flag would leak
+        // into whichever keystroke came next.
+        let delay = match self.custom_immediate.replace(false) {
+            true => Duration::ZERO,
+            false => delay,
+        };
+
+        self.custom_rows.borrow_mut().clear();
+        *self.custom_error.borrow_mut() = None;
+        *self.custom_line.borrow_mut() = Some(line.clone());
+
+        if arg.is_empty() {
+            self.custom_results.cancel();
+            self.custom_pending.set(false);
+            return;
+        }
+
+        self.custom_pending.set(true);
+        self.custom_results.start(line, delay);
+    }
+
+    /// Keeps the page tied to the question being asked.
+    ///
+    /// Editing the query, or switching to another prefix, starts again at page
+    /// one — page 4 of a search the user has since retyped is meaningless, and
+    /// carrying it over would silently hide the first three pages of results.
+    fn sync_page(&self, key: &str, arg: &str, paginated: bool) {
+        // NUL cannot occur in either half, so the join is unambiguous.
+        let page_key = paginated.then(|| format!("{key}\0{}", arg.trim()));
+        if *self.custom_page_key.borrow() == page_key {
+            return;
+        }
+
+        *self.custom_page_key.borrow_mut() = page_key;
+        self.custom_page.set(FIRST_PAGE);
+    }
+
+    /// Steps a paginated prefix forward or back, if one is active.
+    fn change_page(self: &Rc<Self>, delta: i32) {
+        if !self.paginated_query() {
+            return;
+        }
+
+        let page = (self.custom_page.get() + i64::from(delta)).max(FIRST_PAGE);
+        if page == self.custom_page.get() {
+            return;
+        }
+
+        self.custom_page.set(page);
+        self.custom_immediate.set(true);
+        self.rebuild();
+    }
+
+    /// Whether what is in the entry right now can be paged.
+    fn paginated_query(&self) -> bool {
+        if self.mode.get() == keys::Mode::Chat {
+            return false;
+        }
+
+        let parsed = query::parse(&self.entry.text(), &self.prefix_table);
+        let Query::Prefixed { key, arg } = &parsed.query else {
+            return false;
+        };
+        // A prefix with nothing typed after it has not run anything to page.
+        !arg.trim().is_empty()
+            && matches!(
+                self.prefix_table.get(key).map(|prefix| &prefix.kind),
+                Some(PrefixKind::CustomResults {
+                    paginated: true,
+                    ..
+                })
+            )
+    }
+
+    fn drain_custom_results(self: &Rc<Self>) {
+        let events = self.custom_results.drain();
+        if events.is_empty() {
+            return;
+        }
+
+        for event in events {
+            match event {
+                ResultsEvent::Ready { results, .. } => {
+                    *self.custom_rows.borrow_mut() = results;
+                    *self.custom_error.borrow_mut() = None;
+                }
+                ResultsEvent::Failed { error, .. } => {
+                    tracing::warn!(%error, "a spotlight get_results command failed");
+                    self.custom_rows.borrow_mut().clear();
+                    *self.custom_error.borrow_mut() = Some(error);
+                }
+            }
+        }
+        self.custom_pending.set(false);
+
+        // Only re-render while a get_results prefix is still active.
+        let parsed = query::parse(&self.entry.text(), &self.prefix_table);
+        let Query::Prefixed { key, arg } = &parsed.query else {
+            return;
+        };
+        let Some(prefix) = self.prefix_table.get(key) else {
+            return;
+        };
+        let PrefixKind::CustomResults {
+            action,
+            terminal,
+            icon_size,
+            ..
+        } = &prefix.kind
+        else {
+            return;
+        };
+
+        let selected = self.selected.get();
+        let results = self.custom_results(
+            prefix,
+            arg,
+            action.as_deref(),
+            *terminal,
+            *icon_size,
+            self.config.clamped_result_limit(),
+        );
         self.render(results);
         self.select(selected);
     }
@@ -863,6 +1381,8 @@ impl SpotlightWindow {
 
     fn set_mode(self: &Rc<Self>, mode: keys::Mode) {
         self.mode.set(mode);
+        // The panel belongs to the result list; the chat replaces it.
+        self.refresh_preview();
         match mode {
             keys::Mode::Chat => {
                 self.body.set_visible_child_name("chat");
@@ -1181,12 +1701,21 @@ impl SpotlightWindow {
     pub fn hide(&self) {
         self.file_search.cancel();
         self.file_hits.borrow_mut().clear();
+        self.cancel_custom_results();
         // A stream would otherwise keep appending into a hidden transcript.
         self.ai_session.cancel();
         if let Some(chat) = self.chat.borrow_mut().as_mut() {
             chat.streaming = false;
         }
         self.spinner.set_spinning(false);
+        // Also drops the pending debounce, whose generation check now fails.
+        self.preview_loader.cancel();
+        self.preview_generation
+            .set(self.preview_generation.get().wrapping_add(1));
+        *self.preview_shown.borrow_mut() = None;
+        self.hovered.set(None);
+        self.preview_panel.set_visible(false);
+        self.preview_spacer.set_visible(false);
         self.entry.set_text("");
         self.window.set_visible(false);
     }
@@ -1376,6 +1905,13 @@ fn row_for(result: &SpotlightResult, index: usize) -> gtk::ListBoxRow {
         );
     }
     content.append(&text);
+
+    if let Some(trailing) = &result.trailing_icon {
+        let trailing = icons::image_for(trailing, result.trailing_icon_size);
+        trailing.add_css_class("spotlight-row-trailing-icon");
+        trailing.set_valign(gtk::Align::Center);
+        content.append(&trailing);
+    }
 
     if index < QUICK_PICK_ROWS {
         content.append(

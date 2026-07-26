@@ -1,8 +1,28 @@
 //! Prefix shortcuts: the built-in set, user-defined additions, and the command
 //! templating that turns `g cats` into a real shell line.
 
+use std::time::Duration;
+
 use crate::config::{SpotlightConfig, SpotlightPrefixConfig};
 use crate::spotlight::ai::{self, AiProvider};
+
+/// Default quiet-typing window before a `get_results` command runs.
+const DEFAULT_RESULTS_DELAY: f64 = 0.5;
+/// Bounds on that window, so a typo can neither hammer the command on every
+/// keystroke nor leave the prefix looking permanently broken.
+const MIN_RESULTS_DELAY: f64 = 0.0;
+const MAX_RESULTS_DELAY: f64 = 10.0;
+
+/// The placeholder a paginated `get_results` template puts the page number in.
+pub const PAGE_PLACEHOLDER: &str = "{page}";
+/// The page a paginated prefix starts on, and the lowest it can go back to.
+pub const FIRST_PAGE: i64 = 1;
+
+/// Default artwork size for a `get_results` row: an icon beside the text.
+pub const DEFAULT_RESULTS_ICON_SIZE: i32 = 22;
+/// Bounds on that size. The ceiling keeps a row from outgrowing the list.
+const MIN_RESULTS_ICON_SIZE: i32 = 16;
+const MAX_RESULTS_ICON_SIZE: i32 = 256;
 
 /// What activating a prefix actually does.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -19,6 +39,18 @@ pub enum PrefixKind {
     Help,
     /// Run a user-configured command template.
     Command { command: String, terminal: bool },
+    /// Ask a user-configured command for the rows to show, then run `action`
+    /// on whichever one is picked.
+    CustomResults {
+        command: String,
+        action: Option<String>,
+        delay: Duration,
+        terminal: bool,
+        /// Pixel size of each row's artwork.
+        icon_size: i32,
+        /// Whether the user can page through the command's output.
+        paginated: bool,
+    },
     /// Open a chat with the AI provider at this index.
     ///
     /// An index rather than the provider by value: `PrefixKind` derives `Eq`
@@ -179,30 +211,90 @@ fn prefix_from_config(entry: &SpotlightPrefixConfig) -> Option<Prefix> {
         );
         return None;
     }
-    if entry.label.trim().is_empty() || entry.command.trim().is_empty() {
+
+    let get_results = trimmed(entry.get_results.as_deref());
+    let command = entry.command.trim();
+    if get_results.is_none() && command.is_empty() {
         tracing::warn!(
             prefix = key,
-            "ignoring spotlight prefix with an empty label or command"
+            "ignoring spotlight prefix with neither a command nor get_results"
         );
         return None;
     }
 
+    // `get_results` wins: a prefix that produces its own rows has no use for a
+    // single fixed command line.
+    let kind = match get_results {
+        Some(get_results) => PrefixKind::CustomResults {
+            command: get_results.to_string(),
+            action: trimmed(entry.action.as_deref()).map(str::to_string),
+            delay: results_delay(entry.delay),
+            terminal: entry.terminal,
+            icon_size: results_icon_size(entry.icon_size),
+            paginated: pagination_enabled(key, entry.pagination, get_results),
+        },
+        None => PrefixKind::Command {
+            command: command.to_string(),
+            terminal: entry.terminal,
+        },
+    };
+
     Some(Prefix {
         key: key.to_string(),
-        label: entry.label.trim().to_string(),
+        label: match entry.label.trim() {
+            "" => key.to_string(),
+            label => label.to_string(),
+        },
         description: entry
             .description
             .clone()
-            .unwrap_or_else(|| entry.command.clone()),
+            .unwrap_or_else(|| get_results.unwrap_or(command).to_string()),
         icon: entry
             .icon
             .clone()
             .unwrap_or_else(|| "application-x-executable-symbolic".to_string()),
-        kind: PrefixKind::Command {
-            command: entry.command.clone(),
-            terminal: entry.terminal,
-        },
+        kind,
     })
+}
+
+fn trimmed(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+/// The artwork size for `get_results` rows, clamped.
+///
+/// The ceiling is not arbitrary: every row grows to fit its icon, so an
+/// unbounded value would push the whole list past the card's height budget and
+/// leave one row filling the screen.
+fn results_icon_size(size: Option<i32>) -> i32 {
+    size.unwrap_or(DEFAULT_RESULTS_ICON_SIZE)
+        .clamp(MIN_RESULTS_ICON_SIZE, MAX_RESULTS_ICON_SIZE)
+}
+
+/// Whether paging is actually usable, rather than merely asked for.
+///
+/// Without a `{page}` in the template every page would run the identical
+/// command line, so paging would look like it worked and change nothing. Saying
+/// so once at load time beats leaving the user to work that out from a list
+/// that refuses to advance.
+fn pagination_enabled(key: &str, requested: bool, template: &str) -> bool {
+    if requested && !template.contains(PAGE_PLACEHOLDER) {
+        tracing::warn!(
+            prefix = key,
+            "spotlight prefix sets pagination but its get_results has no {PAGE_PLACEHOLDER}"
+        );
+        return false;
+    }
+    requested
+}
+
+/// The debounce for a `get_results` command, clamped and NaN-proofed.
+fn results_delay(delay: Option<f64>) -> Duration {
+    let seconds = delay
+        .filter(|delay| delay.is_finite())
+        .unwrap_or(DEFAULT_RESULTS_DELAY)
+        .clamp(MIN_RESULTS_DELAY, MAX_RESULTS_DELAY);
+    Duration::from_secs_f64(seconds)
 }
 
 /// Expands a command template against a query.
@@ -224,6 +316,55 @@ pub fn build_command_line(template: &str, query: &str) -> String {
     line
 }
 
+/// Expands a `get_results` template, filling `{page}` before the query.
+///
+/// The order matters both ways round. Substituting the page first means the
+/// number lands in the template, not in whatever the user typed — a query
+/// containing the literal text `{page}` is left alone rather than re-expanded.
+/// And because a page is an `i64` it needs no quoting: there is no string a
+/// caller could supply that survives into the shell as anything but digits.
+pub fn build_results_line(template: &str, query: &str, page: i64) -> String {
+    build_command_line(
+        &template.replace(PAGE_PLACEHOLDER, &page.to_string()),
+        query,
+    )
+}
+
+/// Expands an action template against the value of the chosen result.
+///
+/// `{value}` is shell-quoted, which is safe both bare and inside the quotes a
+/// template may already wrap it in — `''x''` is just `x` to the shell.
+/// `{value_escaped}` backslash-escapes instead, for templates that need the
+/// value unquoted. A template with neither gets the quoted value appended.
+pub fn build_action_line(template: &str, value: &str) -> String {
+    let has_placeholder = template.contains("{value}") || template.contains("{value_escaped}");
+    let mut line = template
+        .replace("{value_escaped}", &backslash_escape(value))
+        .replace("{value}", &crate::custom_actions::shell_quote(value));
+
+    if !has_placeholder && !value.is_empty() {
+        line.push(' ');
+        line.push_str(&crate::custom_actions::shell_quote(value));
+    }
+
+    line
+}
+
+/// Backslash-escapes every character the shell would otherwise act on, so a
+/// value carrying `;` or `$(…)` cannot become a second command.
+fn backslash_escape(value: &str) -> String {
+    const SPECIAL: &str = " \t\n\r\"'\\$`!*?[]{}()<>|&;#~^";
+
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        if SPECIAL.contains(character) {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
+}
+
 fn url_encode(query: &str) -> String {
     url::form_urlencoded::byte_serialize(query.as_bytes()).collect()
 }
@@ -237,9 +378,7 @@ mod tests {
             prefix: prefix.to_string(),
             label: "Custom".to_string(),
             command: command.to_string(),
-            description: None,
-            icon: None,
-            terminal: false,
+            ..Default::default()
         }
     }
 
@@ -289,10 +428,6 @@ mod tests {
                 user_prefix("", "echo"),
                 user_prefix("a b", "echo"),
                 SpotlightPrefixConfig {
-                    label: String::new(),
-                    ..user_prefix("x", "echo")
-                },
-                SpotlightPrefixConfig {
                     command: String::new(),
                     ..user_prefix("y", "echo")
                 },
@@ -303,6 +438,189 @@ mod tests {
         let table = resolve_with_ai(&config).0;
 
         assert_eq!(table.all().len(), 5);
+    }
+
+    #[test]
+    fn an_omitted_label_falls_back_to_the_key() {
+        let config = SpotlightConfig {
+            prefixes: vec![SpotlightPrefixConfig {
+                label: String::new(),
+                ..user_prefix("x", "echo")
+            }],
+            ..Default::default()
+        };
+
+        let table = resolve_with_ai(&config).0;
+
+        assert_eq!(table.get("x").expect("x prefix").label, "x");
+    }
+
+    #[test]
+    fn get_results_makes_a_custom_results_prefix() {
+        let config = SpotlightConfig {
+            prefixes: vec![SpotlightPrefixConfig {
+                prefix: "search".to_string(),
+                get_results: Some("search_command '{query}'".to_string()),
+                action: Some("xdg-open '{value}'".to_string()),
+                delay: Some(0.25),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let table = resolve_with_ai(&config).0;
+
+        assert_eq!(
+            table.get("search").expect("search prefix").kind,
+            PrefixKind::CustomResults {
+                command: "search_command '{query}'".to_string(),
+                action: Some("xdg-open '{value}'".to_string()),
+                delay: Duration::from_millis(250),
+                terminal: false,
+                icon_size: DEFAULT_RESULTS_ICON_SIZE,
+                paginated: false,
+            }
+        );
+    }
+
+    #[test]
+    fn pagination_is_enabled_when_the_template_can_carry_a_page() {
+        let config = SpotlightConfig {
+            prefixes: vec![SpotlightPrefixConfig {
+                prefix: "img".to_string(),
+                get_results: Some("images {query} {page}".to_string()),
+                pagination: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let table = resolve_with_ai(&config).0;
+
+        assert!(matches!(
+            table.get("img").expect("img prefix").kind,
+            PrefixKind::CustomResults {
+                paginated: true,
+                ..
+            }
+        ));
+    }
+
+    /// Paging a template with no `{page}` would rerun the identical command
+    /// line, so it is refused rather than left to look broken at runtime.
+    #[test]
+    fn pagination_without_a_page_placeholder_is_refused() {
+        assert!(!pagination_enabled("img", true, "images {query}"));
+        assert!(pagination_enabled("img", true, "images {query} {page}"));
+        assert!(!pagination_enabled("img", false, "images {query} {page}"));
+    }
+
+    #[test]
+    fn the_page_is_substituted_before_the_query() {
+        assert_eq!(
+            build_results_line("images {query} {page}", "cats", 3),
+            "images 'cats' 3"
+        );
+        // A query that happens to contain the placeholder is data, not template.
+        assert_eq!(
+            build_results_line("images {query} {page}", "{page}", 2),
+            "images '{page}' 2"
+        );
+    }
+
+    #[test]
+    fn a_page_never_reaches_the_shell_as_anything_but_digits() {
+        assert_eq!(
+            build_results_line("images {page}", "", i64::MIN),
+            format!("images {}", i64::MIN)
+        );
+        // An empty query still expands to an explicit empty argument, so the
+        // page stays in the position the template put it in.
+        assert_eq!(
+            build_results_line("images {query} {page}", "", 1),
+            "images '' 1"
+        );
+    }
+
+    #[test]
+    fn a_custom_results_prefix_can_set_its_own_icon_size() {
+        let config = SpotlightConfig {
+            prefixes: vec![SpotlightPrefixConfig {
+                prefix: "img".to_string(),
+                get_results: Some("images {query}".to_string()),
+                icon_size: Some(96),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let table = resolve_with_ai(&config).0;
+
+        assert!(matches!(
+            table.get("img").expect("img prefix").kind,
+            PrefixKind::CustomResults { icon_size: 96, .. }
+        ));
+    }
+
+    #[test]
+    fn the_results_icon_size_is_defaulted_and_clamped() {
+        assert_eq!(results_icon_size(None), DEFAULT_RESULTS_ICON_SIZE);
+        assert_eq!(results_icon_size(Some(96)), 96);
+        assert_eq!(results_icon_size(Some(0)), MIN_RESULTS_ICON_SIZE);
+        assert_eq!(results_icon_size(Some(-40)), MIN_RESULTS_ICON_SIZE);
+        assert_eq!(results_icon_size(Some(4000)), MAX_RESULTS_ICON_SIZE);
+    }
+
+    #[test]
+    fn get_results_takes_precedence_over_command() {
+        let config = SpotlightConfig {
+            prefixes: vec![SpotlightPrefixConfig {
+                get_results: Some("list {query}".to_string()),
+                ..user_prefix("s", "echo")
+            }],
+            ..Default::default()
+        };
+
+        let table = resolve_with_ai(&config).0;
+
+        assert!(matches!(
+            table.get("s").expect("s prefix").kind,
+            PrefixKind::CustomResults { .. }
+        ));
+    }
+
+    #[test]
+    fn the_results_delay_is_defaulted_and_clamped() {
+        assert_eq!(results_delay(None), Duration::from_millis(500));
+        assert_eq!(results_delay(Some(f64::NAN)), Duration::from_millis(500));
+        assert_eq!(results_delay(Some(-3.0)), Duration::ZERO);
+        assert_eq!(results_delay(Some(600.0)), Duration::from_secs(10));
+    }
+
+    #[test]
+    fn an_action_value_is_quoted_even_inside_the_templates_own_quotes() {
+        assert_eq!(
+            build_action_line("xdg-open '{value}'", "https://example.com/a b"),
+            "xdg-open ''https://example.com/a b''"
+        );
+        assert_eq!(
+            build_action_line("xdg-open {value}", "a'; rm -rf ~"),
+            r#"xdg-open 'a'"'"'; rm -rf ~'"#
+        );
+    }
+
+    #[test]
+    fn the_escaped_value_neutralises_every_shell_metacharacter() {
+        assert_eq!(
+            build_action_line("echo {value_escaped}", "a; rm -rf $HOME"),
+            r"echo a\;\ rm\ -rf\ \$HOME"
+        );
+    }
+
+    #[test]
+    fn an_action_without_a_placeholder_gets_the_value_appended() {
+        assert_eq!(build_action_line("open", "file.txt"), "open 'file.txt'");
+        assert_eq!(build_action_line("open", ""), "open");
     }
 
     #[test]

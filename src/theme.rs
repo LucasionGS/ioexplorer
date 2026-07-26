@@ -183,7 +183,8 @@ window {{\n\
 .tab-strip,\n\
 .sidebar,\n\
 .start-menu-surface,\n\
-.spotlight-surface {{\n\
+.spotlight-surface,\n\
+.spotlight-preview {{\n\
   background: {panel_background};\n\
   border-color: {border};\n\
 }}\n\
@@ -223,6 +224,7 @@ window {{\n\
 .start-menu-result,\n\
 .start-menu-power,\n\
 .spotlight-surface,\n\
+.spotlight-preview,\n\
 .spotlight-row,\n\
 .spotlight-chat-user,\n\
 .spotlight-chat-code {{\n\
@@ -253,7 +255,8 @@ window {{\n\
 .spotlight-section-label,\n\
 .spotlight-chat-text,\n\
 .spotlight-chat-code-text,\n\
-.spotlight-chat-heading {{\n\
+.spotlight-chat-heading,\n\
+.spotlight-preview-text {{\n\
     color: {text};\n\
 }}\n\
 \n\
@@ -261,7 +264,8 @@ window {{\n\
     box-shadow: 0 26px 58px alpha(black, 0.36);\n\
 }}\n\
 \n\
-.spotlight-surface {{\n\
+.spotlight-surface,\n\
+.spotlight-preview {{\n\
     box-shadow: 0 26px 58px alpha(black, 0.36);\n\
 }}\n\
 \n\
@@ -309,7 +313,8 @@ window {{\n\
 .spotlight-row-subtitle,\n\
 .spotlight-hint,\n\
 .spotlight-chat-role,\n\
-.spotlight-chat-status {{\n\
+.spotlight-chat-status,\n\
+.spotlight-preview-status {{\n\
   color: alpha({text}, 0.72);\n\
 }}"
     )
@@ -493,10 +498,20 @@ mod tests {
         let css = generated_theme_css(&ThemeSettings::default());
 
         assert!(css.contains(".spotlight-surface,"));
-        assert!(css.contains(".spotlight-surface {"));
         assert!(css.contains(".spotlight-row:selected {"));
         assert!(css.contains(".spotlight-backdrop {"));
         assert!(css.contains(".spotlight-row:hover {"));
+    }
+
+    #[test]
+    fn generated_theme_css_applies_theme_to_the_preview_panel() {
+        let css = generated_theme_css(&ThemeSettings::default());
+
+        // The panel has to track the card exactly — the two sit side by side,
+        // so a palette that reached one but not the other would be obvious.
+        assert!(css.contains(".spotlight-preview {"));
+        assert!(css.contains(".spotlight-preview-text {"));
+        assert!(css.contains(".spotlight-preview-status {"));
     }
 
     #[test]
@@ -507,10 +522,10 @@ mod tests {
         assert!(css.contains(".spotlight-chat-code {"));
         assert!(css.contains(".spotlight-chat-text,"));
         assert!(css.contains(".spotlight-chat-role,"));
-        assert!(css.contains(".spotlight-chat-status {"));
+        assert!(css.contains(".spotlight-chat-status,"));
         // Markdown blocks follow the palette too.
         assert!(css.contains(".spotlight-chat-code-text,"));
-        assert!(css.contains(".spotlight-chat-heading {"));
+        assert!(css.contains(".spotlight-chat-heading,"));
     }
 
     /// The error bubble keeps its own red so it stays legible under any
