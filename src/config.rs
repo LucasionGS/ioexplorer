@@ -143,6 +143,34 @@ pub struct SpotlightAiConfig {
     pub default: bool,
 }
 
+/// The open-window switcher: listing running apps and focusing one.
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SpotlightWindowsConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Prefix that lists only open windows. Defaults to `w`.
+    #[serde(default = "default_windows_prefix")]
+    pub prefix: String,
+    /// Also offer open windows on plain, unprefixed queries, so typing an app's
+    /// name reaches the copy already running.
+    #[serde(default = "default_true")]
+    pub in_search: bool,
+}
+
+fn default_windows_prefix() -> String {
+    "w".to_string()
+}
+
+impl Default for SpotlightWindowsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            prefix: default_windows_prefix(),
+            in_search: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
 pub struct SpotlightConfig {
     #[serde(default)]
@@ -159,6 +187,8 @@ pub struct SpotlightConfig {
     pub width: i32,
     #[serde(default)]
     pub ai: Vec<SpotlightAiConfig>,
+    #[serde(default)]
+    pub windows: SpotlightWindowsConfig,
 }
 
 fn default_true() -> bool {
@@ -195,6 +225,7 @@ impl Default for SpotlightConfig {
             top_ratio: default_top_ratio(),
             width: default_spotlight_width(),
             ai: Vec::new(),
+            windows: SpotlightWindowsConfig::default(),
         }
     }
 }
@@ -434,6 +465,59 @@ action = "xdg-open '{value}'"
             prefix.label.is_empty() && prefix.command.is_empty(),
             "neither is required alongside get_results"
         );
+    }
+
+    /// The window switcher has to work for a user who has never heard of it, so
+    /// an absent section must leave it on rather than off.
+    #[test]
+    fn the_window_switcher_defaults_to_on_without_a_section() {
+        let parsed: AppConfig = toml::from_str(
+            r#"
+default_view = "icon"
+show_hidden = false
+icon_size = 128
+sidebar_width = 220
+
+[list_columns]
+size = true
+kind = true
+modified = true
+
+[spotlight]
+"#,
+        )
+        .expect("valid config");
+
+        assert!(parsed.spotlight.windows.enabled);
+        assert_eq!(parsed.spotlight.windows.prefix, "w");
+        assert!(parsed.spotlight.windows.in_search);
+    }
+
+    #[test]
+    fn parses_the_window_switcher_section() {
+        let parsed: AppConfig = toml::from_str(
+            r#"
+default_view = "icon"
+show_hidden = false
+icon_size = 128
+sidebar_width = 220
+
+[list_columns]
+size = true
+kind = true
+modified = true
+
+[spotlight.windows]
+enabled = true
+prefix = "win"
+in_search = false
+"#,
+        )
+        .expect("valid config");
+
+        assert!(parsed.spotlight.windows.enabled);
+        assert_eq!(parsed.spotlight.windows.prefix, "win");
+        assert!(!parsed.spotlight.windows.in_search);
     }
 
     #[test]

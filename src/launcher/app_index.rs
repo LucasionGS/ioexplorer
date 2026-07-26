@@ -80,6 +80,51 @@ impl AppIndex {
     pub fn entries(&self) -> &[AppEntry] {
         &self.entries
     }
+
+    /// Finds the installed application a window's app id belongs to.
+    ///
+    /// A Wayland app id — or an X11 class under XWayland — is only conventionally
+    /// related to a desktop entry, so this tries the conventions in descending
+    /// order of confidence and stops at the first that matches. Everything is
+    /// compared case-insensitively because the two spellings routinely disagree
+    /// on case alone (`Steam` against `steam.desktop`).
+    pub fn find_by_app_id(&self, app_id: &str) -> Option<&AppEntry> {
+        let app_id = app_id.trim();
+        if app_id.is_empty() {
+            return None;
+        }
+        let wanted = app_id.to_lowercase();
+
+        // `discord` → `discord.desktop`. Covers the overwhelming majority.
+        let by_id = |entry: &&AppEntry| stem(&entry.desktop_id).to_lowercase() == wanted;
+        // `org.gnome.Nautilus` reported as plain `nautilus`. Checked after the
+        // full id so an app whose id really is the last segment still wins.
+        let by_tail = |entry: &&AppEntry| {
+            stem(&entry.desktop_id)
+                .rsplit('.')
+                .next()
+                .is_some_and(|tail| tail.to_lowercase() == wanted)
+        };
+        let by_exec = |entry: &&AppEntry| {
+            entry
+                .exec_name
+                .as_deref()
+                .is_some_and(|exec| exec.to_lowercase() == wanted)
+        };
+        let by_name = |entry: &&AppEntry| entry.name.to_lowercase() == wanted;
+
+        self.entries
+            .iter()
+            .find(by_id)
+            .or_else(|| self.entries.iter().find(by_tail))
+            .or_else(|| self.entries.iter().find(by_exec))
+            .or_else(|| self.entries.iter().find(by_name))
+    }
+}
+
+/// Strips the `.desktop` suffix, leaving anything else alone.
+fn stem(desktop_id: &str) -> &str {
+    desktop_id.strip_suffix(".desktop").unwrap_or(desktop_id)
 }
 
 fn entry_from_app_info(app: &gio::AppInfo, seen: &mut HashSet<String>) -> Option<AppEntry> {
@@ -248,5 +293,87 @@ mod tests {
     #[test]
     fn fallback_icon_is_a_plain_icon_name() {
         assert_eq!(IconRef::fallback(), IconRef(FALLBACK_ICON.to_string()));
+    }
+
+    fn entry(desktop_id: &str, name: &str, exec_name: Option<&str>) -> AppEntry {
+        AppEntry {
+            desktop_id: desktop_id.to_string(),
+            name: name.to_string(),
+            generic_name: None,
+            comment: None,
+            keywords: Vec::new(),
+            categories: Vec::new(),
+            exec_name: exec_name.map(str::to_string),
+            icon: IconRef::from_icon_name(format!("{name}-icon")),
+        }
+    }
+
+    fn index() -> AppIndex {
+        AppIndex {
+            entries: vec![
+                entry("discord.desktop", "Discord", Some("discord")),
+                entry("org.gnome.Nautilus.desktop", "Files", Some("nautilus")),
+                entry("code.desktop", "Visual Studio Code", Some("code")),
+                entry("spotify-adblock.desktop", "Spotify", Some("spotify")),
+            ],
+        }
+    }
+
+    #[test]
+    fn an_app_id_matches_its_desktop_entry() {
+        let index = index();
+
+        assert_eq!(
+            index.find_by_app_id("discord").map(|e| e.name.as_str()),
+            Some("Discord")
+        );
+        // Compositors and desktop entries disagree on case all the time.
+        assert_eq!(
+            index.find_by_app_id("Discord").map(|e| e.name.as_str()),
+            Some("Discord")
+        );
+    }
+
+    /// GTK apps report a reverse-DNS app id; X11 clients report only the tail.
+    #[test]
+    fn a_reverse_dns_entry_is_found_by_its_last_segment() {
+        let index = index();
+
+        assert_eq!(
+            index
+                .find_by_app_id("org.gnome.Nautilus")
+                .map(|e| e.name.as_str()),
+            Some("Files")
+        );
+        assert_eq!(
+            index.find_by_app_id("nautilus").map(|e| e.name.as_str()),
+            Some("Files")
+        );
+    }
+
+    /// The entry id bears no relation to the class, but the executable does.
+    #[test]
+    fn an_app_id_falls_back_to_the_executable_then_the_name() {
+        let index = index();
+
+        assert_eq!(
+            index.find_by_app_id("spotify").map(|e| e.name.as_str()),
+            Some("Spotify")
+        );
+        assert_eq!(
+            index
+                .find_by_app_id("visual studio code")
+                .map(|e| e.name.as_str()),
+            Some("Visual Studio Code")
+        );
+    }
+
+    #[test]
+    fn an_unknown_app_id_matches_nothing() {
+        let index = index();
+
+        assert!(index.find_by_app_id("no-such-app").is_none());
+        assert!(index.find_by_app_id("").is_none());
+        assert!(index.find_by_app_id("   ").is_none());
     }
 }

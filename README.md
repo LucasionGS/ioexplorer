@@ -105,6 +105,7 @@ With no prefix, spotlight searches installed applications, your XDG user folders
 | `>` | Browse to a path, with `Tab` completion |
 | `=` | Evaluate an expression; `Enter` copies the result |
 | `/` | Search your folders and bookmarks by filename |
+| `w` | Switch to an open window |
 | `?` | List every available prefix |
 
 Add your own prefixes in `~/.config/ioexplorer/config.toml`. `{query}` is substituted shell-quoted, and `{query_url}` percent-encoded for use inside a URL. A template with neither placeholder gets the quoted query appended.
@@ -115,6 +116,11 @@ width = 640          # card width in pixels
 top_ratio = 0.22     # distance from the top of the screen, as a fraction of its height
 result_limit = 12
 disabled_builtins = []   # e.g. ["/"] to drop the file search prefix
+
+[spotlight.windows]
+enabled = true       # the window switcher
+prefix = "w"
+in_search = true     # also offer open windows on an unprefixed query
 
 [[spotlight.prefixes]]
 prefix = "g"
@@ -133,6 +139,24 @@ Alphanumeric prefixes such as `g` require a following space, so typing `go` stil
 Newly installed applications appear without restarting the daemon. Launch history is kept in `~/.local/state/ioexplorer/spotlight-usage.toml`.
 
 Known limitation: because spotlight intercepts `Enter` before the text entry sees it, IME candidate confirmation for CJK input is not supported.
+
+### Switching windows
+
+`w` lists the windows that are currently open, most-recently-used first, and `Enter` switches to one — moving to whichever workspace it is on rather than launching a second copy.
+
+Open windows also appear on ordinary searches, ranked above the entry that would launch the app, so typing `disc` reaches the Discord you already have running. Set `in_search = false` to keep them behind the `w` prefix only. They are deliberately left out of the opening state, where a dozen windows would crowd out the applications that list exists to show.
+
+Each row names the app, its workspace, and its output, and marks XWayland clients. The preview panel beside the list shows the app's icon at full size with the window's full title underneath — useful when a browser has six windows whose titles the row has to ellipsize.
+
+| Compositor | Support |
+| --- | --- |
+| Hyprland | Full, via `hyprctl`. Both the current Lua dispatcher and the pre-0.56 form are handled |
+| sway | Via `swaymsg`. Written to the documented IPC schema but untested |
+| Anything else | The prefix explains that it needs a supported compositor |
+
+There is no generic Wayland path, and that is a protocol limitation rather than an omission: a Wayland client cannot see or focus another client's windows at all. Doing it without a compositor-specific interface means implementing `wlr-foreign-toplevel-management-v1` or `ext-foreign-toplevel-list-v1` as a raw Wayland client.
+
+The preview is the app's icon rather than a live thumbnail of the window. A screenshot is not obtainable here: output capture (`grim`) would include spotlight's own full-screen overlay in the shot, and windows on inactive workspaces are not being rendered at all. Real per-window thumbnails need `hyprland-toplevel-export-v1`, which is a Wayland protocol client rather than a command-line call.
 
 ### Custom search results
 

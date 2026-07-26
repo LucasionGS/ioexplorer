@@ -20,6 +20,7 @@ use crate::{
             build_command_line,
         },
         preview::Preview,
+        windows::OpenWindow,
     },
 };
 
@@ -27,6 +28,9 @@ use crate::{
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Activation {
     LaunchApp(String),
+    /// Switch to an already-open window, by the opaque handle its compositor
+    /// backend issued.
+    FocusWindow(String),
     OpenPath(PathBuf),
     RunShell(String),
     RunInTerminal(String),
@@ -93,15 +97,28 @@ pub fn sort_results(results: &mut [SpotlightResult]) {
     });
 }
 
-/// Builds the default, no-prefix results: applications, places, and bookmarks.
+/// Builds the default, no-prefix results: open windows, applications, places,
+/// and bookmarks.
 pub fn default_results(
     query: &str,
     index: &AppIndex,
+    windows: &[OpenWindow],
     frecency: &Frecency,
     now_secs: u64,
     limit: usize,
 ) -> Vec<SpotlightResult> {
     let mut results = Vec::new();
+
+    // Deliberately only for a query the user has actually typed. On the opening
+    // state every open window would match, and a dozen of them would push the
+    // most-used applications off a list that exists to show exactly those. The
+    // window prefix is the place to browse them all.
+    if !query.trim().is_empty() {
+        for mut row in window_results(query, windows, index, limit) {
+            row.score = row.score.saturating_add(RUNNING_WINDOW_BONUS);
+            results.push(row);
+        }
+    }
 
     for entry in index.entries() {
         let Some(found) = fuzzy::match_fields(query, &app_fields(entry)) else {
@@ -304,6 +321,7 @@ pub fn prefixed_results(
         PrefixKind::Calculator => calculator_results(arg),
         PrefixKind::Help => help_results(table),
         PrefixKind::FileSearch => Vec::new(), // filled asynchronously by the walker
+        PrefixKind::Windows => Vec::new(),    // filled asynchronously by the compositor query
         PrefixKind::CustomResults { .. } => Vec::new(), // filled asynchronously by the runner
         PrefixKind::Command { command, terminal } => {
             command_results(prefix, command, *terminal, arg)
@@ -352,6 +370,127 @@ pub fn default_ai_result(
     };
     result.score = i32::MIN + 1;
     result
+}
+
+// -- open windows ----------------------------------------------------------
+
+/// How much a running window outranks the launcher entry for the same app.
+///
+/// Large enough to clear any fuzzy-score difference between the window's title
+/// and the app's name: if a copy is already running, switching to it is almost
+/// always what was meant, and launching a second one is a click away either way.
+const RUNNING_WINDOW_BONUS: i32 = FRECENCY_MAX_BONUS + 200;
+
+/// Builds one row per open window, fuzzy-filtered by `query`.
+///
+/// With an empty query the compositor's own ordering is kept — it is
+/// most-recently-used, which is exactly what an unfiltered switcher should show.
+pub fn window_results(
+    query: &str,
+    windows: &[OpenWindow],
+    index: &AppIndex,
+    limit: usize,
+) -> Vec<SpotlightResult> {
+    let mut results = Vec::new();
+
+    for window in windows {
+        let app = index.find_by_app_id(&window.app_id);
+        let app_name = app.map_or(window.app_id.as_str(), |entry| entry.name.as_str());
+
+        let Some(found) = fuzzy::match_fields(
+            query,
+            &[
+                Field::new(window.heading(), 100),
+                Field::new(app_name, 90),
+                Field::new(window.app_id.as_str(), 60),
+                Field::new(window.workspace.as_str(), 20),
+            ],
+        ) else {
+            continue;
+        };
+
+        let mut result = window_row(window, app_name, app);
+        result.score = found.score;
+        results.push(result);
+    }
+
+    if !query.trim().is_empty() {
+        sort_results(&mut results);
+    }
+    results.truncate(limit);
+    results
+}
+
+fn window_row(window: &OpenWindow, app_name: &str, app: Option<&AppEntry>) -> SpotlightResult {
+    let icon = app.map_or_else(
+        // No desktop entry matched, so the app id is the only lead left. It is
+        // often also a valid icon name, and `image_for` falls back on its own
+        // when it is not.
+        || IconRef::from_icon_name(window.app_id.clone()),
+        |entry| entry.icon.clone(),
+    );
+
+    let mut result = SpotlightResult::new(
+        window.heading(),
+        window_subtitle(window, app_name),
+        icon.clone(),
+    );
+    result.primary = Activation::FocusWindow(window.handle.clone());
+    result.preview = Some(Preview::icon(icon.0, window_caption(window, app_name)));
+    // Keyed on the app rather than the handle: a window address is valid only
+    // until the window closes, so recording one would teach the ranking nothing.
+    result.frecency_key = Some(format!("window:{}", window.app_id));
+    result
+}
+
+fn window_subtitle(window: &OpenWindow, app_name: &str) -> String {
+    let mut parts = vec![app_name.to_string()];
+
+    let location = window.location();
+    if !location.is_empty() {
+        parts.push(location);
+    }
+    // Worth saying, because it explains away the quirks that come with it —
+    // blurry scaling, a missing icon, a class that matches no desktop entry.
+    if window.xwayland {
+        parts.push("XWayland".to_string());
+    }
+    if window.focused {
+        parts.push("focused".to_string());
+    }
+
+    parts.join(" · ")
+}
+
+/// The detail block under the preview artwork.
+fn window_caption(window: &OpenWindow, app_name: &str) -> String {
+    let mut lines = vec![app_name.to_string()];
+
+    // The title is already the row heading, but the row ellipsizes it and this
+    // panel does not — for a browser tab or a document that is the whole point.
+    let title = window.title.trim();
+    if !title.is_empty() && title != app_name {
+        lines.push(title.to_string());
+    }
+
+    let location = window.location();
+    if !location.is_empty() {
+        lines.push(location);
+    }
+    if window.xwayland {
+        lines.push("XWayland".to_string());
+    }
+
+    lines.join("\n")
+}
+
+/// The row shown instead of a window list when there is nothing to list.
+pub fn windows_notice(prefix: &Prefix, note: &str) -> SpotlightResult {
+    SpotlightResult::new(
+        prefix.label.clone(),
+        note,
+        IconRef::from_icon_name(prefix.icon.clone()),
+    )
 }
 
 fn shell_results(arg: &str) -> Vec<SpotlightResult> {
@@ -613,7 +752,7 @@ fn help_results(table: &PrefixTable) -> Vec<SpotlightResult> {
 mod tests {
     use super::*;
     use crate::config::SpotlightConfig;
-    use crate::spotlight::prefixes;
+    use crate::spotlight::{prefixes, preview::PreviewKind};
 
     fn table() -> PrefixTable {
         prefixes::resolve_with_ai(&SpotlightConfig::default()).0
@@ -722,6 +861,140 @@ mod tests {
         sort_results(&mut results);
 
         assert_eq!(results[0].title, "Calculate");
+    }
+
+    fn window(handle: &str, app_id: &str, title: &str, workspace: &str) -> OpenWindow {
+        OpenWindow {
+            handle: handle.to_string(),
+            title: title.to_string(),
+            app_id: app_id.to_string(),
+            workspace: workspace.to_string(),
+            monitor: "DP-1".to_string(),
+            xwayland: false,
+            focused: false,
+        }
+    }
+
+    #[test]
+    fn a_window_row_switches_to_it_rather_than_launching() {
+        let windows = [window("0xab", "discord", "general - Discord", "2")];
+
+        let rows = window_results("discord", &windows, &AppIndex::default(), 10);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title, "general - Discord");
+        assert_eq!(rows[0].primary, Activation::FocusWindow("0xab".to_string()));
+    }
+
+    /// The list is a switcher, so it must say where each window actually is.
+    #[test]
+    fn a_window_row_reports_where_the_window_lives() {
+        let windows = [OpenWindow {
+            xwayland: true,
+            ..window("0xab", "steam", "Steam", "7")
+        }];
+
+        let rows = window_results("steam", &windows, &AppIndex::default(), 10);
+
+        assert_eq!(rows[0].subtitle, "steam · Workspace 7 · DP-1 · XWayland");
+    }
+
+    #[test]
+    fn a_window_row_previews_the_app_icon_with_its_details() {
+        let windows = [window("0xab", "kitty", "~/src", "1")];
+
+        let rows = window_results("kitty", &windows, &AppIndex::default(), 10);
+
+        let preview = rows[0].preview.as_ref().expect("a window previews itself");
+        assert_eq!(preview.kind, PreviewKind::Icon);
+        assert_eq!(preview.content, "kitty");
+        let caption = preview.caption.as_deref().expect("details");
+        assert!(caption.contains("~/src"), "{caption}");
+        assert!(caption.contains("Workspace 1 · DP-1"), "{caption}");
+    }
+
+    /// A window address is only valid while the window exists, so ranking has to
+    /// remember the application instead.
+    #[test]
+    fn window_frecency_is_keyed_on_the_app_not_the_handle() {
+        let windows = [window("0xab", "discord", "general - Discord", "2")];
+
+        let rows = window_results("discord", &windows, &AppIndex::default(), 10);
+
+        assert_eq!(rows[0].frecency_key.as_deref(), Some("window:discord"));
+    }
+
+    #[test]
+    fn an_empty_window_query_keeps_the_compositors_own_ordering() {
+        let windows = [
+            window("0x1", "discord", "Discord", "2"),
+            window("0x2", "kitty", "~", "1"),
+            window("0x3", "steam", "Steam", "7"),
+        ];
+
+        let rows = window_results("", &windows, &AppIndex::default(), 10);
+
+        let handles = rows
+            .iter()
+            .map(|row| match &row.primary {
+                Activation::FocusWindow(handle) => handle.as_str(),
+                other => panic!("expected a focus activation, got {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(handles, vec!["0x1", "0x2", "0x3"]);
+    }
+
+    #[test]
+    fn windows_that_match_nothing_are_dropped() {
+        let windows = [window("0x1", "discord", "Discord", "2")];
+
+        assert!(window_results("zzzz", &windows, &AppIndex::default(), 10).is_empty());
+    }
+
+    /// The whole point of merging windows into plain search: typing an app's
+    /// name must reach the copy that is already running before offering a second.
+    #[test]
+    fn a_running_window_outranks_the_launcher_entry_for_the_same_app() {
+        let windows = [window("0xab", "discord", "Discord", "2")];
+
+        let rows = default_results(
+            "discord",
+            &AppIndex::default(),
+            &windows,
+            &Frecency::default(),
+            0,
+            10,
+        );
+
+        assert!(!rows.is_empty());
+        assert_eq!(
+            rows[0].primary,
+            Activation::FocusWindow("0xab".to_string()),
+            "the running window must come first"
+        );
+    }
+
+    /// The opening state exists to show the most-used applications; a dozen open
+    /// windows would push every one of them out of a twelve-row list.
+    #[test]
+    fn the_opening_state_does_not_list_open_windows() {
+        let windows = [window("0xab", "discord", "Discord", "2")];
+
+        let rows = default_results(
+            "",
+            &AppIndex::default(),
+            &windows,
+            &Frecency::default(),
+            0,
+            10,
+        );
+
+        assert!(
+            !rows
+                .iter()
+                .any(|row| matches!(row.primary, Activation::FocusWindow(_))),
+            "no window rows on an empty query"
+        );
     }
 
     #[test]

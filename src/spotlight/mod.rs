@@ -17,6 +17,7 @@ mod preview;
 mod query;
 mod results;
 mod window;
+mod windows;
 
 use std::{cell::RefCell, env, rc::Rc, sync::mpsc};
 

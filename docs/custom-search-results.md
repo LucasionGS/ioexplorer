@@ -150,12 +150,26 @@ A row may carry a `preview`, shown in a panel to the left of the card:
 
 | Field | Meaning |
 | --- | --- |
-| `type` | `text` or `image` |
-| `content` | The text to display, or the image to draw |
+| `type` | `text`, `image`, or `icon` |
+| `content` | The text to display, or the artwork to draw |
+| `caption` | Optional text under the artwork. Ignored by `text` |
 
 For `image`, `content` may be an absolute path, a `file://` URI, or an
-`http://` / `https://` URL. For `text` it is displayed as-is — no markup, no
+`http://` / `https://` URL. For `icon` it is an icon-theme name such as
+`firefox` — resolved through the icon theme, so there is nothing to download and
+it appears immediately. For `text` it is displayed as-is — no markup, no
 wrapping of long words beyond what fits.
+
+A `caption` is for the detail that does not fit in a row: the untruncated title,
+the dimensions, the author. It is drawn dimmed under the artwork.
+
+```json
+{
+  "title": "Firefox",
+  "value": "firefox.desktop",
+  "preview": { "type": "icon", "content": "firefox", "caption": "Web browser\nWorkspace 3" }
+}
+```
 
 The panel shows **one** row at a time: whichever the pointer is over, or the
 selected row when the pointer is elsewhere. Nothing is shown for a row without a

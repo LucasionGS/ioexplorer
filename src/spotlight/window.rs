@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
     rc::Rc,
     sync::mpsc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use gtk::prelude::*;
@@ -13,7 +13,7 @@ use gtk::prelude::*;
 use crate::{
     config::SpotlightConfig,
     launcher::{
-        app_index::LiveAppIndex,
+        app_index::{IconRef, LiveAppIndex},
         frecency::{self, Frecency},
         icons, spawn,
     },
@@ -29,6 +29,7 @@ use crate::{
         preview::{self, Preview, PreviewEvent, PreviewKind, PreviewLoader},
         query::{self, Query},
         results::{self, Activation, SpotlightResult},
+        windows::{self, OpenWindow, WindowSource},
     },
 };
 
@@ -57,9 +58,17 @@ const PREVIEW_GAP: i32 = 14;
 const PREVIEW_IMAGE_SIZE: i32 = 340;
 /// Height at which preview text starts scrolling instead of growing.
 const MAX_PREVIEW_HEIGHT: i32 = 460;
+/// Height at which a preview caption starts scrolling instead of growing, so a
+/// window with an absurd title cannot push the panel off the bottom of the
+/// screen. A normal caption is a few lines and never reaches this.
+const MAX_CAPTION_HEIGHT: i32 = 120;
 /// Quiet time before a preview image is loaded. Holding an arrow key would
 /// otherwise decode — and for a remote image, download — every row passed over.
 const PREVIEW_DEBOUNCE: Duration = Duration::from_millis(120);
+/// How long a window list stays fresh. Long enough that typing filters one
+/// snapshot rather than spawning a compositor query per keystroke, short enough
+/// that a window opened a moment ago is still found.
+const WINDOW_LIST_TTL: Duration = Duration::from_millis(1_500);
 /// Rows reachable via Alt+1..9.
 const QUICK_PICK_ROWS: usize = 9;
 /// Shown at the end of the streaming message so it reads as still going.
@@ -97,6 +106,11 @@ pub struct SpotlightWindow {
     preview_spacer: gtk::Box,
     preview_stack: gtk::Stack,
     preview_image: gtk::Image,
+    /// Details written under the artwork on the image page.
+    preview_caption: gtk::Label,
+    /// The caption's clamping wrapper — this is what gets shown or hidden, since
+    /// hiding the label alone would leave its container occupying space.
+    preview_caption_view: gtk::ScrolledWindow,
     preview_label: gtk::Label,
     preview_status: gtk::Label,
     entry: gtk::Entry,
@@ -141,6 +155,20 @@ pub struct SpotlightWindow {
     file_hits: RefCell<Vec<FileHit>>,
     /// Set when the walker hit one of its bounds, so the UI can say so.
     file_search_truncated: Cell<bool>,
+    /// Background source of the open-window list.
+    window_source: WindowSource,
+    /// The last list the compositor reported. Kept between keystrokes so typing
+    /// filters a snapshot instead of re-querying the compositor per character.
+    open_windows: RefCell<Vec<OpenWindow>>,
+    /// When the current list was *asked for*, not when it arrived — so a slow
+    /// reply cannot cause a second request to pile up behind the first.
+    windows_requested: Cell<Option<Instant>>,
+    /// Whether a reply has ever landed, which is what separates "still asking"
+    /// from "genuinely nothing open".
+    windows_loaded: Cell<bool>,
+    /// Why the last compositor query failed, so the prefix can say so instead of
+    /// looking like it is still waiting.
+    windows_error: RefCell<Option<String>>,
     custom_results: CustomResultsRunner,
     custom_rows: RefCell<Vec<CustomResult>>,
     custom_error: RefCell<Option<String>>,
@@ -328,7 +356,41 @@ impl SpotlightWindow {
             .transition_type(gtk::StackTransitionType::Crossfade)
             .transition_duration(90)
             .build();
-        preview_stack.add_named(&preview_image, Some("image"));
+        let preview_caption = gtk::Label::builder()
+            .xalign(0.0)
+            .wrap(true)
+            .wrap_mode(gtk::pango::WrapMode::WordChar)
+            .selectable(false)
+            .css_classes(["spotlight-preview-caption", "dim-label"])
+            .build();
+        // Load-bearing, not decoration. A wrapping `GtkLabel` reports its
+        // *unwrapped* single-line width as its natural width, and the panel's
+        // `width_request` is only a minimum — so a long window title widened the
+        // whole panel to 619px instead of wrapping inside it. A `GtkScrolledWindow`
+        // does not propagate its child's natural width, which pins the panel at
+        // `PREVIEW_WIDTH` and makes the text wrap downwards. Measured: without
+        // this, a Chrome title gives 619px and an unbreakable URL 705px.
+        //
+        // `max_width_chars` also works but is a character count against whatever
+        // font is in use, so a wider font would leak past the edge again.
+        let preview_caption_view = gtk::ScrolledWindow::builder()
+            .child(&preview_caption)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .max_content_height(MAX_CAPTION_HEIGHT)
+            .propagate_natural_height(true)
+            .visible(false)
+            .build();
+
+        // The artwork and its details share one page so they crossfade together;
+        // as two pages they would fade against each other.
+        let preview_figure = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(12)
+            .build();
+        preview_figure.append(&preview_image);
+        preview_figure.append(&preview_caption_view);
+
+        preview_stack.add_named(&preview_figure, Some("image"));
         preview_stack.add_named(&preview_text_scroller, Some("text"));
         preview_stack.add_named(&preview_status, Some("status"));
         preview_stack.set_visible_child_name("status");
@@ -392,6 +454,8 @@ impl SpotlightWindow {
             preview_spacer,
             preview_stack,
             preview_image,
+            preview_caption,
+            preview_caption_view,
             preview_label,
             preview_status,
             entry,
@@ -424,6 +488,11 @@ impl SpotlightWindow {
             file_search: FileSearch::new(),
             file_hits: RefCell::new(Vec::new()),
             file_search_truncated: Cell::new(false),
+            window_source: WindowSource::new(windows::detect()),
+            open_windows: RefCell::new(Vec::new()),
+            windows_requested: Cell::new(None),
+            windows_loaded: Cell::new(false),
+            windows_error: RefCell::new(None),
             custom_results: CustomResultsRunner::new(),
             custom_rows: RefCell::new(Vec::new()),
             custom_error: RefCell::new(None),
@@ -597,6 +666,7 @@ impl SpotlightWindow {
                 }
             }
             this.drain_file_search();
+            this.drain_windows();
             this.drain_custom_results();
             this.drain_previews();
             this.drain_ai();
@@ -690,6 +760,7 @@ impl SpotlightWindow {
                 results::default_results(
                     "",
                     &self.live_index.snapshot(),
+                    &[],
                     &self.frecency.borrow(),
                     frecency::now_secs(),
                     limit,
@@ -697,9 +768,16 @@ impl SpotlightWindow {
             }
             Query::Plain(text) => {
                 self.cancel_async_results();
+                self.ensure_windows();
+                let open = self.open_windows.borrow();
+                let searchable: &[OpenWindow] = match self.config.windows.in_search {
+                    true => &open,
+                    false => &[],
+                };
                 results::default_results(
                     text,
                     &self.live_index.snapshot(),
+                    searchable,
                     &self.frecency.borrow(),
                     frecency::now_secs(),
                     limit,
@@ -716,6 +794,11 @@ impl SpotlightWindow {
                         self.cancel_custom_results();
                         self.start_file_search(arg);
                         self.file_results(limit)
+                    }
+                    PrefixKind::Windows => {
+                        self.cancel_async_results();
+                        self.ensure_windows();
+                        self.window_rows(prefix, arg, limit)
                     }
                     PrefixKind::CustomResults {
                         command,
@@ -915,10 +998,18 @@ impl SpotlightWindow {
         self.preview_panel.set_visible(true);
         self.preview_spacer.set_visible(true);
 
+        self.set_preview_caption(preview.caption.as_deref());
+
         match preview.kind {
             PreviewKind::Text => {
                 self.preview_label.set_text(&preview.content);
                 self.preview_stack.set_visible_child_name("text");
+            }
+            // An icon resolves through the icon theme, so there is nothing to
+            // download and nothing to wait for — debouncing it would only make
+            // the panel arrive late.
+            PreviewKind::Icon => {
+                self.set_preview_icon(&IconRef::from_icon_name(preview.content.clone()));
             }
             // A file already on disk costs a decode, not a round trip, so it
             // still waits out the debounce — holding an arrow key past twenty
@@ -959,6 +1050,28 @@ impl SpotlightWindow {
             None => {
                 self.preview_loader.start(content.to_string());
             }
+        }
+    }
+
+    /// Draws artwork from the icon theme rather than the filesystem.
+    fn set_preview_icon(&self, icon: &IconRef) {
+        match gio::Icon::for_string(&icon.0) {
+            Ok(gicon) => self.preview_image.set_from_gicon(&gicon),
+            Err(_) => self.preview_image.set_icon_name(Some(&icon.0)),
+        }
+        // Same trap as `set_from_file`: setting the source resets the storage
+        // type and drops the pixel size with it, leaving a 16px icon.
+        self.preview_image.set_pixel_size(PREVIEW_IMAGE_SIZE);
+        self.preview_stack.set_visible_child_name("image");
+    }
+
+    fn set_preview_caption(&self, caption: Option<&str>) {
+        match caption {
+            Some(caption) => {
+                self.preview_caption.set_text(caption);
+                self.preview_caption_view.set_visible(true);
+            }
+            None => self.preview_caption_view.set_visible(false),
         }
     }
 
@@ -1066,6 +1179,86 @@ impl SpotlightWindow {
         let results = self.file_results(self.config.clamped_result_limit());
         self.render(results);
         self.select(selected);
+    }
+
+    // -- open windows ------------------------------------------------------
+
+    /// Asks the compositor for the window list unless a fresh one is already in
+    /// hand. Cheap enough to call from `rebuild`, which runs on every keystroke.
+    fn ensure_windows(&self) {
+        if !self.window_source.available() {
+            return;
+        }
+        let fresh = self
+            .windows_requested
+            .get()
+            .is_some_and(|at| at.elapsed() < WINDOW_LIST_TTL);
+        if fresh {
+            return;
+        }
+
+        // Stamped before the request, not after the reply: otherwise every
+        // keystroke during a slow query would start another one.
+        self.windows_requested.set(Some(Instant::now()));
+        self.window_source.refresh();
+    }
+
+    /// Forgets the cached list, so the next `ensure_windows` really asks.
+    fn invalidate_windows(&self) {
+        self.windows_requested.set(None);
+    }
+
+    fn drain_windows(self: &Rc<Self>) {
+        let Some(reply) = self.window_source.drain() else {
+            return;
+        };
+
+        match reply {
+            Ok(windows) => {
+                *self.open_windows.borrow_mut() = windows;
+                *self.windows_error.borrow_mut() = None;
+            }
+            // The previous list described a compositor state we can no longer
+            // confirm, so showing it would offer windows that may be gone.
+            Err(error) => {
+                self.open_windows.borrow_mut().clear();
+                *self.windows_error.borrow_mut() = Some(error);
+            }
+        }
+        self.windows_loaded.set(true);
+        // The rows on screen were built without this list — or from an older one
+        // — so they have to be rebuilt against it.
+        self.rebuild();
+    }
+
+    /// The rows for the window-switcher prefix, or one row explaining why there
+    /// are none. A blank list would read as a bug.
+    fn window_rows(&self, prefix: &Prefix, arg: &str, limit: usize) -> Vec<SpotlightResult> {
+        if !self.window_source.available() {
+            return vec![results::windows_notice(
+                prefix,
+                "Switching windows needs Hyprland or sway",
+            )];
+        }
+
+        if let Some(error) = self.windows_error.borrow().as_deref() {
+            return vec![results::windows_notice(prefix, error)];
+        }
+
+        let open = self.open_windows.borrow();
+        if open.is_empty() {
+            let note = match self.windows_loaded.get() {
+                true => "No windows are open",
+                false => "Asking the compositor…",
+            };
+            return vec![results::windows_notice(prefix, note)];
+        }
+
+        let rows = results::window_results(arg, &open, &self.live_index.snapshot(), limit);
+        match rows.is_empty() {
+            true => vec![results::windows_notice(prefix, "No window matches")],
+            false => rows,
+        }
     }
 
     // -- custom results ----------------------------------------------------
@@ -1314,6 +1507,9 @@ impl SpotlightWindow {
         match activation {
             Activation::LaunchApp(desktop_id) => {
                 crate::launcher::app_index::launch_desktop_id(desktop_id)
+            }
+            Activation::FocusWindow(handle) => {
+                windows::activate(self.window_source.compositor(), handle)
             }
             Activation::OpenPath(path) => spawn::launch_in_ioexplorer(path)
                 .map_err(|error| format!("failed to open {}: {error}", path.display())),
@@ -1686,6 +1882,9 @@ impl SpotlightWindow {
 
     pub fn show(self: &Rc<Self>) {
         self.entry.set_text("");
+        // Windows open and close while the launcher is hidden, so whatever was
+        // cached from the previous session says nothing about this one.
+        self.invalidate_windows();
         self.rebuild();
         self.reflow();
         self.window.present();

@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use crate::config::{SpotlightConfig, SpotlightPrefixConfig};
+use crate::config::{SpotlightConfig, SpotlightPrefixConfig, SpotlightWindowsConfig};
 use crate::spotlight::ai::{self, AiProvider};
 
 /// Default quiet-typing window before a `get_results` command runs.
@@ -39,6 +39,8 @@ pub enum PrefixKind {
     Help,
     /// Run a user-configured command template.
     Command { command: String, terminal: bool },
+    /// List the windows that are currently open and switch to one.
+    Windows,
     /// Ask a user-configured command for the rows to show, then run `action`
     /// on whichever one is picked.
     CustomResults {
@@ -140,13 +142,24 @@ fn builtins() -> Vec<Prefix> {
 /// Merges built-in prefixes, the user's command prefixes and the AI providers
 /// into one table, plus the provider list the `Ai(usize)` prefixes index into.
 ///
-/// Stages apply in order — builtins, user command prefixes, then AI entries —
-/// and each stage replaces or appends, so a later stage wins a key collision.
+/// Stages apply in order — builtins, the window switcher, user command prefixes,
+/// then AI entries — and each stage replaces or appends, so a later stage wins a
+/// key collision.
 pub fn resolve_with_ai(config: &SpotlightConfig) -> (PrefixTable, Vec<AiProvider>) {
     let mut prefixes = builtins()
         .into_iter()
         .filter(|prefix| !config.disabled_builtins.contains(&prefix.key))
         .collect::<Vec<_>>();
+
+    // Registered even where the compositor is not supported. Whether it can work
+    // is an environment question, and this function is pure over the config so
+    // the whole prefix table stays testable; the provider answers with one row
+    // saying so, which beats a prefix that silently does not exist.
+    if let Some(prefix) = windows_prefix(&config.windows)
+        && !config.disabled_builtins.contains(&prefix.key)
+    {
+        replace_or_append(&mut prefixes, prefix);
+    }
 
     for entry in &config.prefixes {
         let Some(prefix) = prefix_from_config(entry) else {
@@ -190,6 +203,30 @@ pub fn resolve_with_ai(config: &SpotlightConfig) -> (PrefixTable, Vec<AiProvider
     });
 
     (PrefixTable { prefixes }, providers)
+}
+
+/// The window-switcher prefix, or `None` when it is turned off or misconfigured.
+fn windows_prefix(config: &SpotlightWindowsConfig) -> Option<Prefix> {
+    if !config.enabled {
+        return None;
+    }
+
+    let key = config.prefix.trim();
+    if key.is_empty() || key.chars().any(char::is_whitespace) {
+        tracing::warn!(
+            prefix = config.prefix,
+            "ignoring the window switcher: its prefix is not a usable key"
+        );
+        return None;
+    }
+
+    Some(Prefix {
+        key: key.to_string(),
+        label: "Switch window".to_string(),
+        description: "Switch to an open window".to_string(),
+        icon: "focus-windows-symbolic".to_string(),
+        kind: PrefixKind::Windows,
+    })
 }
 
 fn replace_or_append(prefixes: &mut Vec<Prefix>, prefix: Prefix) {
@@ -386,8 +423,8 @@ mod tests {
     fn empty_config_yields_every_builtin() {
         let table = resolve_with_ai(&SpotlightConfig::default()).0;
 
-        assert_eq!(table.all().len(), 5);
-        for key in ["!", ">", "=", "/", "?"] {
+        assert_eq!(table.all().len(), 6);
+        for key in ["!", ">", "=", "/", "?", "w"] {
             assert!(table.get(key).is_some(), "missing builtin {key}");
         }
     }
@@ -401,7 +438,7 @@ mod tests {
 
         let table = resolve_with_ai(&config).0;
 
-        assert_eq!(table.all().len(), 5);
+        assert_eq!(table.all().len(), 6);
         assert!(matches!(
             table.get("=").expect("overridden prefix").kind,
             PrefixKind::Command { .. }
@@ -418,7 +455,7 @@ mod tests {
         let table = resolve_with_ai(&config).0;
 
         assert!(table.get("=").is_none());
-        assert_eq!(table.all().len(), 4);
+        assert_eq!(table.all().len(), 5);
     }
 
     #[test]
@@ -437,7 +474,7 @@ mod tests {
 
         let table = resolve_with_ai(&config).0;
 
-        assert_eq!(table.all().len(), 5);
+        assert_eq!(table.all().len(), 6);
     }
 
     #[test]
@@ -703,7 +740,7 @@ mod tests {
         let (table, _) = resolve_with_ai(&config);
 
         assert_eq!(table.get("=").expect("= prefix").kind, PrefixKind::Ai(0));
-        assert_eq!(table.all().len(), 5, "it replaces rather than adds");
+        assert_eq!(table.all().len(), 6, "it replaces rather than adds");
     }
 
     #[test]
@@ -723,13 +760,95 @@ mod tests {
     fn resolve_still_returns_a_table_without_ai_configured() {
         let table = resolve_with_ai(&SpotlightConfig::default()).0;
 
-        assert_eq!(table.all().len(), 5);
+        assert_eq!(table.all().len(), 6);
         assert!(
             !table
                 .all()
                 .iter()
                 .any(|p| matches!(p.kind, PrefixKind::Ai(_)))
         );
+    }
+
+    #[test]
+    fn the_window_switcher_can_be_moved_to_another_key() {
+        let config = SpotlightConfig {
+            windows: SpotlightWindowsConfig {
+                prefix: "win".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let table = resolve_with_ai(&config).0;
+
+        assert_eq!(
+            table.get("win").expect("win prefix").kind,
+            PrefixKind::Windows
+        );
+        assert!(table.get("w").is_none(), "the default key is not also kept");
+    }
+
+    #[test]
+    fn the_window_switcher_can_be_turned_off() {
+        let config = SpotlightConfig {
+            windows: SpotlightWindowsConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let table = resolve_with_ai(&config).0;
+
+        assert!(table.get("w").is_none());
+        assert_eq!(table.all().len(), 5);
+    }
+
+    /// `disabled_builtins` is the one place a user already looks to remove a
+    /// built-in prefix, so it has to work here too.
+    #[test]
+    fn the_window_switcher_honours_disabled_builtins() {
+        let config = SpotlightConfig {
+            disabled_builtins: vec!["w".to_string()],
+            ..Default::default()
+        };
+
+        let table = resolve_with_ai(&config).0;
+
+        assert!(table.get("w").is_none());
+        assert_eq!(table.all().len(), 5);
+    }
+
+    #[test]
+    fn an_unusable_window_prefix_key_is_refused() {
+        for key in ["", "   ", "a b"] {
+            assert!(
+                windows_prefix(&SpotlightWindowsConfig {
+                    prefix: key.to_string(),
+                    ..Default::default()
+                })
+                .is_none(),
+                "{key:?} must not become a prefix"
+            );
+        }
+    }
+
+    /// A user prefix is applied after the switcher, so it wins the key — the
+    /// same precedence every other collision follows.
+    #[test]
+    fn a_user_prefix_overrides_the_window_switcher() {
+        let config = SpotlightConfig {
+            prefixes: vec![user_prefix("w", "echo")],
+            ..Default::default()
+        };
+
+        let table = resolve_with_ai(&config).0;
+
+        assert!(matches!(
+            table.get("w").expect("w prefix").kind,
+            PrefixKind::Command { .. }
+        ));
+        assert_eq!(table.all().len(), 6);
     }
 
     #[test]

@@ -270,6 +270,8 @@ struct RawPreview {
     kind: String,
     #[serde(default)]
     content: String,
+    #[serde(default)]
+    caption: Option<String>,
 }
 
 impl RawPreview {
@@ -285,6 +287,10 @@ impl RawPreview {
         Some(Preview {
             kind: PreviewKind::parse(&self.kind)?,
             content: content.to_string(),
+            caption: self
+                .caption
+                .map(|caption| caption.trim().to_string())
+                .filter(|caption| !caption.is_empty()),
         })
     }
 }
@@ -403,6 +409,7 @@ mod tests {
             Some(Preview {
                 kind: PreviewKind::Image,
                 content: "https://example.com/big.png".to_string(),
+                caption: None,
             })
         );
         assert_eq!(
@@ -410,6 +417,7 @@ mod tests {
             Some(Preview {
                 kind: PreviewKind::Text,
                 content: "line one".to_string(),
+                caption: None,
             })
         );
     }

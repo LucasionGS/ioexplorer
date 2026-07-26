@@ -33,6 +33,12 @@ const MAX_PREVIEW_BYTES: u64 = 16 * 1024 * 1024;
 pub enum PreviewKind {
     Text,
     Image,
+    /// An icon-theme name or a serialized `gio::Icon`, drawn at preview size.
+    ///
+    /// Distinct from [`PreviewKind::Image`] because it resolves through the icon
+    /// theme rather than the filesystem, and so needs neither a download nor the
+    /// debounce that protects one.
+    Icon,
 }
 
 impl PreviewKind {
@@ -40,16 +46,31 @@ impl PreviewKind {
         match value.trim().to_ascii_lowercase().as_str() {
             "text" => Some(Self::Text),
             "image" => Some(Self::Image),
+            "icon" => Some(Self::Icon),
             _ => None,
         }
     }
 }
 
-/// A row's preview: text to display, or a URI to draw.
+/// A row's preview: text to display, or artwork to draw.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Preview {
     pub kind: PreviewKind,
     pub content: String,
+    /// Shown under the artwork. Ignored by [`PreviewKind::Text`], whose content
+    /// is already the text.
+    pub caption: Option<String>,
+}
+
+impl Preview {
+    /// Artwork from the icon theme, with details written underneath.
+    pub fn icon(content: impl Into<String>, caption: impl Into<String>) -> Self {
+        Self {
+            kind: PreviewKind::Icon,
+            content: content.into(),
+            caption: Some(caption.into()),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -151,6 +172,7 @@ mod tests {
         assert_eq!(PreviewKind::parse("text"), Some(PreviewKind::Text));
         assert_eq!(PreviewKind::parse("Image"), Some(PreviewKind::Image));
         assert_eq!(PreviewKind::parse("  TEXT  "), Some(PreviewKind::Text));
+        assert_eq!(PreviewKind::parse("icon"), Some(PreviewKind::Icon));
     }
 
     #[test]

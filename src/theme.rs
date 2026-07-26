@@ -314,7 +314,8 @@ window {{\n\
 .spotlight-hint,\n\
 .spotlight-chat-role,\n\
 .spotlight-chat-status,\n\
-.spotlight-preview-status {{\n\
+.spotlight-preview-status,\n\
+.spotlight-preview-caption {{\n\
   color: alpha({text}, 0.72);\n\
 }}"
     )
@@ -511,7 +512,8 @@ mod tests {
         // so a palette that reached one but not the other would be obvious.
         assert!(css.contains(".spotlight-preview {"));
         assert!(css.contains(".spotlight-preview-text {"));
-        assert!(css.contains(".spotlight-preview-status {"));
+        assert!(css.contains(".spotlight-preview-status,"));
+        assert!(css.contains(".spotlight-preview-caption {"));
     }
 
     #[test]
