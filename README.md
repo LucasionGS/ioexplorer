@@ -229,6 +229,37 @@ Replies are rendered as Markdown once they finish: headings, `**bold**`, `*itali
 
 Two deliberate limits: `_underscores_` are left alone so `snake_case_names` survive, and links render as underlined text without being clickable.
 
+#### Tools
+
+A provider can be given tools, so it can act rather than only answer. Tools are **off by default** — enabling the chat does not enable them.
+
+```toml
+[[spotlight.ai]]
+prefix = "claude"
+provider = "claude"
+builtin_tools = true      # search/read/list/calculate, open, launch
+run_command = false       # arbitrary shell commands; gated separately
+web_search = true         # Anthropic's server-side search and fetch
+
+[[spotlight.ai.tools]]
+name    = "play_music"
+command = "playerctl-search {query}"
+confirm = "always"        # "always" (default) | "never"
+
+  [[spotlight.ai.tools.params]]
+  name     = "query"
+  type     = "string"
+  required = true
+```
+
+Read-only tools (searching, reading, listing, calculating) run automatically on a background thread. Side-effecting ones (opening, launching, running) show an approval card first and wait: `Enter` runs it, `Esc` declines. The card shows the **expanded** command — the exact line the shell would see, not the template — because that is where an injected argument would hide.
+
+`run_command` is gated separately from the other built-ins: it is the one that can do unbounded damage, so turning on `builtin_tools` never turns it on. `read_file` is confined to your home directory after resolving `..` and symlinks, and refuses credential locations — `.ssh`, `.aws`, `.env*`, private keys, shell history, and ioexplorer's own config directory.
+
+Custom-tool parameters are always shell-quoted; the values are model output, and a model that has just read a file or a web page can be steered by its contents.
+
+See [docs/spotlight-ai-tools.md](docs/spotlight-ai-tools.md) for the full tool reference, the limits, and the known gaps.
+
 **The API key never goes in `config.toml`** — the settings UI rewrites that file in full whenever you save, so a key placed there would be persisted in plaintext. There are two supported places for it.
 
 **A key file (recommended).** `config.toml` holds only the path, which is not a secret:

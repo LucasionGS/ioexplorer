@@ -769,6 +769,23 @@ window {
   font-size: 0.82em;
 }
 
+.spotlight-chat-tool {
+  padding: 2px 4px;
+  font-size: 0.86em;
+  opacity: 0.72;
+}
+
+/* Deliberately not themed, for the same reason as the error bubble: a card
+   asking permission to run a command must stay legible and visibly distinct
+   under any palette, or the one prompt that matters blends into the transcript. */
+.spotlight-chat-approval {
+  padding: 10px 12px;
+  margin: 4px 0;
+  border: 1px solid rgba(255, 190, 90, 0.55);
+  border-radius: 10px;
+  background: rgba(255, 170, 60, 0.12);
+}
+
 /* Deliberately not themed: an error has to stay legible under any palette the
    user picks, so it keeps its own red rather than following the accent. */
 .spotlight-chat-error {

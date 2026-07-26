@@ -10,7 +10,10 @@ use std::{
 
 use crate::config::AiEffort;
 
-use super::{AiError, AiEvent, ApiKey, ChatMessage, sse};
+use super::{
+    AiError, AiEvent, ApiKey, ChatMessage, sse,
+    tools::{ToolCall, ToolDef},
+};
 
 const ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
 const API_VERSION: &str = "2023-06-01";
@@ -24,6 +27,8 @@ pub struct Request<'a> {
     pub effort: AiEffort,
     pub api_key_env: &'a str,
     pub api_key_file: Option<&'a Path>,
+    pub tools: &'a [ToolDef],
+    pub web_search: bool,
 }
 
 pub fn run(
@@ -111,6 +116,14 @@ pub fn run(
     );
 }
 
+/// A `tool_use` block being assembled. Its `input` streams in as JSON fragments
+/// that are individually invalid, so it is only parseable at `content_block_stop`.
+struct PendingTool {
+    id: String,
+    name: String,
+    json: String,
+}
+
 fn stream_body(
     reader: impl BufRead,
     generation: u64,
@@ -120,6 +133,9 @@ fn stream_body(
     let mut stop_reason = None;
     let mut refusal_category = None;
     let mut saw_terminal = false;
+    let mut text = String::new();
+    let mut pending: Option<PendingTool> = None;
+    let mut calls: Vec<ToolCall> = Vec::new();
 
     for line in reader.lines() {
         if is_stale() {
@@ -135,10 +151,65 @@ fn stream_body(
                     return;
                 }
             }
-            sse::SseEvent::TextDelta(text) => {
-                if !text.is_empty() && !emit(AiEvent::Delta { generation, text }) {
+            sse::SseEvent::TextDelta(delta) => {
+                if delta.is_empty() {
+                    continue;
+                }
+                // Kept as well as emitted: a turn that ends in a tool call has
+                // to replay this text in the assistant turn beside the
+                // `tool_use` block, or the model loses what it just said.
+                text.push_str(&delta);
+                if !emit(AiEvent::Delta {
+                    generation,
+                    text: delta,
+                }) {
                     return;
                 }
+            }
+            sse::SseEvent::ToolUseStart { id, name } => {
+                pending = Some(PendingTool {
+                    id,
+                    name,
+                    json: String::new(),
+                });
+            }
+            sse::SseEvent::InputJsonDelta(fragment) => {
+                if let Some(tool) = pending.as_mut() {
+                    tool.json.push_str(&fragment);
+                }
+            }
+            sse::SseEvent::BlockStop => {
+                // Fires for every block; only a tool block has anything to
+                // finish. An empty `input` streams no deltas at all, so nothing
+                // accumulated means `{}` rather than a parse failure.
+                if let Some(tool) = pending.take() {
+                    let input = match tool.json.trim().is_empty() {
+                        true => serde_json::json!({}),
+                        false => match serde_json::from_str(&tool.json) {
+                            Ok(input) => input,
+                            Err(error) => {
+                                emit(AiEvent::Failed {
+                                    generation,
+                                    error: AiError::Protocol {
+                                        provider: PROVIDER.to_string(),
+                                        detail: format!("tool input was not valid JSON: {error}"),
+                                    },
+                                });
+                                return;
+                            }
+                        },
+                    };
+                    calls.push(ToolCall {
+                        id: tool.id,
+                        name: tool.name,
+                        input,
+                    });
+                }
+            }
+            sse::SseEvent::ServerToolError { code } => {
+                // Server-side tools fail with a normal 200, so this is the only
+                // signal. Not fatal — the model is told and can carry on.
+                tracing::warn!(code, "a server-side tool failed");
             }
             sse::SseEvent::MessageDelta {
                 stop_reason: reason,
@@ -175,6 +246,17 @@ fn stream_body(
             error: AiError::Refused {
                 category: refusal_category,
             },
+        });
+        return;
+    }
+
+    // The worker's job ends here: execution, approval and the follow-up request
+    // all belong to the main thread, so one HTTP request is still one worker.
+    if !calls.is_empty() {
+        emit(AiEvent::ToolRequested {
+            generation,
+            text,
+            calls,
         });
         return;
     }
@@ -245,7 +327,7 @@ fn expand_tilde(path: &Path) -> PathBuf {
 fn request_body(request: &Request<'_>, history: &[ChatMessage]) -> String {
     let messages: Vec<serde_json::Value> = history
         .iter()
-        .map(|message| serde_json::json!({ "role": message.api_role(), "content": message.text }))
+        .map(|message| serde_json::json!({ "role": message.api_role(), "content": message.api_content() }))
         .collect();
 
     // Deliberately absent: `temperature`/`top_p`/`top_k` (removed on Opus 5,
@@ -262,6 +344,27 @@ fn request_body(request: &Request<'_>, history: &[ChatMessage]) -> String {
     // it. Haiku and the 4.5-and-older line reject it outright.
     if let Some(effort) = effort_for(request.model, request.effort) {
         body["output_config"] = serde_json::json!({ "effort": effort });
+    }
+
+    let mut declarations = request
+        .tools
+        .iter()
+        .map(ToolDef::api_declaration)
+        .collect::<Vec<_>>();
+    if request.web_search {
+        declarations.extend(super::tools::server_side_declarations());
+    }
+
+    if !declarations.is_empty() {
+        body["tools"] = serde_json::Value::Array(declarations);
+        // One call per turn. Parallel tool use is the API default, and every
+        // `tool_use` needs its own `tool_result` in a single following user
+        // turn — but the approval card shows one expanded command, and several
+        // at once would need several cards before any of them could run.
+        body["tool_choice"] = serde_json::json!({
+            "type": "auto",
+            "disable_parallel_tool_use": true,
+        });
     }
 
     body.to_string()
@@ -363,6 +466,8 @@ mod tests {
             effort: AiEffort::Low,
             api_key_env: "ANTHROPIC_API_KEY",
             api_key_file: None,
+            tools: &[],
+            web_search: false,
         }
     }
 
@@ -435,6 +540,8 @@ mod tests {
                 effort: AiEffort::Low,
                 api_key_env: "K",
                 api_key_file: None,
+                tools: &[],
+                web_search: false,
             },
             &[ChatMessage::user("hi")],
         ))

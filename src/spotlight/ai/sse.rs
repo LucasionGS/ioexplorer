@@ -16,6 +16,26 @@ pub enum SseEvent {
     /// only reliable "reasoning, no output yet" signal.
     ThinkingStart,
     TextStart,
+    /// A `tool_use` block opened. Its `input` does not arrive here — it is
+    /// streamed as [`SseEvent::InputJsonDelta`] fragments and is only complete
+    /// at the following [`SseEvent::BlockStop`].
+    ToolUseStart {
+        id: String,
+        name: String,
+    },
+    /// One fragment of a `tool_use` block's input JSON. Individually these are
+    /// not valid JSON — concatenate every fragment between `ToolUseStart` and
+    /// `BlockStop`, then parse once.
+    InputJsonDelta(String),
+    /// A server-side tool (web search, web fetch) reported a failure.
+    ///
+    /// These arrive as a normal HTTP 200 with a `*_tool_result` block whose
+    /// `content` is an *object* carrying `error_code`, where a success is a
+    /// *list* — so the shape of `content`, not the status code, is what
+    /// distinguishes them.
+    ServerToolError {
+        code: String,
+    },
     TextDelta(String),
     /// Text is empty whenever `display` is `"omitted"` (the default). Kept
     /// distinct from [`SseEvent::TextDelta`] so it can never reach the transcript.
@@ -59,6 +79,10 @@ pub fn parse_line(line: &str) -> SseEvent {
         Some("content_block_start") => match block_type(&value) {
             Some("thinking") => SseEvent::ThinkingStart,
             Some("text") => SseEvent::TextStart,
+            Some("tool_use") => parse_tool_use_start(&value),
+            // Server-side tools run on Anthropic's side and need no client
+            // execution, so only their failures are worth surfacing.
+            Some(kind) if kind.ends_with("_tool_result") => server_tool_error(&value),
             _ => SseEvent::Ignored,
         },
         Some("content_block_delta") => parse_delta(&value),
@@ -92,8 +116,33 @@ fn parse_delta(value: &serde_json::Value) -> SseEvent {
         Some("thinking_delta") => {
             SseEvent::ThinkingDelta(string_at(value, &["delta", "thinking"]).unwrap_or_default())
         }
-        // `signature_delta`, `input_json_delta` (phase 2) and anything newer.
+        Some("input_json_delta") => SseEvent::InputJsonDelta(
+            string_at(value, &["delta", "partial_json"]).unwrap_or_default(),
+        ),
+        // `signature_delta` and anything newer.
         _ => SseEvent::Ignored,
+    }
+}
+
+/// A `tool_use` block without an id or a name cannot be answered — there would
+/// be nothing to pair the eventual `tool_result` with — so it is dropped rather
+/// than half-built.
+fn parse_tool_use_start(value: &serde_json::Value) -> SseEvent {
+    let (Some(id), Some(name)) = (
+        string_at(value, &["content_block", "id"]),
+        string_at(value, &["content_block", "name"]),
+    ) else {
+        return SseEvent::Ignored;
+    };
+
+    SseEvent::ToolUseStart { id, name }
+}
+
+/// A server-tool result whose `content` is an object rather than a list.
+fn server_tool_error(value: &serde_json::Value) -> SseEvent {
+    match string_at(value, &["content_block", "content", "error_code"]) {
+        Some(code) => SseEvent::ServerToolError { code },
+        None => SseEvent::Ignored,
     }
 }
 
@@ -249,7 +298,117 @@ mod tests {
         );
         assert_eq!(
             parse_line(
-                r#"data: {"type":"content_block_start","content_block":{"type":"tool_use","id":"t1"}}"#
+                r#"data: {"type":"content_block_start","content_block":{"type":"some_future_block"}}"#
+            ),
+            SseEvent::Ignored
+        );
+    }
+
+    #[test]
+    fn parses_a_tool_use_block_and_its_streamed_input() {
+        assert_eq!(
+            parse_line(
+                r#"data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"search_files","input":{}}}"#
+            ),
+            SseEvent::ToolUseStart {
+                id: "toolu_1".to_string(),
+                name: "search_files".to_string(),
+            }
+        );
+        assert_eq!(
+            parse_line(
+                r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"query\":"}}"#
+            ),
+            SseEvent::InputJsonDelta("{\"query\":".to_string())
+        );
+    }
+
+    /// The fragments are individually invalid JSON — only their concatenation
+    /// parses, which is why the accumulate-then-parse-at-BlockStop shape exists.
+    #[test]
+    fn input_json_deltas_only_parse_once_concatenated() {
+        let lines = [
+            r#"data: {"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{\"query\""}}"#,
+            r#"data: {"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":": \"inv"}}"#,
+            r#"data: {"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"oice\"}"}}"#,
+        ];
+
+        let mut buffer = String::new();
+        for line in lines {
+            let SseEvent::InputJsonDelta(fragment) = parse_line(line) else {
+                panic!("expected an input_json_delta for {line}");
+            };
+            assert!(
+                serde_json::from_str::<serde_json::Value>(&fragment).is_err(),
+                "a fragment must not parse on its own: {fragment}"
+            );
+            buffer.push_str(&fragment);
+        }
+
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&buffer).expect("the whole input parses"),
+            serde_json::json!({ "query": "invoice" })
+        );
+    }
+
+    /// An empty `input` streams no deltas at all, so the accumulator must treat
+    /// "nothing arrived" as `{}` rather than as a parse failure.
+    #[test]
+    fn a_tool_use_with_no_input_streams_no_deltas() {
+        assert_eq!(
+            parse_line(
+                r#"data: {"type":"content_block_start","content_block":{"type":"tool_use","id":"toolu_9","name":"list_apps"}}"#
+            ),
+            SseEvent::ToolUseStart {
+                id: "toolu_9".to_string(),
+                name: "list_apps".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_tool_use_without_an_id_or_name_is_dropped() {
+        for payload in [
+            r#"data: {"type":"content_block_start","content_block":{"type":"tool_use","id":"toolu_1"}}"#,
+            r#"data: {"type":"content_block_start","content_block":{"type":"tool_use","name":"calculate"}}"#,
+        ] {
+            assert_eq!(parse_line(payload), SseEvent::Ignored, "{payload}");
+        }
+    }
+
+    /// `tool_use` and `pause_turn` ride the same `stop_reason` field every other
+    /// terminal reason uses — no separate event.
+    #[test]
+    fn tool_use_and_pause_turn_arrive_as_stop_reasons() {
+        for reason in ["tool_use", "pause_turn"] {
+            assert_eq!(
+                parse_line(&format!(
+                    r#"data: {{"type":"message_delta","delta":{{"stop_reason":"{reason}"}}}}"#
+                )),
+                SseEvent::MessageDelta {
+                    stop_reason: Some(reason.to_string()),
+                    refusal_category: None,
+                }
+            );
+        }
+    }
+
+    /// A server-tool failure is an HTTP 200 whose `content` is an object rather
+    /// than the usual list — the shape is the only signal.
+    #[test]
+    fn a_server_tool_error_is_distinguished_by_its_content_shape() {
+        assert_eq!(
+            parse_line(
+                r#"data: {"type":"content_block_start","content_block":{"type":"web_search_tool_result","content":{"type":"web_search_tool_result_error","error_code":"max_uses_exceeded"}}}"#
+            ),
+            SseEvent::ServerToolError {
+                code: "max_uses_exceeded".to_string(),
+            }
+        );
+        // A success carries a list, and needs nothing from the client.
+        assert_eq!(
+            parse_line(
+                r#"data: {"type":"content_block_start","content_block":{"type":"web_search_tool_result","content":[{"type":"web_search_result","url":"https://example.com"}]}}"#
             ),
             SseEvent::Ignored
         );

@@ -16,6 +16,7 @@ mod mock;
 mod ndjson;
 mod ollama;
 mod sse;
+pub mod tools;
 
 use std::{
     fmt,
@@ -43,26 +44,73 @@ pub enum Role {
     Assistant,
 }
 
+/// One block inside a turn.
+///
+/// A turn is a list of blocks rather than a string because tool use cannot be
+/// expressed any other way: the model's request to call a tool rides in the
+/// *assistant* turn as a `tool_use` block, and its outcome rides in the
+/// *following user* turn as a `tool_result` carrying the same id. Flattening
+/// either to text loses the id, and the API rejects a `tool_use` whose
+/// `tool_result` never arrives.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Block {
+    Text(String),
+    /// The model asking for a tool to be run.
+    ToolUse {
+        id: String,
+        name: String,
+        /// Always a JSON object in practice, but held as a `Value` because it is
+        /// model output — a malformed input is data to reject, not to panic on.
+        input: serde_json::Value,
+    },
+    /// The outcome handed back. `is_error` is how a failure — or a user
+    /// declining — is reported without breaking the id pairing.
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+        is_error: bool,
+    },
+}
+
 /// One conversation turn.
-#[derive(Clone, Debug, Eq, PartialEq)]
+///
+/// Not `Eq`: a `tool_use` input is a `serde_json::Value`, which is only
+/// `PartialEq` because it can hold a float.
+#[derive(Clone, Debug, PartialEq)]
 pub struct ChatMessage {
     pub role: Role,
-    pub text: String,
+    pub blocks: Vec<Block>,
 }
 
 impl ChatMessage {
     pub fn user(text: impl Into<String>) -> Self {
         Self {
             role: Role::User,
-            text: text.into(),
+            blocks: vec![Block::Text(text.into())],
         }
     }
 
     pub fn assistant(text: impl Into<String>) -> Self {
         Self {
             role: Role::Assistant,
-            text: text.into(),
+            blocks: vec![Block::Text(text.into())],
         }
+    }
+
+    /// The turn's visible text, with every non-text block dropped.
+    ///
+    /// For display and for providers with no tool-block wire format of their
+    /// own. Blocks are joined with a newline so two separate text blocks do not
+    /// run together into one word.
+    pub fn text(&self) -> String {
+        self.blocks
+            .iter()
+            .filter_map(|block| match block {
+                Block::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn api_role(&self) -> &'static str {
@@ -70,6 +118,43 @@ impl ChatMessage {
             Role::User => "user",
             Role::Assistant => "assistant",
         }
+    }
+
+    /// The turn's `content` in Claude's wire format.
+    ///
+    /// A turn that is nothing but one text block serializes to a bare string
+    /// rather than a one-element array. Both are accepted, but the string is
+    /// what Phase 1 sent, and the prompt cache keys on the exact bytes — so
+    /// preserving it keeps every existing conversation's cached prefix valid.
+    fn api_content(&self) -> serde_json::Value {
+        if let [Block::Text(text)] = self.blocks.as_slice() {
+            return serde_json::Value::String(text.clone());
+        }
+
+        serde_json::Value::Array(
+            self.blocks
+                .iter()
+                .map(|block| match block {
+                    Block::Text(text) => serde_json::json!({ "type": "text", "text": text }),
+                    Block::ToolUse { id, name, input } => serde_json::json!({
+                        "type": "tool_use",
+                        "id": id,
+                        "name": name,
+                        "input": input,
+                    }),
+                    Block::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } => serde_json::json!({
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": content,
+                        "is_error": is_error,
+                    }),
+                })
+                .collect(),
+        )
     }
 }
 
@@ -109,6 +194,15 @@ pub enum AiEvent {
         generation: u64,
         text: String,
     },
+    /// The model wants tools run. The worker stops here: execution, approval
+    /// and the follow-up request all belong to the main thread.
+    ToolRequested {
+        generation: u64,
+        /// The assistant text that preceded the call, which has to be replayed
+        /// in the assistant turn alongside the `tool_use` blocks.
+        text: String,
+        calls: Vec<tools::ToolCall>,
+    },
     Done {
         generation: u64,
         stop_reason: Option<String>,
@@ -125,6 +219,7 @@ impl AiEvent {
             Self::Started { generation }
             | Self::Thinking { generation }
             | Self::Delta { generation, .. }
+            | Self::ToolRequested { generation, .. }
             | Self::Done { generation, .. }
             | Self::Failed { generation, .. } => *generation,
         }
@@ -191,12 +286,21 @@ impl Provider {
 }
 
 /// A configured provider bound to a spotlight prefix.
-#[derive(Clone, Debug, Eq, PartialEq)]
+///
+/// Not `Eq`: the resolved tool set carries JSON schemas, which are only
+/// `PartialEq`.
+#[derive(Clone, Debug, PartialEq)]
 pub struct AiProvider {
     pub prefix: String,
     pub label: String,
     pub icon: String,
     pub default: bool,
+    /// Resolved once, at config load. The tool list renders at the very front
+    /// of the prompt, so it must not be rebuilt per turn.
+    pub tools: Vec<tools::ToolDef>,
+    /// Declare Anthropic's server-side web search and fetch. Claude only, so a
+    /// non-Claude provider that asks for it is told rather than silently ignored.
+    pub web_search: bool,
     pub provider: Provider,
 }
 
@@ -249,11 +353,29 @@ pub fn resolve_providers(config: &SpotlightConfig) -> Vec<AiProvider> {
                 .clone()
                 .unwrap_or_else(|| "dialog-information-symbolic".to_string()),
             default: is_default,
+            tools: tools::definitions(entry),
+            web_search: web_search_for(entry, &provider),
             provider,
         });
     }
 
     providers
+}
+
+/// Whether to declare Anthropic's server-side web tools.
+///
+/// Ollama has no server-side equivalent, and declaring them would be silently
+/// ignored — saying so once beats leaving the user to wonder why the model
+/// never searches.
+fn web_search_for(entry: &SpotlightAiConfig, provider: &Provider) -> bool {
+    if entry.web_search && !matches!(provider, Provider::Claude { .. }) {
+        tracing::warn!(
+            prefix = entry.prefix,
+            "web_search needs Claude; this provider has no server-side web tools"
+        );
+        return false;
+    }
+    entry.web_search
 }
 
 fn backend_from_config(entry: &SpotlightAiConfig) -> Option<Provider> {
@@ -310,6 +432,16 @@ fn default_label(provider: &str, model: &str) -> String {
 /// Same shape as [`crate::spotlight::file_search::FileSearch`]: a monotonic
 /// generation invalidates superseded work both inside the worker and on the
 /// main thread, so cancellation never needs a join or a lock.
+/// Everything one request needs. Taken by value — nothing borrowed from the
+/// window may reach the worker thread.
+pub struct Turn {
+    pub provider: Provider,
+    pub history: Vec<ChatMessage>,
+    pub tools: Vec<tools::ToolDef>,
+    /// Declare Anthropic's server-side web search and fetch.
+    pub web_search: bool,
+}
+
 pub struct AiSession {
     generation: Arc<AtomicU64>,
     sender: mpsc::Sender<AiEvent>,
@@ -339,7 +471,7 @@ impl AiSession {
     ///
     /// `provider` and `history` are taken by value: nothing borrowed from the
     /// window may reach the worker thread.
-    pub fn start(&self, provider: Provider, history: Vec<ChatMessage>) -> u64 {
+    pub fn start(&self, turn: Turn) -> u64 {
         let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
 
         let sender = self.sender.clone();
@@ -352,7 +484,7 @@ impl AiSession {
             if is_stale() {
                 return;
             }
-            run_stream(&provider, &history, generation, &is_stale, &mut emit);
+            run_stream(&turn, generation, &is_stale, &mut emit);
         });
 
         generation
@@ -382,13 +514,13 @@ impl Default for AiSession {
 /// `emit` returns false once the caller has moved on (channel closed or this
 /// generation superseded), which unwinds the provider loop promptly.
 fn run_stream(
-    provider: &Provider,
-    history: &[ChatMessage],
+    turn: &Turn,
     generation: u64,
     is_stale: &dyn Fn() -> bool,
     emit: &mut dyn FnMut(AiEvent) -> bool,
 ) {
-    match provider {
+    let history = turn.history.as_slice();
+    match &turn.provider {
         Provider::Claude {
             model,
             max_tokens,
@@ -402,15 +534,23 @@ fn run_stream(
                 effort: *effort,
                 api_key_env,
                 api_key_file: api_key_file.as_deref(),
+                tools: turn.tools.as_slice(),
+                web_search: turn.web_search,
             },
             history,
             generation,
             is_stale,
             emit,
         ),
-        Provider::Ollama { model, endpoint } => {
-            ollama::run(model, endpoint, history, generation, is_stale, emit)
-        }
+        Provider::Ollama { model, endpoint } => ollama::run(
+            model,
+            endpoint,
+            history,
+            turn.tools.as_slice(),
+            generation,
+            is_stale,
+            emit,
+        ),
         Provider::Mock { .. } => mock::run(history, generation, is_stale, emit),
     }
 }
@@ -421,11 +561,132 @@ const _: fn() = || {
     assert_send::<Provider>();
     assert_send::<ChatMessage>();
     assert_send::<AiEvent>();
+    assert_send::<Turn>();
+    assert_send::<tools::ToolDef>();
 };
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Phase 1 sent a bare string for a plain turn, and the prompt cache keys on
+    /// the exact bytes — emitting a one-element array instead would invalidate
+    /// every cached conversation prefix for no benefit.
+    #[test]
+    fn a_plain_text_turn_still_serializes_to_a_bare_string() {
+        assert_eq!(
+            ChatMessage::user("hello").api_content(),
+            serde_json::json!("hello")
+        );
+        assert_eq!(
+            ChatMessage::assistant("hi there").api_content(),
+            serde_json::json!("hi there")
+        );
+    }
+
+    #[test]
+    fn an_assistant_turn_carries_its_tool_use_blocks() {
+        let message = ChatMessage {
+            role: Role::Assistant,
+            blocks: vec![
+                Block::Text("Let me look.".to_string()),
+                Block::ToolUse {
+                    id: "toolu_1".to_string(),
+                    name: "search_files".to_string(),
+                    input: serde_json::json!({ "query": "invoice" }),
+                },
+            ],
+        };
+
+        assert_eq!(message.api_role(), "assistant");
+        assert_eq!(
+            message.api_content(),
+            serde_json::json!([
+                { "type": "text", "text": "Let me look." },
+                {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "search_files",
+                    "input": { "query": "invoice" },
+                },
+            ])
+        );
+    }
+
+    /// The result rides in the *following user* turn and must carry the same id,
+    /// or the API rejects the request.
+    #[test]
+    fn a_tool_result_pairs_with_its_id_in_a_user_turn() {
+        let message = ChatMessage {
+            role: Role::User,
+            blocks: vec![Block::ToolResult {
+                tool_use_id: "toolu_1".to_string(),
+                content: "no matches".to_string(),
+                is_error: false,
+            }],
+        };
+
+        assert_eq!(message.api_role(), "user");
+        assert_eq!(
+            message.api_content(),
+            serde_json::json!([{
+                "type": "tool_result",
+                "tool_use_id": "toolu_1",
+                "content": "no matches",
+                "is_error": false,
+            }])
+        );
+    }
+
+    /// A failure — including the user declining — has to come back as a result
+    /// rather than a dropped block, so the model can adapt instead of hanging.
+    #[test]
+    fn a_failed_tool_is_still_a_result() {
+        let message = ChatMessage {
+            role: Role::User,
+            blocks: vec![Block::ToolResult {
+                tool_use_id: "toolu_2".to_string(),
+                content: "The user declined to run this.".to_string(),
+                is_error: true,
+            }],
+        };
+
+        assert_eq!(
+            message.api_content()[0]["is_error"],
+            serde_json::json!(true)
+        );
+    }
+
+    #[test]
+    fn text_reads_through_non_text_blocks() {
+        let message = ChatMessage {
+            role: Role::Assistant,
+            blocks: vec![
+                Block::Text("first".to_string()),
+                Block::ToolUse {
+                    id: "toolu_1".to_string(),
+                    name: "calculate".to_string(),
+                    input: serde_json::json!({}),
+                },
+                Block::Text("second".to_string()),
+            ],
+        };
+
+        assert_eq!(message.text(), "first\nsecond");
+        // A turn that is only a tool call has nothing to display.
+        assert_eq!(
+            ChatMessage {
+                role: Role::Assistant,
+                blocks: vec![Block::ToolUse {
+                    id: "toolu_1".to_string(),
+                    name: "calculate".to_string(),
+                    input: serde_json::json!({}),
+                }],
+            }
+            .text(),
+            ""
+        );
+    }
 
     fn entry(prefix: &str, provider: &str) -> SpotlightAiConfig {
         SpotlightAiConfig {
@@ -441,6 +702,10 @@ mod tests {
             max_tokens: 8192,
             effort: AiEffort::Low,
             default: false,
+            builtin_tools: false,
+            run_command: false,
+            web_search: false,
+            tools: Vec::new(),
         }
     }
 
@@ -550,10 +815,18 @@ mod tests {
         let providers = resolve_providers(&config(vec![
             SpotlightAiConfig {
                 default: true,
+                builtin_tools: false,
+                run_command: false,
+                web_search: false,
+                tools: Vec::new(),
                 ..entry("ai", "claude")
             },
             SpotlightAiConfig {
                 default: true,
+                builtin_tools: false,
+                run_command: false,
+                web_search: false,
+                tools: Vec::new(),
                 ..entry("ol", "ollama")
             },
         ]));

@@ -141,6 +141,85 @@ pub struct SpotlightAiConfig {
     /// Offer this provider on plain, unprefixed queries.
     #[serde(default)]
     pub default: bool,
+    /// Let the model use the built-in tools. Off by default: a provider that can
+    /// act on your machine is a different thing from one that can only answer.
+    #[serde(default)]
+    pub builtin_tools: bool,
+    /// Let the model run arbitrary shell commands. Gated separately from
+    /// `builtin_tools` because no other built-in can do unbounded damage, and it
+    /// is the tool a prompt-injection payload would aim for.
+    #[serde(default)]
+    pub run_command: bool,
+    /// Declare Anthropic's server-side web search and fetch. Claude only —
+    /// Ollama has no equivalent.
+    #[serde(default)]
+    pub web_search: bool,
+    /// User-defined tools, as `[[spotlight.ai.tools]]`.
+    #[serde(default)]
+    pub tools: Vec<SpotlightAiToolConfig>,
+}
+
+/// Whether a custom tool asks before running.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AiToolConfirm {
+    /// The default. Every run shows the expanded command first.
+    #[default]
+    Always,
+    /// Runs unattended. The user's explicit, per-tool choice.
+    Never,
+}
+
+/// The JSON-Schema types a custom tool parameter may take.
+///
+/// Deliberately small: the schema is generated from these, so nobody has to
+/// write JSON Schema in TOML, and every value maps to something that can be
+/// shell-quoted into a command.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AiParamType {
+    #[default]
+    String,
+    Integer,
+    Number,
+    Boolean,
+}
+
+impl AiParamType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::String => "string",
+            Self::Integer => "integer",
+            Self::Number => "number",
+            Self::Boolean => "boolean",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SpotlightAiToolParam {
+    pub name: String,
+    #[serde(default, rename = "type")]
+    pub kind: AiParamType,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub required: bool,
+}
+
+/// A user-defined tool: a command template plus typed parameters.
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SpotlightAiToolConfig {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    /// Command template. Each parameter is substituted as `{name}`, always
+    /// shell-quoted — the values are model output.
+    pub command: String,
+    #[serde(default)]
+    pub confirm: AiToolConfirm,
+    #[serde(default)]
+    pub params: Vec<SpotlightAiToolParam>,
 }
 
 /// The open-window switcher: listing running apps and focusing one.
@@ -520,6 +599,125 @@ in_search = false
         assert!(!parsed.spotlight.windows.in_search);
     }
 
+    /// Tools are opt-in, and the one that can run anything is opt-in separately
+    /// — a config that says nothing about tools must grant nothing.
+    #[test]
+    fn ai_tools_are_off_unless_asked_for() {
+        let parsed: AppConfig = toml::from_str(
+            r#"
+default_view = "icon"
+show_hidden = false
+icon_size = 128
+sidebar_width = 220
+
+[list_columns]
+size = true
+kind = true
+modified = true
+
+[[spotlight.ai]]
+prefix = "claude"
+provider = "claude"
+"#,
+        )
+        .expect("valid config");
+
+        let provider = &parsed.spotlight.ai[0];
+        assert!(!provider.builtin_tools);
+        assert!(!provider.run_command);
+        assert!(!provider.web_search);
+        assert!(provider.tools.is_empty());
+    }
+
+    #[test]
+    fn parses_a_custom_ai_tool_with_typed_params() {
+        let parsed: AppConfig = toml::from_str(
+            r#"
+default_view = "icon"
+show_hidden = false
+icon_size = 128
+sidebar_width = 220
+
+[list_columns]
+size = true
+kind = true
+modified = true
+
+[[spotlight.ai]]
+prefix = "claude"
+provider = "claude"
+builtin_tools = true
+web_search = true
+
+[[spotlight.ai.tools]]
+name = "play_music"
+description = "Play a song or artist"
+command = "playerctl-search {query}"
+confirm = "never"
+
+  [[spotlight.ai.tools.params]]
+  name = "query"
+  type = "string"
+  description = "Song, album or artist"
+  required = true
+"#,
+        )
+        .expect("valid config");
+
+        let provider = &parsed.spotlight.ai[0];
+        assert!(provider.builtin_tools);
+        assert!(provider.web_search);
+        // Still off: enabling the ordinary built-ins must not enable this one.
+        assert!(!provider.run_command);
+
+        let tool = &provider.tools[0];
+        assert_eq!(tool.name, "play_music");
+        assert_eq!(tool.command, "playerctl-search {query}");
+        assert_eq!(tool.confirm, AiToolConfirm::Never);
+        assert_eq!(tool.params[0].name, "query");
+        assert_eq!(tool.params[0].kind, AiParamType::String);
+        assert!(tool.params[0].required);
+    }
+
+    /// The whole point of the no-key rule: a tool config must not become a
+    /// place a secret can hide either.
+    #[test]
+    fn a_serialized_config_with_tools_still_contains_no_api_key() {
+        let config = AppConfig {
+            spotlight: SpotlightConfig {
+                ai: vec![SpotlightAiConfig {
+                    enabled: true,
+                    prefix: "claude".to_string(),
+                    provider: "claude".to_string(),
+                    model: None,
+                    label: None,
+                    icon: None,
+                    endpoint: None,
+                    api_key_env: Some("ANTHROPIC_API_KEY".to_string()),
+                    api_key_file: None,
+                    max_tokens: 8192,
+                    effort: AiEffort::Low,
+                    default: false,
+                    builtin_tools: true,
+                    run_command: true,
+                    web_search: true,
+                    tools: vec![SpotlightAiToolConfig {
+                        name: "play_music".to_string(),
+                        description: String::new(),
+                        command: "playerctl {query}".to_string(),
+                        confirm: AiToolConfirm::Always,
+                        params: Vec::new(),
+                    }],
+                }],
+                ..SpotlightConfig::default()
+            },
+            ..AppConfig::default()
+        };
+
+        let serialized = toml::to_string(&config).expect("serializes");
+        assert!(!serialized.contains("api_key ="), "{serialized}");
+    }
+
     #[test]
     fn parses_spotlight_ai_providers() {
         let parsed: AppConfig = toml::from_str(
@@ -600,6 +798,10 @@ modified = true
                     max_tokens: 8192,
                     effort: AiEffort::Low,
                     default: true,
+                    builtin_tools: false,
+                    run_command: false,
+                    web_search: false,
+                    tools: Vec::new(),
                 }],
                 ..Default::default()
             },
@@ -636,6 +838,10 @@ modified = true
                     max_tokens: 4096,
                     effort: AiEffort::High,
                     default: false,
+                    builtin_tools: false,
+                    run_command: false,
+                    web_search: false,
+                    tools: Vec::new(),
                 }],
                 ..Default::default()
             },

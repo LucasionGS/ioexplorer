@@ -26,7 +26,7 @@ pub fn run(
         .iter()
         .rev()
         .find(|message| matches!(message.role, super::Role::User))
-        .map(|message| message.text.as_str())
+        .map(|message| message.text())
         .unwrap_or_default();
     let lowered = prompt.to_lowercase();
 
@@ -54,7 +54,7 @@ pub fn run(
         TOKEN_DELAY
     };
 
-    for token in reply(prompt, history.len()) {
+    for token in reply(&prompt, history.len()) {
         if is_stale() {
             return;
         }

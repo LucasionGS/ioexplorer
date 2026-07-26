@@ -7,7 +7,10 @@ use std::{
     time::Duration,
 };
 
-use super::{AiError, AiEvent, ChatMessage, ndjson};
+use super::{
+    AiError, AiEvent, ChatMessage, ndjson,
+    tools::{ToolCall, ToolDef},
+};
 
 const PROVIDER: &str = "Ollama";
 const MAX_ERROR_BODY: u64 = 64 * 1024;
@@ -18,11 +21,12 @@ pub fn run(
     model: &str,
     endpoint: &str,
     history: &[ChatMessage],
+    tools: &[ToolDef],
     generation: u64,
     is_stale: &dyn Fn() -> bool,
     emit: &mut dyn FnMut(AiEvent) -> bool,
 ) {
-    let body = request_body(model, history);
+    let body = request_body(model, history, tools);
 
     let response = ureq::post(format!("{endpoint}/api/chat"))
         .config()
@@ -103,6 +107,29 @@ fn stream_body(
                         return;
                     }
                 }
+                ndjson::NdjsonEvent::ToolCalls(raw) => {
+                    let calls = raw
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, call)| ToolCall {
+                            // Ollama issues no call ids, but the result pairing
+                            // needs one — so synthesize a per-turn unique id.
+                            id: format!("ollama_{generation}_{index}"),
+                            name: call.name,
+                            input: serde_json::from_str(&call.arguments)
+                                .unwrap_or_else(|_| serde_json::json!({})),
+                        })
+                        .collect::<Vec<_>>();
+
+                    if !calls.is_empty() {
+                        emit(AiEvent::ToolRequested {
+                            generation,
+                            text: String::new(),
+                            calls,
+                        });
+                        return;
+                    }
+                }
                 ndjson::NdjsonEvent::Done => saw_done = true,
                 ndjson::NdjsonEvent::Error(message) => {
                     emit(AiEvent::Failed {
@@ -141,13 +168,39 @@ fn stream_body(
     });
 }
 
-fn request_body(model: &str, history: &[ChatMessage]) -> String {
+fn request_body(model: &str, history: &[ChatMessage], tools: &[ToolDef]) -> String {
     let messages: Vec<serde_json::Value> = history
         .iter()
-        .map(|message| serde_json::json!({ "role": message.api_role(), "content": message.text }))
+        .map(|message| serde_json::json!({ "role": message.api_role(), "content": message.text() }))
         .collect();
 
-    serde_json::json!({ "model": model, "stream": true, "messages": messages }).to_string()
+    let mut body = serde_json::json!({
+        "model": model,
+        "stream": true,
+        "messages": messages,
+    });
+
+    if !tools.is_empty() {
+        // Ollama wraps each declaration in an OpenAI-shaped envelope rather
+        // than taking Claude's flat form.
+        body["tools"] = serde_json::Value::Array(
+            tools
+                .iter()
+                .map(|tool| {
+                    serde_json::json!({
+                        "type": "function",
+                        "function": {
+                            "name": tool.name,
+                            "description": tool.description,
+                            "parameters": tool.schema,
+                        },
+                    })
+                })
+                .collect(),
+        );
+    }
+
+    body.to_string()
 }
 
 /// Best-effort model list for the "model not installed" message. Short timeout;
@@ -238,7 +291,7 @@ mod tests {
     #[test]
     fn builds_a_streaming_request_body() {
         let body: serde_json::Value =
-            serde_json::from_str(&request_body("llama3.2", &[ChatMessage::user("hi")]))
+            serde_json::from_str(&request_body("llama3.2", &[ChatMessage::user("hi")], &[]))
                 .expect("valid json");
 
         assert_eq!(body["model"], "llama3.2");

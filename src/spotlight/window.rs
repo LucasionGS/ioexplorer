@@ -19,7 +19,10 @@ use crate::{
     },
     spotlight::{
         ToggleRequest,
-        ai::{AiError, AiEvent, AiProvider, AiSession, ChatMessage, Provider, markdown},
+        ai::{
+            AiError, AiEvent, AiProvider, AiSession, Block, ChatMessage, Provider, Role, markdown,
+            tools::{self, AppSummary, ToolCall, ToolDef, ToolKind, ToolOutcome, ToolRunner},
+        },
         custom_results::{CustomResult, CustomResultsRunner, ResultsEvent},
         file_search::{FileHit, FileSearch, SearchEvent},
         image_cache,
@@ -39,6 +42,35 @@ struct ChatState {
     label: String,
     history: Vec<ChatMessage>,
     streaming: bool,
+    /// Resolved once when the conversation opens. The tool list renders at the
+    /// very front of the prompt, so rebuilding it per turn would invalidate the
+    /// prompt cache on every round.
+    tools: Vec<ToolDef>,
+    web_search: bool,
+    /// Tool rounds used so far, against [`MAX_TOOL_ROUNDS`].
+    rounds: usize,
+    /// Server-side `pause_turn` resumes used, against [`MAX_PAUSE_RESUMES`].
+    resumes: usize,
+    /// The call waiting on the approval card.
+    pending: Option<PendingApproval>,
+    /// Calls from this round that have not run yet.
+    ///
+    /// A queue rather than a single slot because the API may send several
+    /// `tool_use` blocks in one turn, and *every* one needs a `tool_result` in
+    /// the single user turn that follows — a missing pairing is rejected. The
+    /// request asks for one at a time, so this is normally length 1; it exists
+    /// so that guarantee is not the only thing keeping the loop correct.
+    queue: std::collections::VecDeque<ToolCall>,
+    /// `tool_result` blocks for calls already answered this round.
+    results: Vec<Block>,
+}
+
+/// A side-effecting call the user has not yet decided on.
+struct PendingApproval {
+    call: ToolCall,
+    kind: ToolKind,
+    /// What will actually run — the expanded command, not the template.
+    expanded: String,
 }
 
 /// One tick drains the toggle socket, the filesystem walker and the AI stream.
@@ -69,6 +101,12 @@ const PREVIEW_DEBOUNCE: Duration = Duration::from_millis(120);
 /// snapshot rather than spawning a compositor query per keystroke, short enough
 /// that a window opened a moment ago is still found.
 const WINDOW_LIST_TTL: Duration = Duration::from_millis(1_500);
+/// Cap on tool rounds in one turn. A model that keeps asking for tools stops
+/// here with a note rather than looping until the user closes the window.
+const MAX_TOOL_ROUNDS: usize = 10;
+/// Cap on `pause_turn` resumes. The server-side tool loop hit its own iteration
+/// limit and wants to continue; this bounds how often we let it.
+const MAX_PAUSE_RESUMES: usize = 5;
 /// Rows reachable via Alt+1..9.
 const QUICK_PICK_ROWS: usize = 9;
 /// Shown at the end of the streaming message so it reads as still going.
@@ -129,6 +167,12 @@ pub struct SpotlightWindow {
     prefix_table: PrefixTable,
     ai_providers: Vec<AiProvider>,
     ai_session: AiSession,
+    /// Runs read-only tools off the main thread.
+    tool_runner: ToolRunner,
+    /// The approval card currently in the transcript, so it can be removed once
+    /// a decision is made. Kept here rather than in `ChatState`, which is plain
+    /// data by design.
+    approval_card: RefCell<Option<gtk::Widget>>,
     /// The live conversation, kept in memory so hide/show resumes it.
     chat: RefCell<Option<ChatState>>,
     /// The label currently receiving deltas; `None` when not streaming.
@@ -474,6 +518,8 @@ impl SpotlightWindow {
             prefix_table,
             ai_providers,
             ai_session: AiSession::new(),
+            tool_runner: ToolRunner::new(),
+            approval_card: RefCell::new(None),
             chat: RefCell::new(None),
             streaming_label: RefCell::new(None),
             finished_label: RefCell::new(None),
@@ -670,6 +716,7 @@ impl SpotlightWindow {
             this.drain_custom_results();
             this.drain_previews();
             this.drain_ai();
+            this.drain_tools();
             glib::ControlFlow::Continue
         });
     }
@@ -698,6 +745,14 @@ impl SpotlightWindow {
             }
             Action::CopyLast => {
                 self.copy_last_reply();
+                glib::Propagation::Stop
+            }
+            Action::Approve => {
+                self.resolve_approval(true);
+                glib::Propagation::Stop
+            }
+            Action::Deny => {
+                self.resolve_approval(false);
                 glib::Propagation::Stop
             }
             Action::Move(delta) => {
@@ -745,7 +800,7 @@ impl SpotlightWindow {
         // Load-bearing: `entry.set_text` fires `connect_changed`, and that
         // happens on every send, on enter/leave chat, and on show/hide. Without
         // this guard each follow-up keystroke re-renders a hidden results list.
-        if self.mode.get() == keys::Mode::Chat {
+        if self.mode.get() != keys::Mode::Search {
             return;
         }
 
@@ -964,7 +1019,7 @@ impl SpotlightWindow {
     /// always the more recent one, and the selection is still visible in the
     /// list, so nothing is lost by showing what is under the cursor.
     fn refresh_preview(self: &Rc<Self>) {
-        if self.mode.get() == keys::Mode::Chat {
+        if self.mode.get() != keys::Mode::Search {
             self.show_preview(None);
             return;
         }
@@ -1550,6 +1605,13 @@ impl SpotlightWindow {
                 label: provider.label.clone(),
                 history: Vec::new(),
                 streaming: false,
+                tools: provider.tools.clone(),
+                web_search: provider.web_search,
+                rounds: 0,
+                resumes: 0,
+                pending: None,
+                queue: std::collections::VecDeque::new(),
+                results: Vec::new(),
             });
             icons::clear_box_children(&self.transcript);
         }
@@ -1564,7 +1626,9 @@ impl SpotlightWindow {
     ///
     /// Never routes to `close()` — that quits the process in one-shot mode.
     fn leave_chat(self: &Rc<Self>) {
-        if self.mode.get() != keys::Mode::Chat {
+        // Approval counts as being in the chat: Escape is bound to declining
+        // there, so reaching this at all means the user wants out entirely.
+        if self.mode.get() == keys::Mode::Search {
             self.close();
             return;
         }
@@ -1581,7 +1645,9 @@ impl SpotlightWindow {
         // The panel belongs to the result list; the chat replaces it.
         self.refresh_preview();
         match mode {
-            keys::Mode::Chat => {
+            // Approval is the chat surface with a card on it — same widgets,
+            // different key table.
+            keys::Mode::Chat | keys::Mode::Approval => {
                 self.body.set_visible_child_name("chat");
                 self.footers.set_visible_child_name("chat");
                 self.empty_label.set_visible(false);
@@ -1613,28 +1679,61 @@ impl SpotlightWindow {
         // generation and unwinds on its own.
         self.finalize_streaming_label();
 
-        let Some((provider, history)) = self.chat.borrow_mut().as_mut().map(|chat| {
-            chat.history.push(ChatMessage::user(prompt.clone()));
-            chat.streaming = true;
-            (chat.provider.clone(), chat.history.clone())
-        }) else {
+        let sent = self
+            .chat
+            .borrow_mut()
+            .as_mut()
+            .map(|chat| {
+                chat.history.push(ChatMessage::user(prompt.clone()));
+                // A new prompt is a new turn: the round budget starts again.
+                chat.rounds = 0;
+                chat.resumes = 0;
+            })
+            .is_some();
+        if !sent {
             return;
-        };
+        }
 
         self.append_message("You", &prompt, "spotlight-chat-user");
         self.set_entry_text("");
         // Appending to the transcript can move focus; take it back so the next
         // follow-up can be typed straight away.
         self.entry.grab_focus_without_selecting();
-        self.set_streaming(true);
         self.status_label.set_visible(false);
-        self.ai_session.start(provider, history);
+        self.start_turn();
         self.scroll_chat_to_bottom();
+    }
+
+    /// Sends the conversation as it currently stands.
+    ///
+    /// Every request goes through here — the first prompt, a follow-up, the
+    /// continuation after a tool result, and a `pause_turn` resume — so the tool
+    /// set and the streaming flag can never be set one way in one path and
+    /// another way in the next.
+    fn start_turn(self: &Rc<Self>) {
+        let Some(turn) = self.chat.borrow_mut().as_mut().map(|chat| {
+            chat.streaming = true;
+            crate::spotlight::ai::Turn {
+                provider: chat.provider.clone(),
+                history: chat.history.clone(),
+                tools: chat.tools.clone(),
+                web_search: chat.web_search,
+            }
+        }) else {
+            return;
+        };
+
+        self.set_streaming(true);
+        self.ai_session.start(turn);
     }
 
     /// Stops generating but stays in the transcript, keeping partial text.
     fn cancel_stream(self: &Rc<Self>) {
-        if !self.is_streaming() {
+        // Also reachable while a tool is running or awaiting approval, when no
+        // HTTP request is in flight — stopping has to work there too, and that
+        // is exactly when someone is most likely to want out.
+        let interrupted = self.abandon_tools();
+        if !self.is_streaming() && !interrupted {
             return;
         }
         self.ai_session.cancel();
@@ -1652,7 +1751,7 @@ impl SpotlightWindow {
                 .iter()
                 .rev()
                 .find(|message| matches!(message.role, crate::spotlight::ai::Role::Assistant))
-                .map(|message| message.text.clone())
+                .map(ChatMessage::text)
         });
 
         let Some(text) = last else {
@@ -1699,6 +1798,12 @@ impl SpotlightWindow {
                 AiEvent::Delta { text, .. } => {
                     self.streaming_text.borrow_mut().push_str(&text);
                     grew = true;
+                }
+                AiEvent::ToolRequested { text, calls, .. } => {
+                    self.begin_tool_round(&text, calls);
+                    // The turn is not over — the transcript continues once the
+                    // results are back — so no `finish_stream` here.
+                    return;
                 }
                 AiEvent::Done { stop_reason, .. } => self.finish_stream(stop_reason),
                 AiEvent::Failed { error, .. } => self.fail_stream(&error),
@@ -1752,9 +1857,336 @@ impl SpotlightWindow {
             Some("max_tokens") => {
                 self.note("Cut off at the token limit — raise `max_tokens` in [[spotlight.ai]].");
             }
+            // The server-side tool loop hit its own iteration cap and wants to
+            // carry on. The assistant turn has just been appended, so re-sending
+            // the conversation is the documented way to resume it.
+            Some("pause_turn") => {
+                let resuming = self
+                    .chat
+                    .borrow_mut()
+                    .as_mut()
+                    .map(|chat| {
+                        chat.resumes += 1;
+                        chat.resumes <= MAX_PAUSE_RESUMES
+                    })
+                    .unwrap_or(false);
+                if resuming {
+                    self.status_label.set_text("Still working…");
+                    self.status_label.set_visible(true);
+                    self.start_turn();
+                    return;
+                }
+                self.note(&format!("Stopped after {MAX_PAUSE_RESUMES} continuations."));
+            }
             _ => self.status_label.set_visible(false),
         }
         self.reflow();
+    }
+
+    // -- tool use ----------------------------------------------------------
+
+    /// The model asked for tools. Records the assistant turn and starts working
+    /// through the calls.
+    fn begin_tool_round(self: &Rc<Self>, text: &str, calls: Vec<ToolCall>) {
+        self.finalize_streaming_label();
+        self.render_markdown();
+        self.set_streaming(false);
+
+        let over_budget = {
+            let mut chat = self.chat.borrow_mut();
+            let Some(chat) = chat.as_mut() else {
+                return;
+            };
+
+            // The assistant turn carries what it said *and* what it asked for.
+            // Dropping the text would lose the model's own reasoning from the
+            // conversation; dropping the blocks would orphan the results.
+            let mut blocks = Vec::new();
+            if !text.trim().is_empty() {
+                blocks.push(Block::Text(text.to_string()));
+            }
+            for call in &calls {
+                blocks.push(Block::ToolUse {
+                    id: call.id.clone(),
+                    name: call.name.clone(),
+                    input: call.input.clone(),
+                });
+            }
+            chat.history.push(ChatMessage {
+                role: Role::Assistant,
+                blocks,
+            });
+
+            chat.rounds += 1;
+            chat.results.clear();
+            chat.queue = calls.into_iter().collect();
+            chat.rounds > MAX_TOOL_ROUNDS
+        };
+
+        if over_budget {
+            // Every call still needs an answer, or the follow-up request is
+            // rejected outright — so refuse them rather than dropping them.
+            self.answer_remaining("Tool round limit reached; nothing was run.");
+            self.note(&format!("Stopped after {MAX_TOOL_ROUNDS} tool rounds."));
+            return;
+        }
+
+        self.advance_tools();
+    }
+
+    /// Runs the next queued call, or sends the results when none are left.
+    fn advance_tools(self: &Rc<Self>) {
+        let next = self
+            .chat
+            .borrow_mut()
+            .as_mut()
+            .and_then(|chat| chat.queue.pop_front());
+
+        let Some(call) = next else {
+            return self.send_tool_results();
+        };
+        self.run_or_ask(call);
+    }
+
+    /// Hands the accumulated results back as one user turn and continues.
+    fn send_tool_results(self: &Rc<Self>) {
+        let ready = self
+            .chat
+            .borrow_mut()
+            .as_mut()
+            .map(|chat| {
+                let blocks = std::mem::take(&mut chat.results);
+                if blocks.is_empty() {
+                    return false;
+                }
+                // One user turn carrying every result from this round: splitting
+                // them across turns is rejected when several calls were made.
+                chat.history.push(ChatMessage {
+                    role: Role::User,
+                    blocks,
+                });
+                true
+            })
+            .unwrap_or(false);
+
+        if ready {
+            self.start_turn();
+        }
+    }
+
+    /// Decides how a single call is handled: run it, or ask first.
+    fn run_or_ask(self: &Rc<Self>, call: ToolCall) {
+        let definition = self.chat.borrow().as_ref().and_then(|chat| {
+            chat.tools
+                .iter()
+                .find(|tool| tool.name == call.name)
+                .cloned()
+        });
+
+        let Some(definition) = definition else {
+            // The model named a tool that is not declared. Say so rather than
+            // hanging: it can correct itself on the next round.
+            return self.finish_tool(
+                call.id,
+                ToolOutcome::Error(format!("no tool named '{}'", call.name)),
+            );
+        };
+
+        if definition.effect == tools::Effect::ReadOnly {
+            self.append_tool_note(&format!("Running {}…", definition.name));
+            self.tool_runner.start(
+                call.id,
+                definition.kind.clone(),
+                call.input,
+                self.app_snapshot(),
+            );
+            return;
+        }
+
+        let expanded = tools::preview(&definition, &call);
+        if !definition.needs_approval() {
+            // `confirm = "never"` on this specific tool — the user's explicit,
+            // per-tool choice, not a general bypass.
+            let outcome = tools::run_side_effecting(&definition.kind, &call.input, &expanded);
+            self.append_tool_note(&format!("{}: {}", definition.name, outcome.text()));
+            return self.finish_tool(call.id, outcome);
+        }
+
+        self.show_approval_card(&definition.name, &expanded);
+        if let Some(chat) = self.chat.borrow_mut().as_mut() {
+            chat.pending = Some(PendingApproval {
+                call,
+                kind: definition.kind.clone(),
+                expanded,
+            });
+        }
+        self.set_mode(keys::Mode::Approval);
+    }
+
+    /// Applies the user's decision on the pending call.
+    fn resolve_approval(self: &Rc<Self>, approved: bool) {
+        let pending = self
+            .chat
+            .borrow_mut()
+            .as_mut()
+            .and_then(|chat| chat.pending.take());
+        let Some(pending) = pending else {
+            return;
+        };
+
+        if let Some(card) = self.approval_card.borrow_mut().take() {
+            self.transcript.remove(&card);
+        }
+        self.set_mode(keys::Mode::Chat);
+
+        let outcome = match approved {
+            true => {
+                tools::run_side_effecting(&pending.kind, &pending.call.input, &pending.expanded)
+            }
+            // A denial is reported as a result, not as silence — the model can
+            // then adapt instead of waiting for an answer that never arrives.
+            false => ToolOutcome::Error("The user declined to run this.".to_string()),
+        };
+
+        self.append_tool_note(&format!("{}: {}", pending.call.name, outcome.text()));
+        self.finish_tool(pending.call.id, outcome);
+    }
+
+    /// Records one call's answer and moves on.
+    fn finish_tool(self: &Rc<Self>, id: String, outcome: ToolOutcome) {
+        if let Some(chat) = self.chat.borrow_mut().as_mut() {
+            chat.results.push(Block::ToolResult {
+                tool_use_id: id,
+                content: outcome.text().to_string(),
+                is_error: outcome.is_error(),
+            });
+        }
+        self.advance_tools();
+    }
+
+    /// Answers every still-queued call with the same refusal.
+    fn answer_remaining(self: &Rc<Self>, reason: &str) {
+        if let Some(chat) = self.chat.borrow_mut().as_mut() {
+            while let Some(call) = chat.queue.pop_front() {
+                chat.results.push(Block::ToolResult {
+                    tool_use_id: call.id,
+                    content: reason.to_string(),
+                    is_error: true,
+                });
+            }
+        }
+        self.send_tool_results();
+    }
+
+    fn drain_tools(self: &Rc<Self>) {
+        for event in self.tool_runner.drain() {
+            // Tool output is untrusted text — a file or a web page the model
+            // read. `append_tool_note` sets it as a label's plain text, so no
+            // markup in it can be interpreted.
+            let summary = summarize(event.outcome.text());
+            self.append_tool_note(&summary);
+            self.finish_tool(event.id, event.outcome);
+        }
+    }
+
+    /// Drops any in-flight or pending tool work. Returns whether there was any.
+    ///
+    /// The queue and the accumulated results go with it: a half-answered round
+    /// cannot be resumed, because the API needs every `tool_use` from that
+    /// assistant turn answered in one following user turn.
+    fn abandon_tools(self: &Rc<Self>) -> bool {
+        self.tool_runner.cancel();
+
+        if let Some(card) = self.approval_card.borrow_mut().take() {
+            self.transcript.remove(&card);
+        }
+        if self.mode.get() == keys::Mode::Approval {
+            self.set_mode(keys::Mode::Chat);
+        }
+
+        let had_work = self
+            .chat
+            .borrow()
+            .as_ref()
+            .map(|chat| chat.pending.is_some() || !chat.queue.is_empty())
+            .unwrap_or(false);
+
+        self.close_open_tool_round("The user stopped this before it ran.");
+        had_work
+    }
+
+    /// Answers every outstanding call in the current round, then closes it.
+    ///
+    /// Load-bearing rather than tidiness. By the time a round can be abandoned
+    /// its assistant turn — carrying the `tool_use` blocks — is already in the
+    /// history, and the API rejects any later request that leaves one of them
+    /// without a matching `tool_result`. Dropping the queue instead of
+    /// answering it would leave the conversation permanently un-sendable, and
+    /// the failure would not surface until the user's *next* message.
+    fn close_open_tool_round(&self, reason: &str) {
+        let mut chat = self.chat.borrow_mut();
+        let Some(chat) = chat.as_mut() else {
+            return;
+        };
+
+        let outstanding = match chat.history.last() {
+            Some(message) if message.role == Role::Assistant => message
+                .blocks
+                .iter()
+                .filter_map(|block| match block {
+                    Block::ToolUse { id, .. } => Some(id.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
+
+        chat.pending = None;
+        chat.queue.clear();
+
+        if outstanding.is_empty() {
+            chat.results.clear();
+            return;
+        }
+
+        let answered = chat
+            .results
+            .iter()
+            .filter_map(|block| match block {
+                Block::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        let mut blocks = std::mem::take(&mut chat.results);
+        for id in outstanding {
+            if !answered.contains(&id) {
+                blocks.push(Block::ToolResult {
+                    tool_use_id: id,
+                    content: reason.to_string(),
+                    is_error: true,
+                });
+            }
+        }
+        chat.history.push(ChatMessage {
+            role: Role::User,
+            blocks,
+        });
+    }
+
+    /// Applications as plain data, so a worker can filter them without touching
+    /// GTK.
+    fn app_snapshot(&self) -> Vec<AppSummary> {
+        self.live_index
+            .snapshot()
+            .entries()
+            .iter()
+            .map(|entry| AppSummary {
+                desktop_id: entry.desktop_id.clone(),
+                name: entry.name.clone(),
+                description: entry.comment.clone(),
+            })
+            .collect()
     }
 
     fn fail_stream(self: &Rc<Self>, error: &AiError) {
@@ -1855,6 +2287,67 @@ impl SpotlightWindow {
         body
     }
 
+    /// A one-line entry in the transcript recording tool activity.
+    ///
+    /// Set as a label's plain text, never as markup: this carries tool output,
+    /// which is a file or a web page the model read and is therefore untrusted.
+    fn append_tool_note(&self, text: &str) {
+        let label = gtk::Label::builder()
+            .label(text)
+            .xalign(0.0)
+            .wrap(true)
+            .wrap_mode(gtk::pango::WrapMode::WordChar)
+            .selectable(true)
+            .css_classes(["spotlight-chat-tool"])
+            .build();
+        label.set_focus_on_click(false);
+        self.transcript.append(&label);
+    }
+
+    /// The approval card: what is about to run, and how to answer.
+    ///
+    /// Shows the **expanded** command — the actual argv the shell would see —
+    /// not the template it came from. A card that showed `playerctl {query}`
+    /// would hide exactly the part an injected argument controls.
+    fn show_approval_card(self: &Rc<Self>, name: &str, expanded: &str) {
+        let card = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(6)
+            .css_classes(["spotlight-chat-approval"])
+            .build();
+
+        card.append(
+            &gtk::Label::builder()
+                .label(format!("Run {name}?"))
+                .xalign(0.0)
+                .css_classes(["spotlight-chat-role"])
+                .build(),
+        );
+
+        let command = gtk::Label::builder()
+            .label(expanded)
+            .xalign(0.0)
+            .wrap(true)
+            .wrap_mode(gtk::pango::WrapMode::Char)
+            .selectable(true)
+            .css_classes(["spotlight-chat-code"])
+            .build();
+        command.set_focus_on_click(false);
+        card.append(&command);
+
+        card.append(
+            &gtk::Label::builder()
+                .label("Enter to run · Esc to decline")
+                .xalign(0.0)
+                .css_classes(["spotlight-chat-status", "dim-label"])
+                .build(),
+        );
+
+        self.transcript.append(&card);
+        *self.approval_card.borrow_mut() = Some(card.upcast());
+        self.scroll_chat_to_bottom();
+    }
+
     fn note(&self, text: &str) {
         self.status_label.set_text(text);
         self.status_label.set_visible(true);
@@ -1904,8 +2397,16 @@ impl SpotlightWindow {
         self.cancel_custom_results();
         // A stream would otherwise keep appending into a hidden transcript.
         self.ai_session.cancel();
+        // And a half-finished tool round would strand the conversation: its
+        // assistant turn is already recorded, so reopening would resume a chat
+        // whose `tool_use` blocks can never be answered.
+        self.tool_runner.cancel();
+        self.close_open_tool_round("Interrupted before this could run.");
         if let Some(chat) = self.chat.borrow_mut().as_mut() {
             chat.streaming = false;
+        }
+        if let Some(card) = self.approval_card.borrow_mut().take() {
+            self.transcript.remove(&card);
         }
         self.spinner.set_spinning(false);
         // Also drops the pending debounce, whose generation check now fails.
@@ -2064,6 +2565,21 @@ fn code_block(body: &str) -> gtk::ScrolledWindow {
 
 /// Generous slack: a partly-rendered final line should still count as "at the
 /// bottom", or a fast stream would keep unsticking itself.
+/// Longest tool output echoed into the transcript. The full text still goes to
+/// the model; this is only what the user sees, and a 200 KB file pasted into the
+/// chat helps nobody.
+const MAX_TOOL_NOTE: usize = 300;
+
+/// A one-line summary of tool output for the transcript.
+fn summarize(text: &str) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= MAX_TOOL_NOTE {
+        return flat;
+    }
+    let head = flat.chars().take(MAX_TOOL_NOTE).collect::<String>();
+    format!("{head}…")
+}
+
 const AUTOSCROLL_SLACK: f64 = 48.0;
 
 fn is_at_bottom(adjustment: &gtk::Adjustment) -> bool {

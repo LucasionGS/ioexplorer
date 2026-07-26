@@ -16,6 +16,12 @@ pub enum Mode {
     Search,
     /// The chat transcript.
     Chat,
+    /// The chat transcript with an approval card awaiting a decision.
+    ///
+    /// A third mode rather than a flag checked in `on_key`: routing that lives
+    /// outside this function is routing the table's tests do not cover, and the
+    /// two would drift.
+    Approval,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -41,6 +47,11 @@ pub enum Action {
     Cancel,
     /// Chat: copy the last assistant message to the clipboard.
     CopyLast,
+    /// Approval: run the pending tool.
+    Approve,
+    /// Approval: decline it. The model is told, so it can adapt rather than
+    /// waiting for a result that never comes.
+    Deny,
     /// Not a spotlight shortcut — let the entry handle it.
     Pass,
 }
@@ -49,6 +60,21 @@ pub fn resolve(key: Key, state: ModifierType, mode: Mode) -> Action {
     match mode {
         Mode::Search => resolve_search(key, state),
         Mode::Chat => resolve_chat(key, state),
+        Mode::Approval => resolve_approval(key),
+    }
+}
+
+/// While a tool is awaiting a decision, Enter and Escape belong to the card.
+///
+/// Everything else is passed through rather than swallowed, so the transcript
+/// stays scrollable and the entry stays usable while the user reads what is
+/// about to run. Ctrl+C still cancels — a pending approval is exactly when
+/// someone might want out.
+fn resolve_approval(key: Key) -> Action {
+    match key {
+        Key::Return | Key::KP_Enter => Action::Approve,
+        Key::Escape => Action::Deny,
+        _ => Action::Pass,
     }
 }
 
@@ -132,6 +158,53 @@ fn digit_index(key: Key) -> Option<usize> {
     }?;
 
     Some(digit - 1)
+}
+
+#[cfg(test)]
+mod tests_approval {
+    use super::*;
+
+    fn approval(key: Key) -> Action {
+        resolve(key, ModifierType::empty(), Mode::Approval)
+    }
+
+    /// The whole point of the third mode: Enter must not send a follow-up and
+    /// Escape must not leave the transcript while a tool is waiting.
+    #[test]
+    fn enter_and_escape_reach_the_card_not_send_and_back() {
+        assert_eq!(approval(Key::Return), Action::Approve);
+        assert_eq!(approval(Key::KP_Enter), Action::Approve);
+        assert_eq!(approval(Key::Escape), Action::Deny);
+
+        // The same keys in plain chat mode still do the chat thing.
+        assert_eq!(
+            resolve(Key::Return, ModifierType::empty(), Mode::Chat),
+            Action::Send
+        );
+        assert_eq!(
+            resolve(Key::Escape, ModifierType::empty(), Mode::Chat),
+            Action::Back
+        );
+    }
+
+    /// Reading the command is the point of the card, so scrolling and typing
+    /// must keep working while it is up.
+    #[test]
+    fn everything_else_passes_through_while_approving() {
+        for key in [Key::Down, Key::Up, Key::Page_Down, Key::Tab, Key::a] {
+            assert_eq!(approval(key), Action::Pass, "{key:?}");
+        }
+    }
+
+    #[test]
+    fn a_search_mode_key_never_approves() {
+        for mode in [Mode::Search, Mode::Chat] {
+            for key in [Key::Return, Key::Escape] {
+                assert_ne!(resolve(key, ModifierType::empty(), mode), Action::Approve);
+                assert_ne!(resolve(key, ModifierType::empty(), mode), Action::Deny);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

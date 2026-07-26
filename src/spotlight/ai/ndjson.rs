@@ -7,11 +7,23 @@
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NdjsonEvent {
     Delta(String),
+    /// Tool calls, which Ollama returns whole in the message object rather than
+    /// streaming incrementally the way Claude does — so there is nothing to
+    /// accumulate and no `input_json_delta` equivalent.
+    ToolCalls(Vec<ToolCallJson>),
     /// The final object. Any trailing content it carries is reported as a
     /// [`NdjsonEvent::Delta`] first, so callers never lose the last fragment.
     Done,
     Error(String),
     Ignored,
+}
+
+/// One `tool_calls` entry, before it becomes a provider-neutral call.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToolCallJson {
+    pub name: String,
+    /// Ollama sends `arguments` already parsed, not as a JSON string.
+    pub arguments: String,
 }
 
 /// Parses exactly one NDJSON line. Never panics.
@@ -43,6 +55,10 @@ pub fn parse_line(line: &str) -> Vec<NdjsonEvent> {
         events.push(NdjsonEvent::Delta(content.to_string()));
     }
 
+    if let Some(calls) = parse_tool_calls(&value) {
+        events.push(NdjsonEvent::ToolCalls(calls));
+    }
+
     if value
         .get("done")
         .and_then(serde_json::Value::as_bool)
@@ -57,9 +73,81 @@ pub fn parse_line(line: &str) -> Vec<NdjsonEvent> {
     events
 }
 
+/// Reads `message.tool_calls`, dropping entries with no function name — a call
+/// that cannot be dispatched is worse than no call at all.
+fn parse_tool_calls(value: &serde_json::Value) -> Option<Vec<ToolCallJson>> {
+    let raw = value.get("message")?.get("tool_calls")?.as_array()?;
+
+    let calls = raw
+        .iter()
+        .filter_map(|call| {
+            let function = call.get("function")?;
+            let name = function.get("name")?.as_str()?.to_string();
+            if name.is_empty() {
+                return None;
+            }
+            // `arguments` is a JSON object here, unlike Claude's streamed string.
+            let arguments = function
+                .get("arguments")
+                .map(serde_json::Value::to_string)
+                .unwrap_or_else(|| "{}".to_string());
+            Some(ToolCallJson { name, arguments })
+        })
+        .collect::<Vec<_>>();
+
+    match calls.is_empty() {
+        true => None,
+        false => Some(calls),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_tool_calls_from_the_message_object() {
+        let events = parse_line(
+            r#"{"message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"calculate","arguments":{"expression":"2+2"}}}]},"done":false}"#,
+        );
+
+        assert_eq!(
+            events,
+            vec![NdjsonEvent::ToolCalls(vec![ToolCallJson {
+                name: "calculate".to_string(),
+                arguments: r#"{"expression":"2+2"}"#.to_string(),
+            }])]
+        );
+    }
+
+    /// Unlike Claude, Ollama sends the whole call at once — there is no
+    /// fragment accumulation, and a missing `arguments` means no arguments.
+    #[test]
+    fn a_tool_call_without_arguments_becomes_an_empty_object() {
+        let events = parse_line(
+            r#"{"message":{"tool_calls":[{"function":{"name":"list_apps"}}]},"done":true}"#,
+        );
+
+        assert_eq!(
+            events,
+            vec![
+                NdjsonEvent::ToolCalls(vec![ToolCallJson {
+                    name: "list_apps".to_string(),
+                    arguments: "{}".to_string(),
+                }]),
+                NdjsonEvent::Done,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_tool_call_with_no_name_is_dropped() {
+        let events = parse_line(
+            r#"{"message":{"content":"hi","tool_calls":[{"function":{"arguments":{}}}]},"done":false}"#,
+        );
+
+        assert_eq!(events, vec![NdjsonEvent::Delta("hi".to_string())]);
+    }
 
     #[test]
     fn parses_a_content_delta() {

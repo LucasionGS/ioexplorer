@@ -315,7 +315,8 @@ window {{\n\
 .spotlight-chat-role,\n\
 .spotlight-chat-status,\n\
 .spotlight-preview-status,\n\
-.spotlight-preview-caption {{\n\
+.spotlight-preview-caption,\n\
+.spotlight-chat-tool {{\n\
   color: alpha({text}, 0.72);\n\
 }}"
     )
@@ -513,7 +514,8 @@ mod tests {
         assert!(css.contains(".spotlight-preview {"));
         assert!(css.contains(".spotlight-preview-text {"));
         assert!(css.contains(".spotlight-preview-status,"));
-        assert!(css.contains(".spotlight-preview-caption {"));
+        assert!(css.contains(".spotlight-preview-caption,"));
+        assert!(css.contains(".spotlight-chat-tool {"));
     }
 
     #[test]
@@ -537,5 +539,7 @@ mod tests {
         let css = generated_theme_css(&ThemeSettings::default());
 
         assert!(!css.contains(".spotlight-chat-error"));
+        // Same reasoning: a permission prompt must not blend into the palette.
+        assert!(!css.contains(".spotlight-chat-approval"));
     }
 }

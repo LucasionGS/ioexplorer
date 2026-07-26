@@ -696,6 +696,10 @@ mod tests {
             max_tokens: 8192,
             effort: crate::config::AiEffort::Low,
             default: false,
+            builtin_tools: false,
+            run_command: false,
+            web_search: false,
+            tools: Vec::new(),
         }
     }
 
