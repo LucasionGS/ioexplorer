@@ -16,7 +16,7 @@ sha256sums=('SKIP')
 
 build() {
   cd "$srcdir/$pkgname"
-  cargo build --release --locked --bins
+  env -u RUSTFLAGS -u CFLAGS -u CXXFLAGS -u LDFLAGS cargo build --release --locked --bins
 }
 
 package() {
