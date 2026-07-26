@@ -815,9 +815,10 @@ impl SpotlightWindow {
             self.list.append(&row);
         }
 
-        let is_empty = results.is_empty();
-        self.empty_label.set_visible(is_empty);
-        self.scroller.set_visible(!is_empty);
+        self.empty_label.set_visible(results.is_empty());
+        if self.mode.get() == keys::Mode::Search {
+            self.body.set_visible_child_name("results");
+        }
         *self.results.borrow_mut() = results;
         self.updating.set(false);
 
