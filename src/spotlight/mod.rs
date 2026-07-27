@@ -14,6 +14,7 @@ mod layout;
 mod paths;
 mod prefixes;
 mod preview;
+mod processes;
 mod query;
 mod results;
 mod ssh;

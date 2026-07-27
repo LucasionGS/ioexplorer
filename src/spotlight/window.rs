@@ -30,8 +30,9 @@ use crate::{
         layout,
         prefixes::{FIRST_PAGE, Prefix, PrefixKind, PrefixTable, build_results_line},
         preview::{self, Preview, PreviewEvent, PreviewKind, PreviewLoader},
+        processes::{self, ProcessSource, Snapshot},
         query::{self, Query},
-        results::{self, Activation, SpotlightResult},
+        results::{self, Activation, RowMeter, SpotlightResult},
         ssh::{self, SshHost},
         windows::{self, OpenWindow, WindowSource},
     },
@@ -90,6 +91,10 @@ const MAX_LIST_HEIGHT: i32 = 420;
 /// Height at which the transcript starts scrolling instead of growing.
 const MAX_CHAT_HEIGHT: i32 = 520;
 const ROW_ICON_SIZE: i32 = 28;
+/// Width of a meter's number, so the digits align down the list.
+const METER_VALUE_WIDTH: i32 = 58;
+/// Width of a meter's bar.
+const METER_BAR_WIDTH: i32 = 54;
 /// Width of the preview panel beside the card.
 const PREVIEW_WIDTH: i32 = 380;
 /// Gap between the preview panel and the card.
@@ -111,6 +116,14 @@ const PREVIEW_DEBOUNCE: Duration = Duration::from_millis(120);
 /// snapshot rather than spawning a compositor query per keystroke, short enough
 /// that a window opened a moment ago is still found.
 const WINDOW_LIST_TTL: Duration = Duration::from_millis(1_500);
+
+/// How often the process list re-samples while it is on screen.
+///
+/// A compromise the numbers themselves impose: CPU use is measured *between*
+/// sweeps, so a short interval reports noise — one busy millisecond becomes
+/// 100% — while a long one makes the list feel dead. Around a second is what
+/// every system monitor settles on, for the same reason.
+const PROCESS_SAMPLE_INTERVAL: Duration = Duration::from_millis(1_200);
 /// Cap on `pause_turn` resumes. The server-side tool loop hit its own iteration
 /// limit and wants to continue; this bounds how often we let it.
 const MAX_PAUSE_RESUMES: usize = 5;
@@ -240,6 +253,23 @@ pub struct SpotlightWindow {
     /// Why reading it failed, so the prefix can say so rather than looking like
     /// an empty config.
     ssh_error: RefCell<Option<String>>,
+    /// Background source of `/proc` sweeps.
+    process_source: ProcessSource,
+    /// The last sweep. Kept between keystrokes so typing filters a snapshot
+    /// rather than re-reading a few hundred files per character.
+    process_snapshot: RefCell<Snapshot>,
+    /// Whether the process list is what the window is currently showing, which
+    /// is what decides if the tick keeps sampling.
+    processes_active: Cell<bool>,
+    /// When the current sweep was asked for, so sampling settles into a steady
+    /// rhythm rather than firing on every tick.
+    process_requested: Cell<Option<Instant>>,
+    /// Whether a sweep has ever landed, which separates "still reading" from
+    /// "nothing to show".
+    process_loaded: Cell<bool>,
+    /// The outcome of the last action taken on a process, shown until the user
+    /// types. A signal that was refused must not look like one that worked.
+    process_notice: RefCell<Option<String>>,
     custom_results: CustomResultsRunner,
     custom_rows: RefCell<Vec<CustomResult>>,
     custom_error: RefCell<Option<String>>,
@@ -569,6 +599,12 @@ impl SpotlightWindow {
             ssh_hosts: RefCell::new(Vec::new()),
             ssh_loaded: Cell::new(false),
             ssh_error: RefCell::new(None),
+            process_source: ProcessSource::new(),
+            process_snapshot: RefCell::new(Snapshot::default()),
+            processes_active: Cell::new(false),
+            process_requested: Cell::new(None),
+            process_loaded: Cell::new(false),
+            process_notice: RefCell::new(None),
             custom_results: CustomResultsRunner::new(),
             custom_rows: RefCell::new(Vec::new()),
             custom_error: RefCell::new(None),
@@ -595,7 +631,12 @@ impl SpotlightWindow {
 
     fn install_callbacks(self: &Rc<Self>, root: &gtk::Box) {
         let this = Rc::clone(self);
-        self.entry.connect_changed(move |_| this.rebuild());
+        self.entry.connect_changed(move |_| {
+            // Typing is the acknowledgement: a report about the last action has
+            // nothing to say about the query being written now.
+            this.process_notice.borrow_mut().take();
+            this.rebuild();
+        });
 
         // Capture phase on the window, so these keys are handled before the
         // focused GtkText can consume Return, Tab or Escape.
@@ -743,6 +784,12 @@ impl SpotlightWindow {
             }
             this.drain_file_search();
             this.drain_windows();
+            // The only list that keeps moving while the user does nothing, so
+            // it is the only one the tick has to keep asking for.
+            if this.processes_active.get() {
+                this.ensure_processes();
+            }
+            this.drain_processes();
             this.drain_custom_results();
             this.drain_previews();
             this.drain_ai();
@@ -793,6 +840,12 @@ impl SpotlightWindow {
                 self.activate(self.selected.get(), secondary);
                 glib::Propagation::Stop
             }
+            // Only consumed when the selected row actually offers the chord;
+            // otherwise it belongs to the entry, which still needs most of them.
+            Action::RowAction(letter) => match self.run_row_action(letter) {
+                true => glib::Propagation::Stop,
+                false => glib::Propagation::Proceed,
+            },
             Action::Complete => {
                 self.complete();
                 glib::Propagation::Stop
@@ -837,6 +890,9 @@ impl SpotlightWindow {
         let raw = self.entry.text().to_string();
         let parsed = query::parse(&raw, &self.prefix_table);
         let limit = self.config.clamped_result_limit();
+        // Set again by the branch that needs it, so leaving the prefix stops the
+        // sampling by simply not renewing it.
+        self.processes_active.set(false);
 
         let mut active_prefix: Option<&Prefix> = None;
         let mut results = match &parsed.query {
@@ -889,6 +945,12 @@ impl SpotlightWindow {
                         self.cancel_async_results();
                         self.ensure_ssh_hosts();
                         self.ssh_rows(prefix, arg, limit)
+                    }
+                    PrefixKind::Processes => {
+                        self.cancel_async_results();
+                        self.processes_active.set(true);
+                        self.ensure_processes();
+                        self.process_rows(prefix, arg, limit)
                     }
                     PrefixKind::CustomResults {
                         command,
@@ -957,6 +1019,15 @@ impl SpotlightWindow {
                     true => self
                         .prefix_badge
                         .set_text(&format!("{} · page {page}", prefix.label)),
+                    // The process list puts the machine's own totals here: they
+                    // are the context every row is read against, and the header
+                    // is the one place they can sit without costing a row.
+                    false if prefix.kind == PrefixKind::Processes => {
+                        self.prefix_badge.set_text(&results::process_badge(
+                            &self.process_snapshot.borrow(),
+                            &prefix.label,
+                        ));
+                    }
                     false => self.prefix_badge.set_text(&prefix.label),
                 }
                 self.prefix_badge.set_visible(true);
@@ -1325,14 +1396,14 @@ impl SpotlightWindow {
     /// are none. A blank list would read as a bug.
     fn window_rows(&self, prefix: &Prefix, arg: &str, limit: usize) -> Vec<SpotlightResult> {
         if !self.window_source.available() {
-            return vec![results::windows_notice(
+            return vec![results::prefix_notice(
                 prefix,
                 "Switching windows needs Hyprland or sway",
             )];
         }
 
         if let Some(error) = self.windows_error.borrow().as_deref() {
-            return vec![results::windows_notice(prefix, error)];
+            return vec![results::prefix_notice(prefix, error)];
         }
 
         let open = self.open_windows.borrow();
@@ -1341,14 +1412,173 @@ impl SpotlightWindow {
                 true => "No windows are open",
                 false => "Asking the compositor…",
             };
-            return vec![results::windows_notice(prefix, note)];
+            return vec![results::prefix_notice(prefix, note)];
         }
 
         let rows = results::window_results(arg, &open, &self.live_index.snapshot(), limit);
         match rows.is_empty() {
-            true => vec![results::windows_notice(prefix, "No window matches")],
+            true => vec![results::prefix_notice(prefix, "No window matches")],
             false => rows,
         }
+    }
+
+    // -- processes ---------------------------------------------------------
+
+    /// Asks for a sweep unless a recent one is already in hand.
+    fn ensure_processes(&self) {
+        let fresh = self
+            .process_requested
+            .get()
+            .is_some_and(|at| at.elapsed() < PROCESS_SAMPLE_INTERVAL);
+        if fresh {
+            return;
+        }
+
+        self.process_requested.set(Some(Instant::now()));
+        self.process_source.refresh();
+    }
+
+    /// Asks for a sweep now, whatever the interval says.
+    ///
+    /// For the moment after an action: a process that has just been ended should
+    /// leave the list immediately, not a second later.
+    fn resample_processes(&self) {
+        self.process_requested.set(Some(Instant::now()));
+        self.process_source.refresh();
+    }
+
+    fn drain_processes(self: &Rc<Self>) {
+        let Some(snapshot) = self.process_source.drain() else {
+            return;
+        };
+        *self.process_snapshot.borrow_mut() = snapshot;
+        self.process_loaded.set(true);
+
+        if self.processes_active.get() {
+            self.refresh_process_rows();
+        }
+    }
+
+    /// Rebuilds the list against the newest sweep, keeping the selection on the
+    /// same *process*.
+    ///
+    /// Not the same row: the list is ordered by usage and reorders itself as
+    /// usage changes, so holding an index would slide the selection onto a
+    /// neighbour between one sweep and the next — and the keys on offer here end
+    /// processes.
+    fn refresh_process_rows(self: &Rc<Self>) {
+        let pid = self.selected_pid();
+        let index = self.selected.get();
+
+        self.rebuild();
+
+        let restored = pid.and_then(|pid| {
+            self.results
+                .borrow()
+                .iter()
+                .position(|row| row_pid(row) == Some(pid))
+        });
+        // With the process gone, its index is the next best thing: the row that
+        // took its place is where the eye already is.
+        self.select(restored.unwrap_or(index));
+    }
+
+    /// The pid the selection is on, if it is on a process row at all.
+    fn selected_pid(&self) -> Option<i32> {
+        self.results
+            .borrow()
+            .get(self.selected.get())
+            .and_then(row_pid)
+    }
+
+    /// The rows for the process prefix, or one row explaining why there are none.
+    fn process_rows(&self, prefix: &Prefix, arg: &str, limit: usize) -> Vec<SpotlightResult> {
+        let snapshot = self.process_snapshot.borrow();
+        let mut rows = match self.process_notice.borrow().as_deref() {
+            // One row of the limit goes to the report, rather than the report
+            // pushing the list past the height the config asked for.
+            Some(notice) => vec![results::error_notice("Cannot signal that process", notice)],
+            None => Vec::new(),
+        };
+
+        let remaining = limit.saturating_sub(rows.len());
+        rows.extend(results::process_results(
+            prefix,
+            arg,
+            &snapshot,
+            &self.live_index.snapshot(),
+            remaining,
+        ));
+
+        if rows.is_empty() {
+            let note = match (self.process_loaded.get(), arg.trim().is_empty()) {
+                (false, _) => "Reading /proc…",
+                (true, true) => "No processes are running",
+                (true, false) => "No process matches",
+            };
+            return vec![results::prefix_notice(prefix, note)];
+        }
+        rows
+    }
+
+    /// Runs the selected row's action for a Ctrl chord.
+    ///
+    /// Returns whether anything claimed the chord: a row that does not use it
+    /// has to leave the key to the text entry, which still owns most of them.
+    fn run_row_action(self: &Rc<Self>, letter: char) -> bool {
+        let Some(action) = self
+            .results
+            .borrow()
+            .get(self.selected.get())
+            .and_then(|result| {
+                result
+                    .actions
+                    .iter()
+                    .find(|action| action.key == letter)
+                    .cloned()
+            })
+        else {
+            return false;
+        };
+
+        self.take_action(&action.activation);
+        true
+    }
+
+    /// Performs an activation that came from a Ctrl chord.
+    ///
+    /// Anything that leaves the launcher — opening a folder, running a command —
+    /// closes the window as it always has. A signal or a copy does not: those
+    /// are what a task manager is used for in bursts, and closing after each one
+    /// would make the second action a re-open, a retype and a re-find.
+    fn take_action(self: &Rc<Self>, activation: &Activation) {
+        let leaves = matches!(
+            activation,
+            Activation::OpenPath(_)
+                | Activation::LaunchApp(_)
+                | Activation::RunShell(_)
+                | Activation::RunInTerminal(_)
+                | Activation::FocusWindow(_)
+        );
+
+        match self.perform(activation) {
+            Ok(()) => {
+                self.process_notice.borrow_mut().take();
+            }
+            Err(error) => {
+                tracing::warn!(%error, "row action failed");
+                *self.process_notice.borrow_mut() = Some(error);
+            }
+        }
+
+        if leaves {
+            self.close();
+            return;
+        }
+        // A signal takes effect asynchronously, so this sweep may still see the
+        // process. The next one will not, and it is a second away.
+        self.resample_processes();
+        self.refresh_process_rows();
     }
 
     // -- ssh hosts ---------------------------------------------------------
@@ -1387,7 +1617,7 @@ impl SpotlightWindow {
     /// The rows for the ssh prefix, or one row explaining why there are none.
     fn ssh_rows(&self, prefix: &Prefix, arg: &str, limit: usize) -> Vec<SpotlightResult> {
         if let Some(error) = self.ssh_error.borrow().as_deref() {
-            return vec![results::ssh_notice(prefix, error)];
+            return vec![results::prefix_notice(prefix, error)];
         }
 
         let hosts = self.ssh_hosts.borrow();
@@ -1410,7 +1640,7 @@ impl SpotlightWindow {
             true => "No hosts in ~/.ssh/config · type a host to connect",
             false => "No host matches · type a host to connect",
         };
-        vec![results::ssh_notice(prefix, note)]
+        vec![results::prefix_notice(prefix, note)]
     }
 
     // -- custom results ----------------------------------------------------
@@ -1441,21 +1671,21 @@ impl SpotlightWindow {
         limit: usize,
     ) -> Vec<SpotlightResult> {
         if let Some(error) = self.custom_error.borrow().as_deref() {
-            return vec![results::custom_results_error(error)];
+            return vec![results::error_notice("Cannot get results", error)];
         }
         if arg.trim().is_empty() {
-            return vec![results::custom_results_notice(prefix, "Type to search")];
+            return vec![results::prefix_notice(prefix, "Type to search")];
         }
 
         let rows = self.custom_rows.borrow();
         if rows.is_empty() && self.custom_pending.get() {
-            return vec![results::custom_results_notice(prefix, "Searching…")];
+            return vec![results::prefix_notice(prefix, "Searching…")];
         }
         // Past the first page an empty result is the end of the list, not a
         // query that matched nothing — saying "No results" there would read as
         // though the search itself had failed.
         if rows.is_empty() && self.custom_page.get() > FIRST_PAGE {
-            return vec![results::custom_results_notice(
+            return vec![results::prefix_notice(
                 prefix,
                 "No more results — Alt+← for the previous page",
             )];
@@ -1638,6 +1868,12 @@ impl SpotlightWindow {
         if matches!(activation, Activation::Inert) {
             return;
         }
+        // Signalling keeps the window up, exactly as the Ctrl chords do — Enter
+        // is just the shortest way to reach the same action.
+        if matches!(activation, Activation::SignalProcess { .. }) {
+            self.take_action(&activation);
+            return;
+        }
 
         if let Err(error) = self.perform(&activation) {
             tracing::warn!(%error, "failed to activate spotlight result");
@@ -1669,6 +1905,7 @@ impl SpotlightWindow {
                 .map_err(|error| format!("failed to run command: {error}")),
             Activation::RunInTerminal(line) => spawn::spawn_in_terminal(line)
                 .map_err(|error| format!("failed to open a terminal: {error}")),
+            Activation::SignalProcess { pid, signal } => processes::send(*pid, *signal),
             Activation::CopyText(text) => {
                 let display = gtk::gdk::Display::default()
                     .ok_or_else(|| "no display available for the clipboard".to_string())?;
@@ -2572,6 +2809,12 @@ impl SpotlightWindow {
         // goes for the ssh config, which the user may have just been editing.
         self.invalidate_windows();
         self.invalidate_ssh_hosts();
+        // The time the launcher spent hidden is not a measurement interval:
+        // measuring a minute of CPU against an hour of wall clock would report
+        // zero for everything. The next sweep starts a fresh pair.
+        self.process_source.reset();
+        self.process_requested.set(None);
+        self.process_notice.borrow_mut().take();
         self.rebuild();
         self.reflow();
         self.window.present();
@@ -2780,6 +3023,56 @@ fn is_at_bottom(adjustment: &gtk::Adjustment) -> bool {
     adjustment.value() + adjustment.page_size() >= adjustment.upper() - AUTOSCROLL_SLACK
 }
 
+/// The pid a row acts on, if it acts on a process at all.
+fn row_pid(result: &SpotlightResult) -> Option<i32> {
+    match result.primary {
+        Activation::SignalProcess { pid, .. } => Some(pid),
+        _ => None,
+    }
+}
+
+/// The trailing column of meters, for rows whose point is a number.
+fn meters_for(meters: &[RowMeter]) -> gtk::Box {
+    let column = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(3)
+        .valign(gtk::Align::Center)
+        .css_classes(["spotlight-row-meters"])
+        .build();
+
+    for meter in meters {
+        let line = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(7)
+            .build();
+        line.append(
+            &gtk::Label::builder()
+                .label(&meter.value)
+                // Right-aligned in a fixed column so the digits line up down the
+                // list: a number that moves sideways as it changes cannot be
+                // compared with the one above it.
+                .xalign(1.0)
+                .width_request(METER_VALUE_WIDTH)
+                .css_classes(["spotlight-meter-value", "dim-label"])
+                .build(),
+        );
+
+        let bar = gtk::LevelBar::builder()
+            .min_value(0.0)
+            .max_value(1.0)
+            .value(meter.fraction.clamp(0.0, 1.0))
+            .mode(gtk::LevelBarMode::Continuous)
+            .width_request(METER_BAR_WIDTH)
+            .valign(gtk::Align::Center)
+            .css_classes(["spotlight-meter", meter.css])
+            .build();
+        line.append(&bar);
+        column.append(&line);
+    }
+
+    column
+}
+
 fn row_for(result: &SpotlightResult, index: usize) -> gtk::ListBoxRow {
     let content = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -2815,6 +3108,10 @@ fn row_for(result: &SpotlightResult, index: usize) -> gtk::ListBoxRow {
         );
     }
     content.append(&text);
+
+    if !result.meters.is_empty() {
+        content.append(&meters_for(&result.meters));
+    }
 
     if let Some(trailing) = &result.trailing_icon {
         let trailing = icons::image_for(trailing, result.trailing_icon_size);

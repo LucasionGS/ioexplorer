@@ -1,6 +1,9 @@
 //! The result model and the providers that populate it.
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use directories::UserDirs;
 
@@ -19,7 +22,8 @@ use crate::{
             DEFAULT_RESULTS_ICON_SIZE, Prefix, PrefixKind, PrefixTable, build_action_line,
             build_command_line,
         },
-        preview::Preview,
+        preview::{Preview, PreviewKind},
+        processes::{self, Process, Signal, Snapshot},
         ssh::{self, SshHost},
         windows::OpenWindow,
     },
@@ -43,8 +47,56 @@ pub enum Activation {
         provider: usize,
         prompt: String,
     },
+    /// Send a signal to a running process.
+    SignalProcess {
+        pid: i32,
+        signal: Signal,
+    },
     /// Informational rows such as the help listing.
     Inert,
+}
+
+/// A small bar drawn at the trailing edge of a row.
+///
+/// For rows whose point is a number that moves. A percentage in the subtitle is
+/// something to read; a bar is something to see, which is what makes a list of
+/// twelve processes scannable at a glance rather than one at a time.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RowMeter {
+    /// The value written out, e.g. `12.4%` or `512 MB`.
+    pub value: String,
+    /// How full the bar is, from 0 to 1.
+    pub fraction: f64,
+    /// Extra CSS class, so different quantities can read differently.
+    pub css: &'static str,
+}
+
+/// An extra action a row offers on a Ctrl chord.
+///
+/// Beyond the primary and secondary activations every row has: a process is
+/// something you *do several things to*, and picking between end, force-kill and
+/// suspend is not a choice two keys can express.
+#[derive(Clone, Debug)]
+pub struct RowAction {
+    /// The letter, which must be one of [`crate::spotlight::keys::ROW_ACTION_KEYS`].
+    pub key: char,
+    pub label: String,
+    pub activation: Activation,
+}
+
+impl RowAction {
+    fn new(key: char, label: impl Into<String>, activation: Activation) -> Self {
+        Self {
+            key,
+            label: label.into(),
+            activation,
+        }
+    }
+
+    /// How the chord is written in the preview.
+    pub fn chord(&self) -> String {
+        format!("Ctrl+{}", self.key.to_ascii_uppercase())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -61,8 +113,12 @@ pub struct SpotlightResult {
     /// Shown in the panel beside the list while this row is selected or
     /// hovered. Only `get_results` rows carry one.
     pub preview: Option<Preview>,
+    /// Bars drawn at the trailing edge, for rows that are mostly numbers.
+    pub meters: Vec<RowMeter>,
     pub primary: Activation,
     pub secondary: Option<Activation>,
+    /// What Ctrl chords do on this row, beyond primary and secondary.
+    pub actions: Vec<RowAction>,
     /// Text Tab rewrites the entry to, when this row is selected.
     pub completion: Option<String>,
     pub frecency_key: Option<String>,
@@ -78,8 +134,10 @@ impl SpotlightResult {
             trailing_icon: None,
             trailing_icon_size: DEFAULT_RESULTS_ICON_SIZE,
             preview: None,
+            meters: Vec::new(),
             primary: Activation::Inert,
             secondary: None,
+            actions: Vec::new(),
             completion: None,
             frecency_key: None,
             score: 0,
@@ -324,6 +382,7 @@ pub fn prefixed_results(
         PrefixKind::FileSearch => Vec::new(), // filled asynchronously by the walker
         PrefixKind::Windows => Vec::new(),    // filled asynchronously by the compositor query
         PrefixKind::Ssh => Vec::new(),        // filled by the window from the ssh config it loaded
+        PrefixKind::Processes => Vec::new(),  // filled from the window's latest /proc sweep
         PrefixKind::CustomResults { .. } => Vec::new(), // filled asynchronously by the runner
         PrefixKind::Command { command, terminal } => {
             command_results(prefix, command, *terminal, arg)
@@ -486,12 +545,273 @@ fn window_caption(window: &OpenWindow, app_name: &str) -> String {
     lines.join("\n")
 }
 
-/// The row shown instead of a window list when there is nothing to list.
-pub fn windows_notice(prefix: &Prefix, note: &str) -> SpotlightResult {
+/// The row a prefix shows in place of a list it cannot fill: still loading,
+/// nothing to show, or nothing matching. A blank list would read as a bug.
+pub fn prefix_notice(prefix: &Prefix, note: &str) -> SpotlightResult {
     SpotlightResult::new(
         prefix.label.clone(),
         note,
         IconRef::from_icon_name(prefix.icon.clone()),
+    )
+}
+
+/// The row shown when something a prefix tried to do failed. `summary` says
+/// what was being attempted, since "permission denied" alone is not an answer.
+pub fn error_notice(summary: &str, detail: &str) -> SpotlightResult {
+    let mut result = SpotlightResult::new(
+        summary,
+        detail,
+        IconRef::from_icon_name("dialog-warning-symbolic"),
+    );
+    // Above every real row: it reports something the user just did, and a
+    // report they have to scroll to find is not a report.
+    result.score = i32::MAX;
+    result
+}
+
+// -- processes -------------------------------------------------------------
+
+/// Artwork for a process with no application behind it.
+const PROCESS_ICON: &str = "system-run-symbolic";
+/// Width the preview's label column is padded to.
+const PROCESS_FIELD_WIDTH: usize = 10;
+
+/// Builds the rows for the `ps` prefix, ranked by how much of the machine each
+/// process is using.
+///
+/// The ordering is the whole design: with no query the heaviest process is at
+/// the top, which is the question a task manager is opened to answer. A query
+/// filters by name, pid, command line or owner, and within equally good matches
+/// the same heaviest-first order applies — twenty renderer processes named alike
+/// are only useful in the order of which one is spinning.
+pub fn process_results(
+    prefix: &Prefix,
+    arg: &str,
+    snapshot: &Snapshot,
+    index: &AppIndex,
+    limit: usize,
+) -> Vec<SpotlightResult> {
+    let query = arg.trim();
+    let mut matched = Vec::new();
+
+    for process in &snapshot.processes {
+        let pid = process.pid.to_string();
+        let Some(found) = fuzzy::match_fields(
+            query,
+            &[
+                Field::new(process.name.as_str(), 100),
+                // A pid is typed when it is already known, so a hit on it is
+                // nearly as good as one on the name.
+                Field::new(pid.as_str(), 95),
+                Field::new(process.command.as_str(), 55),
+                Field::new(process.user.as_str(), 35),
+            ],
+        ) else {
+            continue;
+        };
+        matched.push((found.score, process));
+    }
+
+    matched.sort_by(|(left_score, left), (right_score, right)| {
+        right_score
+            .cmp(left_score)
+            .then_with(|| right.cpu_percent.total_cmp(&left.cpu_percent))
+            .then_with(|| right.rss_kb.cmp(&left.rss_kb))
+            // Pid last, so equal rows keep a stable order between sweeps rather
+            // than swapping under the selection.
+            .then_with(|| left.pid.cmp(&right.pid))
+    });
+    matched.truncate(limit);
+
+    matched
+        .into_iter()
+        .map(|(_, process)| process_row(prefix, process, snapshot, index))
+        .collect()
+}
+
+fn process_row(
+    prefix: &Prefix,
+    process: &Process,
+    snapshot: &Snapshot,
+    index: &AppIndex,
+) -> SpotlightResult {
+    let icon = index
+        .find_by_app_id(&process.name)
+        .map(|entry| entry.icon.clone())
+        .unwrap_or_else(|| IconRef::from_icon_name(PROCESS_ICON));
+
+    let mut row = SpotlightResult::new(
+        process.name.clone(),
+        process_subtitle(process),
+        icon.clone(),
+    );
+    row.meters = vec![
+        RowMeter {
+            value: processes::format_percent(process.cpu_percent),
+            // Full at one core: a bar scaled to every core would leave a
+            // process pinning one of them looking idle on a 16-core machine.
+            fraction: (process.cpu_percent / 100.0).clamp(0.0, 1.0),
+            css: "spotlight-meter-cpu",
+        },
+        RowMeter {
+            value: processes::format_kb(process.rss_kb),
+            fraction: process.memory_fraction(snapshot.mem_total_kb),
+            css: "spotlight-meter-memory",
+        },
+    ];
+
+    row.primary = Activation::SignalProcess {
+        pid: process.pid,
+        signal: Signal::Term,
+    };
+    row.secondary = Some(Activation::SignalProcess {
+        pid: process.pid,
+        signal: Signal::Kill,
+    });
+    row.actions = process_actions(process);
+    row.preview = Some(process_preview(process, snapshot, &row.actions));
+    // Pids are recycled, so remembering one would teach the ranking nothing —
+    // and the ordering that matters here is live usage, not history.
+    row.completion = Some(format!("{} {}", prefix.key, process.name));
+    row
+}
+
+fn process_subtitle(process: &Process) -> String {
+    let mut parts = vec![
+        format!("pid {}", process.pid),
+        process.user.clone(),
+        process.state_label(),
+    ];
+    // Last, because it is the part worth ellipsizing: the row's label cuts from
+    // the middle, so both the binary and its final arguments stay readable.
+    if !process.command.is_empty() {
+        parts.push(process.command.clone());
+    }
+    parts.join(" · ")
+}
+
+/// The Ctrl chords a process row answers to.
+///
+/// Suspend and resume are offered by state rather than both at once: only one of
+/// them can do anything to a given process, and a chord that is documented but
+/// inert is worse than one that is absent.
+fn process_actions(process: &Process) -> Vec<RowAction> {
+    let signal = |signal: Signal| Activation::SignalProcess {
+        pid: process.pid,
+        signal,
+    };
+
+    let mut actions = vec![
+        RowAction::new('k', Signal::Term.label(), signal(Signal::Term)),
+        RowAction::new('f', Signal::Kill.label(), signal(Signal::Kill)),
+    ];
+    actions.push(match process.stopped() {
+        true => RowAction::new('r', Signal::Cont.label(), signal(Signal::Cont)),
+        false => RowAction::new('s', Signal::Stop.label(), signal(Signal::Stop)),
+    });
+
+    // A kernel thread has no working directory worth opening and no command
+    // line worth copying — both would be a bracketed name.
+    if !process.kernel_thread
+        && let Some(cwd) = processes::working_directory(process.pid)
+    {
+        actions.push(RowAction::new(
+            'o',
+            "Open working folder",
+            Activation::OpenPath(cwd),
+        ));
+    }
+    actions.push(RowAction::new(
+        'i',
+        "Copy PID",
+        Activation::CopyText(process.pid.to_string()),
+    ));
+    if !process.kernel_thread {
+        actions.push(RowAction::new(
+            'l',
+            "Copy command line",
+            Activation::CopyText(process.command.clone()),
+        ));
+    }
+
+    actions
+}
+
+/// The preview: the process as a table, its command line, and what the keys do.
+///
+/// Monospace ([`PreviewKind::Text`]) rather than the icon panel other rows use,
+/// because almost every line is a number and columns that line up can be
+/// compared down the page instead of read one at a time.
+fn process_preview(process: &Process, snapshot: &Snapshot, actions: &[RowAction]) -> Preview {
+    let field = |name: &str, value: String| format!("{name:<PROCESS_FIELD_WIDTH$}{value}");
+
+    let parent = snapshot
+        .find(process.ppid)
+        .map(|parent| format!(" · {}", parent.name))
+        .unwrap_or_default();
+    let memory_share = match snapshot.mem_total_kb {
+        0 => String::new(),
+        total => format!(
+            "  ({} of {})",
+            processes::format_percent(process.memory_fraction(total) * 100.0),
+            processes::format_kb(total)
+        ),
+    };
+
+    let mut lines = vec![
+        process.name.clone(),
+        String::new(),
+        field(
+            "CPU",
+            format!(
+                "{}  ({} of CPU time)",
+                processes::format_percent(process.cpu_percent),
+                processes::format_duration(Duration::from_secs_f64(process.cpu_seconds))
+            ),
+        ),
+        field(
+            "Memory",
+            format!("{}{memory_share}", processes::format_kb(process.rss_kb)),
+        ),
+        field("PID", format!("{}  (parent {}{parent})", process.pid, process.ppid)),
+        field("User", process.user.clone()),
+        field("State", process.state_label()),
+        field("Threads", process.threads.to_string()),
+        field(
+            "Started",
+            format!("{} ago", processes::format_duration(process.age)),
+        ),
+        String::new(),
+        process.command.clone(),
+        String::new(),
+        // Enter is listed with the rest: it is the one binding a user is most
+        // likely to reach for without meaning to, so it is worth naming.
+        format!("{:<PROCESS_FIELD_WIDTH$}{}", "Enter", Signal::Term.label()),
+    ];
+    lines.extend(
+        actions
+            .iter()
+            .map(|action| format!("{:<PROCESS_FIELD_WIDTH$}{}", action.chord(), action.label)),
+    );
+
+    Preview {
+        kind: PreviewKind::Text,
+        content: lines.join("\n"),
+        caption: None,
+    }
+}
+
+/// The header badge for the process list: what the machine as a whole is doing.
+pub fn process_badge(snapshot: &Snapshot, label: &str) -> String {
+    if snapshot.mem_total_kb == 0 && snapshot.processes.is_empty() {
+        return label.to_string();
+    }
+
+    format!(
+        "{label} · {} processes · CPU {} · RAM {}",
+        snapshot.processes.len(),
+        processes::format_percent(snapshot.cpu_percent),
+        processes::format_percent(snapshot.memory_fraction() * 100.0),
     )
 }
 
@@ -596,15 +916,6 @@ fn ssh_adhoc_row(query: &str, hosts: &[SshHost]) -> Option<SpotlightResult> {
     // No frecency key on purpose: the row is pinned to the top regardless, so a
     // ranking bonus would buy nothing and would leave a typo in the history.
     Some(row)
-}
-
-/// The row shown instead of a host list when there is nothing to list.
-pub fn ssh_notice(prefix: &Prefix, note: &str) -> SpotlightResult {
-    SpotlightResult::new(
-        prefix.label.clone(),
-        note,
-        IconRef::from_icon_name(prefix.icon.clone()),
-    )
 }
 
 fn shell_results(arg: &str) -> Vec<SpotlightResult> {
@@ -792,24 +1103,6 @@ pub fn custom_result_rows(
             row
         })
         .collect()
-}
-
-/// The row shown before a `get_results` prefix has anything to show.
-pub fn custom_results_notice(prefix: &Prefix, note: &str) -> SpotlightResult {
-    SpotlightResult::new(
-        prefix.label.clone(),
-        note,
-        IconRef::from_icon_name(prefix.icon.clone()),
-    )
-}
-
-/// The row shown when a `get_results` command failed or returned nonsense.
-pub fn custom_results_error(error: &str) -> SpotlightResult {
-    SpotlightResult::new(
-        "Cannot get results",
-        error,
-        IconRef::from_icon_name("dialog-warning-symbolic"),
-    )
 }
 
 fn calculator_results(arg: &str) -> Vec<SpotlightResult> {

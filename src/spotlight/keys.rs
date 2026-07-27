@@ -8,6 +8,15 @@ use gtk::gdk::{Key, ModifierType};
 /// How far Page Up / Page Down move the selection.
 const PAGE_STEP: i32 = 8;
 
+/// The Ctrl chords a result row may claim for its own actions.
+///
+/// A fixed set rather than "any Ctrl+letter", because the text entry below still
+/// needs its editing bindings — Ctrl+A, Ctrl+C, Ctrl+V, Ctrl+X, Ctrl+Z — and
+/// Ctrl+N and Ctrl+P move the selection. These seven are unbound in a
+/// `GtkEntry`, so claiming them costs nothing. A chord in this list is still
+/// only *offered*: a row that does not use one leaves it to the entry.
+pub const ROW_ACTION_KEYS: [char; 7] = ['k', 'f', 's', 'r', 'o', 'i', 'l'];
+
 /// Which surface the window is showing. The key table differs between them.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Mode {
@@ -39,6 +48,9 @@ pub enum Action {
     /// Step a paginated `get_results` prefix forward or back. Ignored by every
     /// other kind of query.
     Page(i32),
+    /// Run the selected row's action for this Ctrl chord, if it has one. The
+    /// caller decides — a row without the chord must let the entry keep it.
+    RowAction(char),
     /// Chat: send the entry text as a follow-up.
     Send,
     /// Chat: leave the transcript for the results list, cancelling any stream.
@@ -108,6 +120,11 @@ fn resolve_search(key: Key, state: ModifierType) -> Action {
     if alt && let Some(index) = digit_index(key) {
         return Action::Pick(index);
     }
+    // Checked before the table below, but only for letters no arm there claims,
+    // so Ctrl+N and Ctrl+P keep moving the selection.
+    if ctrl && let Some(letter) = row_action_key(key) {
+        return Action::RowAction(letter);
+    }
 
     match key {
         Key::Escape => Action::Close,
@@ -135,6 +152,16 @@ fn resolve_search(key: Key, state: ModifierType) -> Action {
         Key::Tab | Key::ISO_Left_Tab => Action::Complete,
         _ => Action::Pass,
     }
+}
+
+/// Maps a key to the row-action letter it stands for, if any.
+///
+/// Case-folded, since a layout may deliver the uppercase keyval while Ctrl is
+/// held — and so Ctrl+Shift+K reaches the same action as Ctrl+K rather than
+/// silently doing nothing.
+fn row_action_key(key: Key) -> Option<char> {
+    let letter = key.to_unicode()?.to_ascii_lowercase();
+    ROW_ACTION_KEYS.contains(&letter).then_some(letter)
 }
 
 /// Maps a digit key to a zero-based row index, covering layouts where the
@@ -242,6 +269,71 @@ mod tests {
             resolve(Key::P, ModifierType::CONTROL_MASK, Mode::Search),
             Action::Move(-1)
         );
+    }
+
+    #[test]
+    fn ctrl_letters_in_the_row_action_set_become_row_actions() {
+        for letter in ROW_ACTION_KEYS {
+            let key = Key::from_unicode(letter).expect("a letter key");
+            assert_eq!(
+                resolve(key, ModifierType::CONTROL_MASK, Mode::Search),
+                Action::RowAction(letter),
+                "{letter}"
+            );
+        }
+    }
+
+    /// A layout may deliver the uppercase keyval while Ctrl is held, and holding
+    /// Shift as well should not turn a working chord into nothing.
+    #[test]
+    fn a_shifted_row_action_chord_still_resolves() {
+        assert_eq!(
+            resolve(Key::K, ModifierType::CONTROL_MASK, Mode::Search),
+            Action::RowAction('k')
+        );
+        assert_eq!(
+            resolve(
+                Key::K,
+                ModifierType::CONTROL_MASK | ModifierType::SHIFT_MASK,
+                Mode::Search
+            ),
+            Action::RowAction('k')
+        );
+    }
+
+    /// The entry underneath still needs its editing bindings, and the selection
+    /// still needs Ctrl+N and Ctrl+P.
+    #[test]
+    fn row_actions_never_take_a_chord_something_else_owns() {
+        for letter in ['a', 'c', 'v', 'x', 'z', 'w', 'u'] {
+            let key = Key::from_unicode(letter).expect("a letter key");
+            assert_eq!(
+                resolve(key, ModifierType::CONTROL_MASK, Mode::Search),
+                Action::Pass,
+                "{letter}"
+            );
+        }
+        assert_eq!(
+            resolve(Key::n, ModifierType::CONTROL_MASK, Mode::Search),
+            Action::Move(1)
+        );
+        assert_eq!(
+            resolve(Key::p, ModifierType::CONTROL_MASK, Mode::Search),
+            Action::Move(-1)
+        );
+    }
+
+    /// Chat has its own table, and Ctrl+K there must not reach a results row.
+    #[test]
+    fn row_action_chords_do_not_exist_in_chat() {
+        for letter in ROW_ACTION_KEYS {
+            let key = Key::from_unicode(letter).expect("a letter key");
+            assert_eq!(
+                resolve(key, ModifierType::CONTROL_MASK, Mode::Chat),
+                Action::Pass,
+                "{letter}"
+            );
+        }
     }
 
     #[test]

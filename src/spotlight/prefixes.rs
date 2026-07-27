@@ -43,6 +43,8 @@ pub enum PrefixKind {
     Windows,
     /// List the hosts in the user's SSH config and connect to one.
     Ssh,
+    /// List running processes with their resource use, and act on one.
+    Processes,
     /// Ask a user-configured command for the rows to show, then run `action`
     /// on whichever one is picked.
     CustomResults {
@@ -137,6 +139,13 @@ fn builtins() -> Vec<Prefix> {
             description: "Connect to a host from your SSH config".to_string(),
             icon: "network-server-symbolic".to_string(),
             kind: PrefixKind::Ssh,
+        },
+        Prefix {
+            key: "ps".to_string(),
+            label: "Processes".to_string(),
+            description: "Watch and manage running processes".to_string(),
+            icon: "utilities-system-monitor-symbolic".to_string(),
+            kind: PrefixKind::Processes,
         },
         Prefix {
             key: "?".to_string(),
