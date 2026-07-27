@@ -20,6 +20,7 @@ use crate::{
             build_command_line,
         },
         preview::Preview,
+        ssh::{self, SshHost},
         windows::OpenWindow,
     },
 };
@@ -322,6 +323,7 @@ pub fn prefixed_results(
         PrefixKind::Help => help_results(table),
         PrefixKind::FileSearch => Vec::new(), // filled asynchronously by the walker
         PrefixKind::Windows => Vec::new(),    // filled asynchronously by the compositor query
+        PrefixKind::Ssh => Vec::new(),        // filled by the window from the ssh config it loaded
         PrefixKind::CustomResults { .. } => Vec::new(), // filled asynchronously by the runner
         PrefixKind::Command { command, terminal } => {
             command_results(prefix, command, *terminal, arg)
@@ -486,6 +488,118 @@ fn window_caption(window: &OpenWindow, app_name: &str) -> String {
 
 /// The row shown instead of a window list when there is nothing to list.
 pub fn windows_notice(prefix: &Prefix, note: &str) -> SpotlightResult {
+    SpotlightResult::new(
+        prefix.label.clone(),
+        note,
+        IconRef::from_icon_name(prefix.icon.clone()),
+    )
+}
+
+// -- ssh hosts -------------------------------------------------------------
+
+/// Artwork for a host that the config knows about.
+const SSH_HOST_ICON: &str = "network-server-symbolic";
+/// Artwork for the ad-hoc row, which is deliberately not the same: the two rows
+/// do different things, and at the top of the list that has to be visible.
+const SSH_ADHOC_ICON: &str = "network-transmit-receive-symbolic";
+
+/// Builds the rows for the `ssh` prefix: the configured hosts that match the
+/// query, led by an ad-hoc row for connecting to whatever was typed.
+pub fn ssh_results(
+    prefix: &Prefix,
+    arg: &str,
+    hosts: &[SshHost],
+    frecency: &Frecency,
+    now_secs: u64,
+    limit: usize,
+) -> Vec<SpotlightResult> {
+    let query = arg.trim();
+    let mut results = Vec::new();
+
+    for host in hosts {
+        let Some(found) = fuzzy::match_fields(
+            query,
+            &[
+                Field::new(host.alias.as_str(), 100),
+                Field::new(host.hostname(), 70),
+                Field::new(host.user().unwrap_or_default(), 40),
+                Field::new(host.option("ProxyJump").unwrap_or_default(), 30),
+            ],
+        ) else {
+            continue;
+        };
+
+        let key = format!("ssh:{}", host.alias);
+        let mut row = ssh_host_row(prefix, host);
+        row.score = found.score + frecency.bonus(&key, now_secs, FRECENCY_MAX_BONUS);
+        row.frecency_key = Some(key);
+        results.push(row);
+    }
+
+    sort_results(&mut results);
+
+    match ssh_adhoc_row(query, hosts) {
+        // The ad-hoc row is pinned rather than scored: it is the row that says
+        // what Enter will do with the text as typed, so it belongs at the top
+        // whatever the configured hosts happen to score.
+        Some(row) => {
+            results.truncate(limit.saturating_sub(1));
+            results.insert(0, row);
+        }
+        None => results.truncate(limit),
+    }
+    results
+}
+
+fn ssh_host_row(prefix: &Prefix, host: &SshHost) -> SpotlightResult {
+    let line = ssh::connect_command(&host.alias);
+
+    let mut row = SpotlightResult::new(
+        host.alias.clone(),
+        host.summary(),
+        IconRef::from_icon_name(SSH_HOST_ICON),
+    );
+    row.primary = Activation::RunInTerminal(line.clone());
+    // Not a second way to connect but a way *not* to: the command is often
+    // wanted in a script, a note, or another terminal that is already open.
+    row.secondary = Some(Activation::CopyText(line));
+    row.preview = Some(Preview::icon(SSH_HOST_ICON, host.details()));
+    row.completion = Some(format!("{} {}", prefix.key, host.alias));
+    row
+}
+
+/// The row that connects to exactly what was typed.
+///
+/// Absent when the text is not a destination ssh would accept, and absent when
+/// it names a configured host — that entry already connects there, and offering
+/// the same connection twice at the top of the list is noise.
+fn ssh_adhoc_row(query: &str, hosts: &[SshHost]) -> Option<SpotlightResult> {
+    if !ssh::is_plausible_destination(query) {
+        return None;
+    }
+    if hosts.iter().any(|host| host.alias == query) {
+        return None;
+    }
+
+    let line = ssh::connect_command(query);
+    let mut row = SpotlightResult::new(
+        query.to_string(),
+        "Connect · not in your SSH config".to_string(),
+        IconRef::from_icon_name(SSH_ADHOC_ICON),
+    );
+    row.primary = Activation::RunInTerminal(line.clone());
+    row.secondary = Some(Activation::CopyText(line.clone()));
+    row.preview = Some(Preview::icon(
+        SSH_ADHOC_ICON,
+        format!("{query}\n\nNot declared in your SSH config\n\n{line}"),
+    ));
+    // No frecency key on purpose: the row is pinned to the top regardless, so a
+    // ranking bonus would buy nothing and would leave a typo in the history.
+    Some(row)
+}
+
+/// The row shown instead of a host list when there is nothing to list.
+pub fn ssh_notice(prefix: &Prefix, note: &str) -> SpotlightResult {
     SpotlightResult::new(
         prefix.label.clone(),
         note,
@@ -995,6 +1109,160 @@ mod tests {
                 .any(|row| matches!(row.primary, Activation::FocusWindow(_))),
             "no window rows on an empty query"
         );
+    }
+
+    fn ssh_prefix() -> Prefix {
+        table().get("ssh").expect("ssh prefix").clone()
+    }
+
+    fn ssh_host(alias: &str, options: &[(&str, &str)]) -> SshHost {
+        SshHost {
+            alias: alias.to_string(),
+            options: options
+                .iter()
+                .map(|(keyword, value)| ((*keyword).to_string(), (*value).to_string()))
+                .collect(),
+            source: PathBuf::from("/home/user/.ssh/config"),
+        }
+    }
+
+    fn ssh_rows(arg: &str, hosts: &[SshHost], limit: usize) -> Vec<SpotlightResult> {
+        ssh_results(&ssh_prefix(), arg, hosts, &Frecency::default(), 0, limit)
+    }
+
+    #[test]
+    fn an_ssh_row_connects_in_a_terminal_and_copies_on_the_secondary() {
+        let hosts = [ssh_host(
+            "build-box",
+            &[("HostName", "build.example.com"), ("User", "lucas")],
+        )];
+
+        let rows = ssh_rows("", &hosts, 10);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title, "build-box");
+        assert_eq!(rows[0].subtitle, "lucas@build.example.com");
+        assert_eq!(
+            rows[0].primary,
+            Activation::RunInTerminal("ssh 'build-box'".to_string())
+        );
+        assert_eq!(
+            rows[0].secondary,
+            Some(Activation::CopyText("ssh 'build-box'".to_string()))
+        );
+        assert_eq!(rows[0].completion.as_deref(), Some("ssh build-box"));
+    }
+
+    /// The alias is what ssh is given, not the resolved hostname: only ssh can
+    /// apply the rest of the block — the identity file, the jump host, the
+    /// forwards — and it cannot do that for a bare address.
+    #[test]
+    fn a_configured_host_is_dialled_by_its_alias() {
+        let hosts = [ssh_host("db", &[("HostName", "10.0.0.5")])];
+
+        let rows = ssh_rows("db", &hosts, 10);
+
+        assert_eq!(
+            rows[0].primary,
+            Activation::RunInTerminal("ssh 'db'".to_string())
+        );
+    }
+
+    #[test]
+    fn an_ssh_row_previews_the_whole_block() {
+        let hosts = [ssh_host(
+            "build-box",
+            &[("HostName", "build.example.com"), ("ForwardAgent", "yes")],
+        )];
+
+        let rows = ssh_rows("build-box", &hosts, 10);
+
+        let preview = rows[0].preview.as_ref().expect("a host previews itself");
+        assert_eq!(preview.kind, PreviewKind::Icon);
+        let caption = preview.caption.as_deref().expect("details");
+        assert!(caption.contains("ForwardAgent yes"), "{caption}");
+        assert!(caption.contains(".ssh/config"), "{caption}");
+    }
+
+    #[test]
+    fn hosts_are_matched_on_their_hostname_and_user_too() {
+        let hosts = [
+            ssh_host("alpha", &[("HostName", "build.example.com")]),
+            ssh_host("beta", &[("User", "deploy")]),
+            ssh_host("gamma", &[("HostName", "unrelated.internal")]),
+        ];
+
+        let titles = |arg: &str| {
+            ssh_rows(arg, &hosts, 10)
+                .into_iter()
+                .map(|row| row.title)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(titles("example"), vec!["example", "alpha"]);
+        assert_eq!(titles("deploy"), vec!["deploy", "beta"]);
+    }
+
+    /// The top row always says what Enter will do with the text as typed, so an
+    /// unlisted machine is one line away.
+    #[test]
+    fn the_ad_hoc_row_leads_the_list() {
+        let hosts = [ssh_host("build-box", &[])];
+
+        let rows = ssh_rows("build", &hosts, 10);
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].title, "build");
+        assert_eq!(
+            rows[0].primary,
+            Activation::RunInTerminal("ssh 'build'".to_string())
+        );
+        assert!(rows[0].frecency_key.is_none(), "a typo must not be learned");
+        assert_eq!(rows[1].title, "build-box");
+    }
+
+    #[test]
+    fn an_ad_hoc_destination_may_carry_a_user() {
+        let rows = ssh_rows("deploy@10.0.0.5", &[], 10);
+
+        assert_eq!(
+            rows[0].primary,
+            Activation::RunInTerminal("ssh 'deploy@10.0.0.5'".to_string())
+        );
+    }
+
+    /// Naming a configured host exactly already connects there, so a second row
+    /// doing the same thing is noise at the position that matters most.
+    #[test]
+    fn the_ad_hoc_row_steps_aside_for_a_configured_host() {
+        let hosts = [ssh_host("build-box", &[("User", "lucas")])];
+
+        let rows = ssh_rows("build-box", &hosts, 10);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title, "build-box");
+    }
+
+    /// ssh reads a leading dash as an option, so text of that shape is not a
+    /// destination and must not be offered as one.
+    #[test]
+    fn text_that_is_not_a_destination_gets_no_ad_hoc_row() {
+        assert!(ssh_rows("-oProxyCommand=id", &[], 10).is_empty());
+        assert!(ssh_rows("two words", &[], 10).is_empty());
+    }
+
+    /// The ad-hoc row is inserted after the list is cut, so it must not push the
+    /// list over the limit the config asked for.
+    #[test]
+    fn the_ad_hoc_row_counts_against_the_result_limit() {
+        let hosts = (0..10)
+            .map(|index| ssh_host(&format!("host-{index}"), &[]))
+            .collect::<Vec<_>>();
+
+        let rows = ssh_rows("host", &hosts, 4);
+
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0].title, "host");
     }
 
     #[test]

@@ -41,6 +41,8 @@ pub enum PrefixKind {
     Command { command: String, terminal: bool },
     /// List the windows that are currently open and switch to one.
     Windows,
+    /// List the hosts in the user's SSH config and connect to one.
+    Ssh,
     /// Ask a user-configured command for the rows to show, then run `action`
     /// on whichever one is picked.
     CustomResults {
@@ -128,6 +130,13 @@ fn builtins() -> Vec<Prefix> {
             description: "Search your folders by name".to_string(),
             icon: "edit-find-symbolic".to_string(),
             kind: PrefixKind::FileSearch,
+        },
+        Prefix {
+            key: "ssh".to_string(),
+            label: "SSH".to_string(),
+            description: "Connect to a host from your SSH config".to_string(),
+            icon: "network-server-symbolic".to_string(),
+            kind: PrefixKind::Ssh,
         },
         Prefix {
             key: "?".to_string(),
@@ -423,8 +432,8 @@ mod tests {
     fn empty_config_yields_every_builtin() {
         let table = resolve_with_ai(&SpotlightConfig::default()).0;
 
-        assert_eq!(table.all().len(), 6);
-        for key in ["!", ">", "=", "/", "?", "w"] {
+        assert_eq!(table.all().len(), 7);
+        for key in ["!", ">", "=", "/", "?", "w", "ssh"] {
             assert!(table.get(key).is_some(), "missing builtin {key}");
         }
     }
@@ -438,7 +447,7 @@ mod tests {
 
         let table = resolve_with_ai(&config).0;
 
-        assert_eq!(table.all().len(), 6);
+        assert_eq!(table.all().len(), 7);
         assert!(matches!(
             table.get("=").expect("overridden prefix").kind,
             PrefixKind::Command { .. }
@@ -455,7 +464,7 @@ mod tests {
         let table = resolve_with_ai(&config).0;
 
         assert!(table.get("=").is_none());
-        assert_eq!(table.all().len(), 5);
+        assert_eq!(table.all().len(), 6);
     }
 
     #[test]
@@ -474,7 +483,7 @@ mod tests {
 
         let table = resolve_with_ai(&config).0;
 
-        assert_eq!(table.all().len(), 6);
+        assert_eq!(table.all().len(), 7);
     }
 
     #[test]
@@ -747,7 +756,7 @@ mod tests {
         let (table, _) = resolve_with_ai(&config);
 
         assert_eq!(table.get("=").expect("= prefix").kind, PrefixKind::Ai(0));
-        assert_eq!(table.all().len(), 6, "it replaces rather than adds");
+        assert_eq!(table.all().len(), 7, "it replaces rather than adds");
     }
 
     #[test]
@@ -767,7 +776,7 @@ mod tests {
     fn resolve_still_returns_a_table_without_ai_configured() {
         let table = resolve_with_ai(&SpotlightConfig::default()).0;
 
-        assert_eq!(table.all().len(), 6);
+        assert_eq!(table.all().len(), 7);
         assert!(
             !table
                 .all()
@@ -808,7 +817,7 @@ mod tests {
         let table = resolve_with_ai(&config).0;
 
         assert!(table.get("w").is_none());
-        assert_eq!(table.all().len(), 5);
+        assert_eq!(table.all().len(), 6);
     }
 
     /// `disabled_builtins` is the one place a user already looks to remove a
@@ -823,7 +832,7 @@ mod tests {
         let table = resolve_with_ai(&config).0;
 
         assert!(table.get("w").is_none());
-        assert_eq!(table.all().len(), 5);
+        assert_eq!(table.all().len(), 6);
     }
 
     #[test]
@@ -855,7 +864,23 @@ mod tests {
             table.get("w").expect("w prefix").kind,
             PrefixKind::Command { .. }
         ));
-        assert_eq!(table.all().len(), 6);
+        assert_eq!(table.all().len(), 7);
+    }
+
+    /// `ssh` is three characters, so it only reaches its prefix if the table is
+    /// searched longest key first — a shorter user prefix such as `s` would
+    /// otherwise swallow it.
+    #[test]
+    fn the_ssh_prefix_is_a_builtin_that_can_be_disabled() {
+        let table = resolve_with_ai(&SpotlightConfig::default()).0;
+        assert_eq!(table.get("ssh").expect("ssh prefix").kind, PrefixKind::Ssh);
+
+        let table = resolve_with_ai(&SpotlightConfig {
+            disabled_builtins: vec!["ssh".to_string()],
+            ..Default::default()
+        })
+        .0;
+        assert!(table.get("ssh").is_none());
     }
 
     #[test]

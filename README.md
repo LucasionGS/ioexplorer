@@ -106,6 +106,7 @@ With no prefix, spotlight searches installed applications, your XDG user folders
 | `=` | Evaluate an expression; `Enter` copies the result |
 | `/` | Search your folders and bookmarks by filename |
 | `w` | Switch to an open window |
+| `ssh` | Connect to a host from `~/.ssh/config` |
 | `?` | List every available prefix |
 
 Add your own prefixes in `~/.config/ioexplorer/config.toml`. `{query}` is substituted shell-quoted, and `{query_url}` percent-encoded for use inside a URL. A template with neither placeholder gets the quoted query appended.
@@ -115,7 +116,7 @@ Add your own prefixes in `~/.config/ioexplorer/config.toml`. `{query}` is substi
 width = 640          # card width in pixels
 top_ratio = 0.22     # distance from the top of the screen, as a fraction of its height
 result_limit = 12
-disabled_builtins = []   # e.g. ["/"] to drop the file search prefix
+disabled_builtins = []   # e.g. ["/"] to drop the file search prefix, ["ssh"] the SSH one
 
 [spotlight.windows]
 enabled = true       # the window switcher
@@ -157,6 +158,18 @@ Each row names the app, its workspace, and its output, and marks XWayland client
 There is no generic Wayland path, and that is a protocol limitation rather than an omission: a Wayland client cannot see or focus another client's windows at all. Doing it without a compositor-specific interface means implementing `wlr-foreign-toplevel-management-v1` or `ext-foreign-toplevel-list-v1` as a raw Wayland client.
 
 The preview is the app's icon rather than a live thumbnail of the window. A screenshot is not obtainable here: output capture (`grim`) would include spotlight's own full-screen overlay in the shot, and windows on inactive workspaces are not being rendered at all. Real per-window thumbnails need `hyprland-toplevel-export-v1`, which is a Wayland protocol client rather than a command-line call.
+
+### SSH connections
+
+`ssh` lists the hosts in `~/.ssh/config`, and `Enter` opens your terminal on the connection. Typing after the prefix fuzzy-matches the alias, the hostname, the user and the `ProxyJump`, so `ssh prod` reaches `prod-db-primary`. `Ctrl+Enter` copies the `ssh` command instead of running it, and `Tab` completes the selected alias.
+
+The first row is always the host you typed, so a machine that is not in your config is one line away — `ssh 10.0.0.5` or `ssh deploy@build.example.com` connects directly. It steps aside when the text names a configured host, since that entry already goes there. Hosts you connect to often rise to the top of the list, through the same launch history the rest of spotlight uses.
+
+The preview panel shows the entry as the file declares it: every keyword in the block, then the file it came from — which matters once `Include` is involved and the answer to "where is this host defined" is no longer obvious.
+
+The config is read the way ssh reads it — keywords are case-insensitive, `=` may stand in for the space, `Include` is spliced in where it appears (globs in the final path component included), and the first value for a keyword wins. Two things are deliberately not done, because both depend on the connection being made rather than on the file: `Match` blocks are not evaluated, and the defaults in a `Host *` block are not folded into every entry. Wildcard and negated patterns are not listed either — `Host web-*` is a rule about other hosts, not a host you can connect to. Nothing here decides what ssh will do; the alias is handed to `ssh`, which resolves the configuration properly.
+
+An ad-hoc destination is checked before it is used: no leading `-`, no whitespace, and only the characters a destination is made of. That is not tidiness — ssh reads a leading dash as an option, and `-oProxyCommand=…` would run an arbitrary command, which shell quoting does nothing about.
 
 ### Custom search results
 

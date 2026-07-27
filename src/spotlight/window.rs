@@ -32,6 +32,7 @@ use crate::{
         preview::{self, Preview, PreviewEvent, PreviewKind, PreviewLoader},
         query::{self, Query},
         results::{self, Activation, SpotlightResult},
+        ssh::{self, SshHost},
         windows::{self, OpenWindow, WindowSource},
     },
 };
@@ -231,6 +232,14 @@ pub struct SpotlightWindow {
     /// Why the last compositor query failed, so the prefix can say so instead of
     /// looking like it is still waiting.
     windows_error: RefCell<Option<String>>,
+    /// The hosts read from the user's SSH config, held for as long as the window
+    /// stays open so typing filters a snapshot instead of re-reading the file.
+    ssh_hosts: RefCell<Vec<SshHost>>,
+    /// Whether the config has been read since the window was last shown.
+    ssh_loaded: Cell<bool>,
+    /// Why reading it failed, so the prefix can say so rather than looking like
+    /// an empty config.
+    ssh_error: RefCell<Option<String>>,
     custom_results: CustomResultsRunner,
     custom_rows: RefCell<Vec<CustomResult>>,
     custom_error: RefCell<Option<String>>,
@@ -557,6 +566,9 @@ impl SpotlightWindow {
             windows_requested: Cell::new(None),
             windows_loaded: Cell::new(false),
             windows_error: RefCell::new(None),
+            ssh_hosts: RefCell::new(Vec::new()),
+            ssh_loaded: Cell::new(false),
+            ssh_error: RefCell::new(None),
             custom_results: CustomResultsRunner::new(),
             custom_rows: RefCell::new(Vec::new()),
             custom_error: RefCell::new(None),
@@ -872,6 +884,11 @@ impl SpotlightWindow {
                         self.cancel_async_results();
                         self.ensure_windows();
                         self.window_rows(prefix, arg, limit)
+                    }
+                    PrefixKind::Ssh => {
+                        self.cancel_async_results();
+                        self.ensure_ssh_hosts();
+                        self.ssh_rows(prefix, arg, limit)
                     }
                     PrefixKind::CustomResults {
                         command,
@@ -1332,6 +1349,68 @@ impl SpotlightWindow {
             true => vec![results::windows_notice(prefix, "No window matches")],
             false => rows,
         }
+    }
+
+    // -- ssh hosts ---------------------------------------------------------
+
+    /// Reads the SSH config once per time the window is shown.
+    ///
+    /// Inline rather than on a worker thread, unlike the window list: this is a
+    /// few kilobytes from local disk with no subprocess that could hang, and the
+    /// result is reused for every keystroke that follows.
+    fn ensure_ssh_hosts(&self) {
+        if self.ssh_loaded.get() {
+            return;
+        }
+        // Set first, so a config that fails to read is not retried on every
+        // keystroke for as long as the prefix is open.
+        self.ssh_loaded.set(true);
+
+        match ssh::load() {
+            Ok(hosts) => {
+                *self.ssh_hosts.borrow_mut() = hosts;
+                *self.ssh_error.borrow_mut() = None;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "failed to read the ssh config");
+                self.ssh_hosts.borrow_mut().clear();
+                *self.ssh_error.borrow_mut() = Some(error);
+            }
+        }
+    }
+
+    /// Forgets the host list, so the next `ensure_ssh_hosts` really reads it.
+    fn invalidate_ssh_hosts(&self) {
+        self.ssh_loaded.set(false);
+    }
+
+    /// The rows for the ssh prefix, or one row explaining why there are none.
+    fn ssh_rows(&self, prefix: &Prefix, arg: &str, limit: usize) -> Vec<SpotlightResult> {
+        if let Some(error) = self.ssh_error.borrow().as_deref() {
+            return vec![results::ssh_notice(prefix, error)];
+        }
+
+        let hosts = self.ssh_hosts.borrow();
+        let rows = results::ssh_results(
+            prefix,
+            arg,
+            &hosts,
+            &self.frecency.borrow(),
+            frecency::now_secs(),
+            limit,
+        );
+        if !rows.is_empty() {
+            return rows;
+        }
+
+        // Nothing matched, which means one of two quite different things: an
+        // empty config, or a query that no host matches and that ssh could not
+        // be handed either.
+        let note = match hosts.is_empty() {
+            true => "No hosts in ~/.ssh/config · type a host to connect",
+            false => "No host matches · type a host to connect",
+        };
+        vec![results::ssh_notice(prefix, note)]
     }
 
     // -- custom results ----------------------------------------------------
@@ -2489,8 +2568,10 @@ impl SpotlightWindow {
     pub fn show(self: &Rc<Self>) {
         self.entry.set_text("");
         // Windows open and close while the launcher is hidden, so whatever was
-        // cached from the previous session says nothing about this one.
+        // cached from the previous session says nothing about this one. The same
+        // goes for the ssh config, which the user may have just been editing.
         self.invalidate_windows();
+        self.invalidate_ssh_hosts();
         self.rebuild();
         self.reflow();
         self.window.present();
