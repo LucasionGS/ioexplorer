@@ -33,4 +33,12 @@ package() {
   install -Dm644 data/org.freedesktop.impl.portal.desktop.ioexplorer.service "$pkgdir/usr/share/dbus-1/services/org.freedesktop.impl.portal.desktop.ioexplorer.service"
   install -Dm644 data/org.freedesktop.FileManager1.service "$pkgdir/usr/share/doc/$pkgname/org.freedesktop.FileManager1.service"
   install -Dm644 data/ioexplorer-portals.conf "$pkgdir/usr/share/doc/$pkgname/ioexplorer-portals.conf"
+  install -Dm644 data/ioexplorer-spotlight.service "$pkgdir/usr/lib/systemd/user/ioexplorer-spotlight.service"
+}
+
+post_install() {
+  echo "------------------------------------------------------------"
+  echo "Enable the Spotlight server with:"
+  echo "  systemctl --user enable --now ioexplorer-spotlight.service"
+  echo "------------------------------------------------------------"
 }

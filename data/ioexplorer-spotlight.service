@@ -1,0 +1,14 @@
+[Unit]
+Description=IoExplorer Spotlight Server
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ioexplorer-spotlight --server
+Restart=on-failure
+RestartSec=2
+ExecReload=/bin/kill -HUP $MAINPID
+
+[Install]
+WantedBy=default.target
