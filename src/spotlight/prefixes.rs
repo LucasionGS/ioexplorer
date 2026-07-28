@@ -3,8 +3,11 @@
 
 use std::time::Duration;
 
-use crate::config::{SpotlightConfig, SpotlightPrefixConfig, SpotlightWindowsConfig};
+use crate::config::{
+    SpotlightConfig, SpotlightPrefixConfig, SpotlightVpnConfig, SpotlightWindowsConfig,
+};
 use crate::spotlight::ai::{self, AiProvider};
+use crate::spotlight::vpn;
 
 /// Default quiet-typing window before a `get_results` command runs.
 const DEFAULT_RESULTS_DELAY: f64 = 0.5;
@@ -43,6 +46,12 @@ pub enum PrefixKind {
     Windows,
     /// List the hosts in the user's SSH config and connect to one.
     Ssh,
+    /// Report the VPN, and connect it or disconnect it.
+    ///
+    /// Carries the provider by value: it is a `Copy` enum, and holding it here
+    /// means the prefix is self-contained — whatever the table says is what the
+    /// rows drive, with no second lookup that could disagree.
+    Vpn(vpn::Provider),
     /// Ask a user-configured command for the rows to show, then run `action`
     /// on whichever one is picked.
     CustomResults {
@@ -151,10 +160,18 @@ fn builtins() -> Vec<Prefix> {
 /// Merges built-in prefixes, the user's command prefixes and the AI providers
 /// into one table, plus the provider list the `Ai(usize)` prefixes index into.
 ///
-/// Stages apply in order — builtins, the window switcher, user command prefixes,
-/// then AI entries — and each stage replaces or appends, so a later stage wins a
-/// key collision.
-pub fn resolve_with_ai(config: &SpotlightConfig) -> (PrefixTable, Vec<AiProvider>) {
+/// Stages apply in order — builtins, the window switcher, the VPN, user command
+/// prefixes, then AI entries — and each stage replaces or appends, so a later
+/// stage wins a key collision.
+///
+/// `vpn` is passed in rather than detected here, because detection is a `PATH`
+/// scan: taking it as an argument keeps this function pure over its inputs, so
+/// the table a config produces is the same on every machine. Callers get it from
+/// [`vpn::resolve`].
+pub fn resolve_with_ai(
+    config: &SpotlightConfig,
+    vpn: Option<vpn::Provider>,
+) -> (PrefixTable, Vec<AiProvider>) {
     let mut prefixes = builtins()
         .into_iter()
         .filter(|prefix| !config.disabled_builtins.contains(&prefix.key))
@@ -165,6 +182,17 @@ pub fn resolve_with_ai(config: &SpotlightConfig) -> (PrefixTable, Vec<AiProvider
     // the whole prefix table stays testable; the provider answers with one row
     // saying so, which beats a prefix that silently does not exist.
     if let Some(prefix) = windows_prefix(&config.windows)
+        && !config.disabled_builtins.contains(&prefix.key)
+    {
+        replace_or_append(&mut prefixes, prefix);
+    }
+
+    // Unlike the window switcher this one is absent where it cannot work: a
+    // machine with no VPN client installed has nothing for the prefix to say,
+    // and a prefix that only ever explains its own absence is worse than no
+    // prefix at all.
+    if let Some(provider) = vpn
+        && let Some(prefix) = vpn_prefix(&config.vpn, provider)
         && !config.disabled_builtins.contains(&prefix.key)
     {
         replace_or_append(&mut prefixes, prefix);
@@ -235,6 +263,33 @@ fn windows_prefix(config: &SpotlightWindowsConfig) -> Option<Prefix> {
         description: "Switch to an open window".to_string(),
         icon: "focus-windows-symbolic".to_string(),
         kind: PrefixKind::Windows,
+    })
+}
+
+/// The VPN prefix, or `None` when it is turned off or given an unusable key.
+fn vpn_prefix(config: &SpotlightVpnConfig, provider: vpn::Provider) -> Option<Prefix> {
+    if !config.enabled {
+        return None;
+    }
+
+    let key = config.prefix.trim();
+    if key.is_empty() || key.chars().any(char::is_whitespace) {
+        tracing::warn!(
+            prefix = config.prefix,
+            "ignoring the vpn prefix: it is not a usable key"
+        );
+        return None;
+    }
+
+    Some(Prefix {
+        key: key.to_string(),
+        label: provider.label().to_string(),
+        description: format!(
+            "Connect, disconnect, or pick a {} location",
+            provider.label()
+        ),
+        icon: provider.icon().to_string(),
+        kind: PrefixKind::Vpn(provider),
     })
 }
 
@@ -430,7 +485,7 @@ mod tests {
 
     #[test]
     fn empty_config_yields_every_builtin() {
-        let table = resolve_with_ai(&SpotlightConfig::default()).0;
+        let table = resolve_with_ai(&SpotlightConfig::default(), None).0;
 
         assert_eq!(table.all().len(), 7);
         for key in ["!", ">", "=", "/", "?", "w", "ssh"] {
@@ -445,7 +500,7 @@ mod tests {
             ..Default::default()
         };
 
-        let table = resolve_with_ai(&config).0;
+        let table = resolve_with_ai(&config, None).0;
 
         assert_eq!(table.all().len(), 7);
         assert!(matches!(
@@ -461,7 +516,7 @@ mod tests {
             ..Default::default()
         };
 
-        let table = resolve_with_ai(&config).0;
+        let table = resolve_with_ai(&config, None).0;
 
         assert!(table.get("=").is_none());
         assert_eq!(table.all().len(), 6);
@@ -481,7 +536,7 @@ mod tests {
             ..Default::default()
         };
 
-        let table = resolve_with_ai(&config).0;
+        let table = resolve_with_ai(&config, None).0;
 
         assert_eq!(table.all().len(), 7);
     }
@@ -496,7 +551,7 @@ mod tests {
             ..Default::default()
         };
 
-        let table = resolve_with_ai(&config).0;
+        let table = resolve_with_ai(&config, None).0;
 
         assert_eq!(table.get("x").expect("x prefix").label, "x");
     }
@@ -514,7 +569,7 @@ mod tests {
             ..Default::default()
         };
 
-        let table = resolve_with_ai(&config).0;
+        let table = resolve_with_ai(&config, None).0;
 
         assert_eq!(
             table.get("search").expect("search prefix").kind,
@@ -541,7 +596,7 @@ mod tests {
             ..Default::default()
         };
 
-        let table = resolve_with_ai(&config).0;
+        let table = resolve_with_ai(&config, None).0;
 
         assert!(matches!(
             table.get("img").expect("img prefix").kind,
@@ -600,7 +655,7 @@ mod tests {
             ..Default::default()
         };
 
-        let table = resolve_with_ai(&config).0;
+        let table = resolve_with_ai(&config, None).0;
 
         assert!(matches!(
             table.get("img").expect("img prefix").kind,
@@ -627,7 +682,7 @@ mod tests {
             ..Default::default()
         };
 
-        let table = resolve_with_ai(&config).0;
+        let table = resolve_with_ai(&config, None).0;
 
         assert!(matches!(
             table.get("s").expect("s prefix").kind,
@@ -676,7 +731,7 @@ mod tests {
             ..Default::default()
         };
 
-        let table = resolve_with_ai(&config).0;
+        let table = resolve_with_ai(&config, None).0;
         let keys = table
             .all()
             .iter()
@@ -722,7 +777,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (table, providers) = resolve_with_ai(&config);
+        let (table, providers) = resolve_with_ai(&config, None);
 
         assert_eq!(providers.len(), 2);
         assert_eq!(table.get("ai").expect("ai prefix").kind, PrefixKind::Ai(0));
@@ -738,7 +793,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (table, providers) = resolve_with_ai(&config);
+        let (table, providers) = resolve_with_ai(&config, None);
 
         let PrefixKind::Ai(index) = table.get("long").expect("long prefix").kind else {
             panic!("expected an ai prefix");
@@ -753,7 +808,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (table, _) = resolve_with_ai(&config);
+        let (table, _) = resolve_with_ai(&config, None);
 
         assert_eq!(table.get("=").expect("= prefix").kind, PrefixKind::Ai(0));
         assert_eq!(table.all().len(), 7, "it replaces rather than adds");
@@ -767,14 +822,14 @@ mod tests {
             ..Default::default()
         };
 
-        let (table, _) = resolve_with_ai(&config);
+        let (table, _) = resolve_with_ai(&config, None);
 
         assert_eq!(table.get("g").expect("g prefix").kind, PrefixKind::Ai(0));
     }
 
     #[test]
     fn resolve_still_returns_a_table_without_ai_configured() {
-        let table = resolve_with_ai(&SpotlightConfig::default()).0;
+        let table = resolve_with_ai(&SpotlightConfig::default(), None).0;
 
         assert_eq!(table.all().len(), 7);
         assert!(
@@ -795,7 +850,7 @@ mod tests {
             ..Default::default()
         };
 
-        let table = resolve_with_ai(&config).0;
+        let table = resolve_with_ai(&config, None).0;
 
         assert_eq!(
             table.get("win").expect("win prefix").kind,
@@ -814,7 +869,7 @@ mod tests {
             ..Default::default()
         };
 
-        let table = resolve_with_ai(&config).0;
+        let table = resolve_with_ai(&config, None).0;
 
         assert!(table.get("w").is_none());
         assert_eq!(table.all().len(), 6);
@@ -829,7 +884,7 @@ mod tests {
             ..Default::default()
         };
 
-        let table = resolve_with_ai(&config).0;
+        let table = resolve_with_ai(&config, None).0;
 
         assert!(table.get("w").is_none());
         assert_eq!(table.all().len(), 6);
@@ -858,7 +913,7 @@ mod tests {
             ..Default::default()
         };
 
-        let table = resolve_with_ai(&config).0;
+        let table = resolve_with_ai(&config, None).0;
 
         assert!(matches!(
             table.get("w").expect("w prefix").kind,
@@ -872,15 +927,116 @@ mod tests {
     /// otherwise swallow it.
     #[test]
     fn the_ssh_prefix_is_a_builtin_that_can_be_disabled() {
-        let table = resolve_with_ai(&SpotlightConfig::default()).0;
+        let table = resolve_with_ai(&SpotlightConfig::default(), None).0;
         assert_eq!(table.get("ssh").expect("ssh prefix").kind, PrefixKind::Ssh);
 
-        let table = resolve_with_ai(&SpotlightConfig {
-            disabled_builtins: vec!["ssh".to_string()],
-            ..Default::default()
-        })
+        let table = resolve_with_ai(
+            &SpotlightConfig {
+                disabled_builtins: vec!["ssh".to_string()],
+                ..Default::default()
+            },
+            None,
+        )
         .0;
         assert!(table.get("ssh").is_none());
+    }
+
+    /// The whole point of resolving the provider outside this function: with no
+    /// client installed there is no VPN prefix, whatever the config says.
+    #[test]
+    fn no_installed_client_means_no_vpn_prefix() {
+        let table = resolve_with_ai(&SpotlightConfig::default(), None).0;
+
+        assert!(table.get("vpn").is_none());
+        assert_eq!(table.all().len(), 7);
+    }
+
+    #[test]
+    fn an_installed_client_adds_the_vpn_prefix() {
+        let table = resolve_with_ai(&SpotlightConfig::default(), Some(vpn::Provider::Windscribe)).0;
+
+        let prefix = table.get("vpn").expect("vpn prefix");
+        assert_eq!(prefix.kind, PrefixKind::Vpn(vpn::Provider::Windscribe));
+        assert_eq!(prefix.label, "Windscribe");
+        assert_eq!(table.all().len(), 8);
+    }
+
+    #[test]
+    fn the_vpn_prefix_can_be_moved_turned_off_and_disabled() {
+        let moved = SpotlightConfig {
+            vpn: crate::config::SpotlightVpnConfig {
+                prefix: "wg".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let table = resolve_with_ai(&moved, Some(vpn::Provider::Windscribe)).0;
+        assert!(table.get("wg").is_some());
+        assert!(
+            table.get("vpn").is_none(),
+            "the default key is not also kept"
+        );
+
+        let off = SpotlightConfig {
+            vpn: crate::config::SpotlightVpnConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(
+            resolve_with_ai(&off, Some(vpn::Provider::Windscribe))
+                .0
+                .get("vpn")
+                .is_none()
+        );
+
+        // `disabled_builtins` is where a user already looks to drop a built-in
+        // prefix, so it has to work for this one too.
+        let disabled = SpotlightConfig {
+            disabled_builtins: vec!["vpn".to_string()],
+            ..Default::default()
+        };
+        assert!(
+            resolve_with_ai(&disabled, Some(vpn::Provider::Windscribe))
+                .0
+                .get("vpn")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn an_unusable_vpn_prefix_key_is_refused() {
+        for key in ["", "   ", "a b"] {
+            assert!(
+                vpn_prefix(
+                    &crate::config::SpotlightVpnConfig {
+                        prefix: key.to_string(),
+                        ..Default::default()
+                    },
+                    vpn::Provider::Windscribe,
+                )
+                .is_none(),
+                "{key:?} must not become a prefix"
+            );
+        }
+    }
+
+    /// Same precedence as every other collision: a user prefix is applied later,
+    /// so it wins the key.
+    #[test]
+    fn a_user_prefix_overrides_the_vpn_prefix() {
+        let config = SpotlightConfig {
+            prefixes: vec![user_prefix("vpn", "echo")],
+            ..Default::default()
+        };
+
+        let table = resolve_with_ai(&config, Some(vpn::Provider::Windscribe)).0;
+
+        assert!(matches!(
+            table.get("vpn").expect("vpn prefix").kind,
+            PrefixKind::Command { .. }
+        ));
     }
 
     #[test]

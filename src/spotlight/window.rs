@@ -33,6 +33,7 @@ use crate::{
         query::{self, Query},
         results::{self, Activation, SpotlightResult},
         ssh::{self, SshHost},
+        vpn::{self, VpnSource, VpnState},
         windows::{self, OpenWindow, WindowSource},
     },
 };
@@ -111,6 +112,10 @@ const PREVIEW_DEBOUNCE: Duration = Duration::from_millis(120);
 /// snapshot rather than spawning a compositor query per keystroke, short enough
 /// that a window opened a moment ago is still found.
 const WINDOW_LIST_TTL: Duration = Duration::from_millis(1_500);
+/// How long the VPN's state stays fresh. Longer than the window list: a
+/// connection changes on the scale of seconds, and the query is two subprocesses
+/// rather than one socket round-trip.
+const VPN_STATE_TTL: Duration = Duration::from_secs(5);
 /// Cap on `pause_turn` resumes. The server-side tool loop hit its own iteration
 /// limit and wants to continue; this bounds how often we let it.
 const MAX_PAUSE_RESUMES: usize = 5;
@@ -240,6 +245,17 @@ pub struct SpotlightWindow {
     /// Why reading it failed, so the prefix can say so rather than looking like
     /// an empty config.
     ssh_error: RefCell<Option<String>>,
+    /// Background source of the VPN's state.
+    vpn_source: VpnSource,
+    /// What the VPN client last reported. Kept between keystrokes so typing
+    /// filters a snapshot of the location list rather than re-running the client.
+    vpn_state: RefCell<Option<VpnState>>,
+    /// When that state was *asked for*, so a slow client cannot have a second
+    /// request pile up behind the first.
+    vpn_requested: Cell<Option<Instant>>,
+    /// Why the last query failed, so the prefix can say so instead of looking
+    /// like it is still asking.
+    vpn_error: RefCell<Option<String>>,
     custom_results: CustomResultsRunner,
     custom_rows: RefCell<Vec<CustomResult>>,
     custom_error: RefCell<Option<String>>,
@@ -569,6 +585,10 @@ impl SpotlightWindow {
             ssh_hosts: RefCell::new(Vec::new()),
             ssh_loaded: Cell::new(false),
             ssh_error: RefCell::new(None),
+            vpn_source: VpnSource::new(),
+            vpn_state: RefCell::new(None),
+            vpn_requested: Cell::new(None),
+            vpn_error: RefCell::new(None),
             custom_results: CustomResultsRunner::new(),
             custom_rows: RefCell::new(Vec::new()),
             custom_error: RefCell::new(None),
@@ -743,6 +763,7 @@ impl SpotlightWindow {
             }
             this.drain_file_search();
             this.drain_windows();
+            this.drain_vpn();
             this.drain_custom_results();
             this.drain_previews();
             this.drain_ai();
@@ -889,6 +910,11 @@ impl SpotlightWindow {
                         self.cancel_async_results();
                         self.ensure_ssh_hosts();
                         self.ssh_rows(prefix, arg, limit)
+                    }
+                    PrefixKind::Vpn(provider) => {
+                        self.cancel_async_results();
+                        self.ensure_vpn(*provider);
+                        self.vpn_rows(prefix, arg, *provider, limit)
                     }
                     PrefixKind::CustomResults {
                         command,
@@ -1411,6 +1437,96 @@ impl SpotlightWindow {
             false => "No host matches · type a host to connect",
         };
         vec![results::ssh_notice(prefix, note)]
+    }
+
+    // -- vpn ---------------------------------------------------------------
+
+    /// Asks the VPN client for its state unless a fresh answer is already in
+    /// hand. Cheap enough to call from `rebuild`, which runs on every keystroke.
+    fn ensure_vpn(&self, provider: vpn::Provider) {
+        let fresh = self
+            .vpn_requested
+            .get()
+            .is_some_and(|at| at.elapsed() < VPN_STATE_TTL);
+        if fresh {
+            return;
+        }
+
+        // Stamped before the request, not after the reply, so a slow client does
+        // not collect one query per keystroke.
+        self.vpn_requested.set(Some(Instant::now()));
+        self.vpn_source.refresh(provider);
+    }
+
+    /// Forgets the cached state, so the next `ensure_vpn` really asks.
+    fn invalidate_vpn(&self) {
+        self.vpn_requested.set(None);
+    }
+
+    fn drain_vpn(self: &Rc<Self>) {
+        let Some(reply) = self.vpn_source.drain() else {
+            return;
+        };
+
+        match reply {
+            Ok(state) => {
+                *self.vpn_state.borrow_mut() = Some(state);
+                *self.vpn_error.borrow_mut() = None;
+            }
+            // The previous state described a connection we can no longer
+            // confirm, so keeping it on screen would claim something untrue
+            // about the user's traffic.
+            Err(error) => {
+                *self.vpn_state.borrow_mut() = None;
+                *self.vpn_error.borrow_mut() = Some(error);
+            }
+        }
+        self.rebuild();
+    }
+
+    /// The rows for the VPN prefix, or one row explaining why there are none.
+    fn vpn_rows(
+        &self,
+        prefix: &Prefix,
+        arg: &str,
+        provider: vpn::Provider,
+        limit: usize,
+    ) -> Vec<SpotlightResult> {
+        if let Some(error) = self.vpn_error.borrow().as_deref() {
+            return vec![results::vpn_notice(prefix, error)];
+        }
+
+        let state = self.vpn_state.borrow();
+        let Some(state) = state.as_ref() else {
+            return vec![results::vpn_notice(
+                prefix,
+                &format!("Asking {}…", provider.label()),
+            )];
+        };
+
+        let rows = results::vpn_results(
+            prefix,
+            arg,
+            provider,
+            state,
+            &self.frecency.borrow(),
+            frecency::now_secs(),
+            limit,
+        );
+        if !rows.is_empty() {
+            return rows;
+        }
+
+        // The action row always matches an empty query, so an empty list means a
+        // query that matched nothing — unless the client listed no locations at
+        // all, which for every provider so far means there is no session to list
+        // them for.
+        let note = match state.locations.is_empty() {
+            true if !state.status.logged_in => "Log in to your VPN client to pick a location",
+            true => "The client listed no locations",
+            false => "No location matches",
+        };
+        vec![results::vpn_notice(prefix, note)]
     }
 
     // -- custom results ----------------------------------------------------
@@ -2572,6 +2688,9 @@ impl SpotlightWindow {
         // goes for the ssh config, which the user may have just been editing.
         self.invalidate_windows();
         self.invalidate_ssh_hosts();
+        // And the VPN may have been connected or dropped since — including by
+        // the last row this launcher activated.
+        self.invalidate_vpn();
         self.rebuild();
         self.reflow();
         self.window.present();

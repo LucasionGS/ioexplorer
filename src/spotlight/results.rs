@@ -21,6 +21,7 @@ use crate::{
         },
         preview::Preview,
         ssh::{self, SshHost},
+        vpn,
         windows::OpenWindow,
     },
 };
@@ -324,6 +325,7 @@ pub fn prefixed_results(
         PrefixKind::FileSearch => Vec::new(), // filled asynchronously by the walker
         PrefixKind::Windows => Vec::new(),    // filled asynchronously by the compositor query
         PrefixKind::Ssh => Vec::new(),        // filled by the window from the ssh config it loaded
+        PrefixKind::Vpn(_) => Vec::new(),     // filled asynchronously by the vpn client
         PrefixKind::CustomResults { .. } => Vec::new(), // filled asynchronously by the runner
         PrefixKind::Command { command, terminal } => {
             command_results(prefix, command, *terminal, arg)
@@ -488,6 +490,185 @@ fn window_caption(window: &OpenWindow, app_name: &str) -> String {
 
 /// The row shown instead of a window list when there is nothing to list.
 pub fn windows_notice(prefix: &Prefix, note: &str) -> SpotlightResult {
+    SpotlightResult::new(
+        prefix.label.clone(),
+        note,
+        IconRef::from_icon_name(prefix.icon.clone()),
+    )
+}
+
+// -- vpn -------------------------------------------------------------------
+
+/// Artwork for the row that connects, and for a location row.
+const VPN_CONNECT_ICON: &str = "network-vpn-symbolic";
+/// Artwork for the row that disconnects, and for the disconnected state.
+const VPN_DISCONNECT_ICON: &str = "network-vpn-disconnected-symbolic";
+
+/// Builds the rows for the VPN prefix: the action the current state calls for,
+/// then the locations that match the query.
+///
+/// The action row is pinned rather than scored on an empty query — it is the one
+/// row that says what the VPN is doing right now, and burying it under two
+/// hundred locations would hide the answer to the question the prefix is usually
+/// opened to ask. Once the user types, it competes like everything else, so
+/// searching for a city does not keep an unrelated Disconnect at the top.
+pub fn vpn_results(
+    prefix: &Prefix,
+    arg: &str,
+    provider: vpn::Provider,
+    state: &vpn::VpnState,
+    frecency: &Frecency,
+    now_secs: u64,
+    limit: usize,
+) -> Vec<SpotlightResult> {
+    let query = arg.trim();
+    let mut results = Vec::new();
+
+    for location in &state.locations {
+        let Some(found) = fuzzy::match_fields(
+            query,
+            &[
+                Field::new(location.name.as_str(), 100),
+                Field::new(location.nickname.as_str(), 80),
+                Field::new(location.region.as_str(), 60),
+            ],
+        ) else {
+            continue;
+        };
+
+        let key = format!("vpn:{}:{}", provider.id(), location.target);
+        let mut row = vpn_location_row(prefix, provider, location, state);
+        row.score = found.score + frecency.bonus(&key, now_secs, FRECENCY_MAX_BONUS);
+        row.frecency_key = Some(key);
+        results.push(row);
+    }
+
+    sort_results(&mut results);
+
+    let action = vpn_action_row(provider, state);
+    match query.is_empty() {
+        true => {
+            results.truncate(limit.saturating_sub(1));
+            results.insert(0, action);
+        }
+        false => {
+            if let Some(found) = fuzzy::match_fields(
+                query,
+                &[
+                    Field::new(action.title.as_str(), 100),
+                    Field::new(action.subtitle.as_str(), 50),
+                ],
+            ) {
+                let mut action = action;
+                action.score = found.score;
+                results.push(action);
+                sort_results(&mut results);
+            }
+            results.truncate(limit);
+        }
+    }
+    results
+}
+
+/// The row for what the VPN's current state calls for: disconnect when it is up,
+/// connect to the client's own choice of location when it is not.
+fn vpn_action_row(provider: vpn::Provider, state: &vpn::VpnState) -> SpotlightResult {
+    let status = &state.status;
+    let connected = status.connected || status.connecting;
+
+    let (title, icon, line) = match connected {
+        true => (
+            "Disconnect".to_string(),
+            VPN_DISCONNECT_ICON,
+            provider.disconnect_line(),
+        ),
+        false => (
+            "Connect".to_string(),
+            VPN_CONNECT_ICON,
+            provider.connect_best_line(),
+        ),
+    };
+
+    let subtitle = match connected {
+        true => status.summary(),
+        false => format!("{} · best location", status.summary()),
+    };
+
+    let mut row = SpotlightResult::new(title, subtitle, IconRef::from_icon_name(icon));
+    row.primary = Activation::RunShell(line.clone());
+    // Connecting takes several seconds and prints as it goes, so the terminal is
+    // not a second way to do the same thing — it is the way to watch it happen.
+    row.secondary = Some(Activation::RunInTerminal(line));
+    row.preview = Some(Preview::icon(icon, vpn_caption(provider, state)));
+    row
+}
+
+fn vpn_location_row(
+    prefix: &Prefix,
+    provider: vpn::Provider,
+    location: &vpn::Location,
+    state: &vpn::VpnState,
+) -> SpotlightResult {
+    let line = provider.connect_line(&location.target);
+    let current = state.status.connected
+        && state
+            .status
+            .location
+            .as_deref()
+            .is_some_and(|at| at == location.nickname || at == location.name);
+
+    let mut subtitle = location.summary();
+    if current {
+        subtitle = match subtitle.is_empty() {
+            true => "Connected".to_string(),
+            false => format!("{subtitle} · connected"),
+        };
+    }
+
+    let icon = match location.best {
+        true => VPN_CONNECT_ICON,
+        false => "network-workgroup-symbolic",
+    };
+    let mut row = SpotlightResult::new(
+        location.name.clone(),
+        subtitle,
+        IconRef::from_icon_name(icon),
+    );
+    row.primary = Activation::RunShell(line.clone());
+    row.secondary = Some(Activation::RunInTerminal(line.clone()));
+    row.preview = Some(Preview::icon(
+        icon,
+        vpn_location_caption(location, state, &line),
+    ));
+    row.completion = Some(format!("{} {}", prefix.key, location.name));
+    row
+}
+
+/// The preview under the action row: the client's own status text, unedited.
+fn vpn_caption(provider: vpn::Provider, state: &vpn::VpnState) -> String {
+    let details = state.status.details.trim();
+    match details.is_empty() {
+        true => format!("{}\n\n{}", provider.label(), state.status.summary()),
+        false => format!("{}\n\n{details}", provider.label()),
+    }
+}
+
+fn vpn_location_caption(location: &vpn::Location, state: &vpn::VpnState, line: &str) -> String {
+    let mut lines = vec![location.name.clone()];
+
+    let summary = location.summary();
+    if !summary.is_empty() {
+        lines.push(summary);
+    }
+    lines.push(String::new());
+    lines.push(state.status.summary());
+    lines.push(String::new());
+    lines.push(line.to_string());
+    lines.join("\n")
+}
+
+/// The row shown instead of a VPN list when there is nothing to list.
+pub fn vpn_notice(prefix: &Prefix, note: &str) -> SpotlightResult {
     SpotlightResult::new(
         prefix.label.clone(),
         note,
@@ -876,7 +1057,7 @@ mod tests {
     use crate::spotlight::{prefixes, preview::PreviewKind};
 
     fn table() -> PrefixTable {
-        prefixes::resolve_with_ai(&SpotlightConfig::default()).0
+        prefixes::resolve_with_ai(&SpotlightConfig::default(), None).0
     }
 
     #[test]
@@ -1116,6 +1297,171 @@ mod tests {
                 .any(|row| matches!(row.primary, Activation::FocusWindow(_))),
             "no window rows on an empty query"
         );
+    }
+
+    // -- vpn ---------------------------------------------------------------
+
+    fn vpn_prefix() -> Prefix {
+        prefixes::resolve_with_ai(&SpotlightConfig::default(), Some(vpn::Provider::Windscribe))
+            .0
+            .get("vpn")
+            .expect("vpn prefix")
+            .clone()
+    }
+
+    fn vpn_location(name: &str, region: &str, nickname: &str) -> vpn::Location {
+        vpn::Location {
+            target: nickname.to_string(),
+            name: name.to_string(),
+            region: region.to_string(),
+            nickname: nickname.to_string(),
+            speed: "10 Gbps".to_string(),
+            disabled: false,
+            best: false,
+        }
+    }
+
+    fn vpn_state(connected: bool, at: Option<&str>) -> vpn::VpnState {
+        vpn::VpnState {
+            status: vpn::Status {
+                connected,
+                connecting: false,
+                logged_in: true,
+                location: at.map(str::to_string),
+                details: "Connect state: whatever the client said".to_string(),
+            },
+            locations: vec![
+                vpn_location("New York", "US East", "Big Apple"),
+                vpn_location("Toronto", "Canada East", "Maple"),
+            ],
+        }
+    }
+
+    fn vpn_rows(arg: &str, state: &vpn::VpnState, limit: usize) -> Vec<SpotlightResult> {
+        vpn_results(
+            &vpn_prefix(),
+            arg,
+            vpn::Provider::Windscribe,
+            state,
+            &Frecency::default(),
+            0,
+            limit,
+        )
+    }
+
+    /// The state of the connection is the question the prefix is usually opened
+    /// to answer, so on an empty query it leads whatever else is listed.
+    #[test]
+    fn the_action_row_leads_an_unfiltered_list() {
+        let rows = vpn_rows("", &vpn_state(false, None), 10);
+
+        assert_eq!(rows[0].title, "Connect");
+        assert_eq!(rows[0].subtitle, "Disconnected · best location");
+        assert_eq!(
+            rows[0].primary,
+            Activation::RunShell("windscribe-cli connect 'best'".to_string())
+        );
+        // Connecting prints as it goes, so the terminal is a way to watch it.
+        assert_eq!(
+            rows[0].secondary,
+            Some(Activation::RunInTerminal(
+                "windscribe-cli connect 'best'".to_string()
+            ))
+        );
+        assert_eq!(rows.len(), 3, "and then every location");
+    }
+
+    #[test]
+    fn a_connected_client_is_offered_the_way_out() {
+        let rows = vpn_rows("", &vpn_state(true, Some("Big Apple")), 10);
+
+        assert_eq!(rows[0].title, "Disconnect");
+        assert_eq!(rows[0].subtitle, "Connected · Big Apple");
+        assert_eq!(
+            rows[0].primary,
+            Activation::RunShell("windscribe-cli disconnect".to_string())
+        );
+    }
+
+    #[test]
+    fn a_location_row_connects_to_that_location() {
+        let rows = vpn_rows("toronto", &vpn_state(false, None), 10);
+
+        assert_eq!(rows[0].title, "Toronto");
+        assert_eq!(rows[0].subtitle, "Canada East · Maple · 10 Gbps");
+        assert_eq!(
+            rows[0].primary,
+            Activation::RunShell("windscribe-cli connect 'Maple'".to_string())
+        );
+        assert_eq!(rows[0].completion.as_deref(), Some("vpn Toronto"));
+    }
+
+    /// A city can be reached by its region or by the server's own name, which is
+    /// what the user sees in the client's own list.
+    #[test]
+    fn locations_match_on_region_and_nickname_too() {
+        let state = vpn_state(false, None);
+
+        for query in ["big apple", "us east", "new york"] {
+            let rows = vpn_rows(query, &state, 10);
+            assert_eq!(rows[0].title, "New York", "{query}");
+        }
+    }
+
+    /// Once the user types, the action row competes like everything else —
+    /// searching for a city must not keep an unrelated Disconnect at the top.
+    #[test]
+    fn a_query_does_not_pin_the_action_row() {
+        let rows = vpn_rows("toronto", &vpn_state(true, None), 10);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title, "Toronto");
+    }
+
+    /// But it is still reachable by name, which is how a connection is ended
+    /// without scrolling past two hundred locations.
+    #[test]
+    fn the_action_row_can_be_searched_for() {
+        let rows = vpn_rows("disc", &vpn_state(true, None), 10);
+
+        assert_eq!(rows[0].title, "Disconnect");
+    }
+
+    #[test]
+    fn the_row_the_client_is_connected_to_says_so() {
+        let rows = vpn_rows("new york", &vpn_state(true, Some("Big Apple")), 10);
+
+        assert_eq!(
+            rows[0].subtitle,
+            "US East · Big Apple · 10 Gbps · connected"
+        );
+    }
+
+    #[test]
+    fn the_action_row_previews_the_clients_own_status_text() {
+        let rows = vpn_rows("", &vpn_state(false, None), 10);
+        let preview = rows[0].preview.as_ref().expect("a preview");
+
+        assert_eq!(preview.kind, PreviewKind::Icon);
+        assert!(
+            preview
+                .caption
+                .as_deref()
+                .expect("a caption")
+                .contains("whatever the client said"),
+            "{preview:?}"
+        );
+    }
+
+    #[test]
+    fn the_limit_holds_with_the_action_row_included() {
+        let mut state = vpn_state(false, None);
+        state.locations = (0..50)
+            .map(|index| vpn_location(&format!("City {index}"), "Region", "Nickname"))
+            .collect();
+
+        assert_eq!(vpn_rows("", &state, 5).len(), 5);
+        assert_eq!(vpn_rows("city", &state, 5).len(), 5);
     }
 
     fn ssh_prefix() -> Prefix {

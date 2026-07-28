@@ -107,6 +107,7 @@ With no prefix, spotlight searches installed applications, your XDG user folders
 | `/` | Search your folders and bookmarks by filename |
 | `w` | Switch to an open window |
 | `ssh` | Connect to a host from `~/.ssh/config` |
+| `vpn` | Connect, disconnect, or pick a location (only with a supported VPN client installed) |
 | `?` | List every available prefix |
 
 Add your own prefixes in `~/.config/ioexplorer/config.toml`. `{query}` is substituted shell-quoted, and `{query_url}` percent-encoded for use inside a URL. A template with neither placeholder gets the quoted query appended.
@@ -122,6 +123,10 @@ disabled_builtins = []   # e.g. ["/"] to drop the file search prefix, ["ssh"] th
 enabled = true       # the window switcher
 prefix = "w"
 in_search = true     # also offer open windows on an unprefixed query
+
+[spotlight.vpn]
+enabled = true       # the VPN prefix, when a supported client is installed
+prefix = "vpn"
 
 [[spotlight.prefixes]]
 prefix = "g"
@@ -171,6 +176,27 @@ The config is read the way ssh reads it — keywords are case-insensitive, `=` m
 
 An ad-hoc destination is checked before it is used: no leading `-`, no whitespace, and only the characters a destination is made of. That is not tidiness — ssh reads a leading dash as an option, and `-oProxyCommand=…` would run an arbitrary command, which shell quoting does nothing about.
 
+### VPN
+
+`vpn` reports your VPN and drives it. The first row is whatever the current state calls for — `Connect` to the best location when it is down, `Disconnect` when it is up — with the client's own status line underneath and its full reply in the preview panel. Every location the client offers follows, fuzzy-matched on the city, the region and the server's own name, so `vpn tokyo` and `vpn us east` both reach the right rows. `Enter` runs the change in the background; `Ctrl+Enter` runs it in a terminal, which is worth it for a connect that takes a few seconds and prints as it goes. Locations you pick often rise to the top through the same launch history as everything else.
+
+The prefix only exists when a supported client is installed — no VPN on the machine means no VPN prefix, rather than one that explains its own uselessness. Detection is a `PATH` lookup for each provider's client:
+
+| Provider | Client | Status |
+| --- | --- | --- |
+| `windscribe` | `windscribe-cli` | Supported |
+
+```toml
+[spotlight.vpn]
+enabled = true          # the prefix
+prefix = "vpn"
+provider = "windscribe" # optional; detected from what is installed when unset
+```
+
+Naming a `provider` pins the choice for a machine with more than one client installed, or one whose client detection would not have picked. A name no provider answers to is refused and logged rather than quietly falling back to detection — the fallback is the one outcome that was not asked for.
+
+Neither reply is a machine format: the client has no JSON mode, so the status is read as `Key: value` pairs and a location line is split from its ends inwards. That parsing is written to degrade rather than break — a field the client stops printing costs that field alone, and the status text is kept verbatim for the preview, so anything not interpreted is still in front of you. Both queries run on a worker thread under a five-second deadline, because a VPN client talks to a background daemon and a daemon that stops answering leaves the client waiting rather than exiting.
+
 ### Custom search results
 
 A prefix can also produce its own list of rows. Give it `get_results` instead of `command`, and it runs that command with the query, reads the rows from its stdout, and shows one row per entry. `action` runs on whichever row you pick.
@@ -188,7 +214,7 @@ icon_size = 22   # bigger when the rows carry artwork rather than glyphs
 The command prints one row per line when the text is all a row needs — the line
 becomes both the title and the `{value}`:
 
-```
+```text
 ~/Notes/budget.md
 ~/Notes/travel.md
 ```

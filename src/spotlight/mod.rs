@@ -17,6 +17,7 @@ mod preview;
 mod query;
 mod results;
 mod ssh;
+mod vpn;
 mod window;
 mod windows;
 
@@ -94,7 +95,9 @@ fn run_application(mode: LaunchMode) -> glib::ExitCode {
 
     app.connect_activate(move |app| {
         let config = AppConfig::load();
-        let (prefix_table, ai_providers) = prefixes::resolve_with_ai(&config.spotlight);
+        let vpn_provider = vpn::resolve(&config.spotlight.vpn);
+        let (prefix_table, ai_providers) =
+            prefixes::resolve_with_ai(&config.spotlight, vpn_provider);
         let window = SpotlightWindow::new(
             app,
             config.spotlight,

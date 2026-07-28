@@ -253,6 +253,34 @@ pub struct SpotlightWindowsConfig {
     pub in_search: bool,
 }
 
+/// The VPN prefix: connecting, disconnecting, and picking a location.
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SpotlightVpnConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Prefix that drives the VPN. Defaults to `vpn`.
+    #[serde(default = "default_vpn_prefix")]
+    pub prefix: String,
+    /// Which VPN to drive, e.g. `windscribe`. Left unset, the installed
+    /// providers are detected instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+}
+
+fn default_vpn_prefix() -> String {
+    "vpn".to_string()
+}
+
+impl Default for SpotlightVpnConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            prefix: default_vpn_prefix(),
+            provider: None,
+        }
+    }
+}
+
 fn default_windows_prefix() -> String {
     "w".to_string()
 }
@@ -285,6 +313,8 @@ pub struct SpotlightConfig {
     pub ai: Vec<SpotlightAiConfig>,
     #[serde(default)]
     pub windows: SpotlightWindowsConfig,
+    #[serde(default)]
+    pub vpn: SpotlightVpnConfig,
 }
 
 fn default_true() -> bool {
@@ -334,6 +364,7 @@ impl Default for SpotlightConfig {
             width: default_spotlight_width(),
             ai: Vec::new(),
             windows: SpotlightWindowsConfig::default(),
+            vpn: SpotlightVpnConfig::default(),
         }
     }
 }

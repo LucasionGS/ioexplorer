@@ -68,7 +68,7 @@ is ignored.
 
 When a row needs nothing but its text, print one per line:
 
-```
+```text
 ~/Notes/budget.md
 ~/Notes/travel.md
 ```
