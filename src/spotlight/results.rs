@@ -767,9 +767,16 @@ pub fn custom_result_rows(
         .iter()
         .take(limit)
         .map(|item| {
+            // A value identical to the title — the whole shape of the one-row-
+            // per-line format — would otherwise print the same text twice.
+            let subtitle = if item.value == item.title {
+                String::new()
+            } else {
+                item.value.clone()
+            };
             let mut row = SpotlightResult::new(
                 item.title.clone(),
-                item.value.clone(),
+                subtitle,
                 IconRef::from_icon_name(prefix.icon.clone()),
             );
             row.trailing_icon = item.icon.clone().map(IconRef);

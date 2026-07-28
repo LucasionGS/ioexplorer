@@ -219,11 +219,20 @@ fn reap(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
-/// Parses the `{"results": [...]}` payload, dropping rows with no title.
+/// Parses the command's stdout, dropping rows with no title.
+///
+/// Two shapes are accepted: the full `{"results": [...]}` payload, and — for a
+/// command that has nothing to say beyond the row text — one row per line. The
+/// leading `{` is what tells them apart, so a provider that means to print JSON
+/// and gets it wrong still reports a parse error rather than showing its own
+/// braces back as a list.
 pub fn parse(output: &str) -> Result<Vec<CustomResult>, String> {
     let output = output.trim();
     if output.is_empty() {
         return Ok(Vec::new());
+    }
+    if !output.starts_with('{') {
+        return Ok(parse_lines(output));
     }
 
     let payload: Payload = serde_json::from_str(output)
@@ -244,6 +253,22 @@ pub fn parse(output: &str) -> Result<Vec<CustomResult>, String> {
             preview: item.preview.and_then(RawPreview::into_preview),
         })
         .collect())
+}
+
+/// One row per non-blank line, the line standing in for both title and value.
+fn parse_lines(output: &str) -> Vec<CustomResult> {
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(MAX_RESULTS)
+        .map(|line| CustomResult {
+            title: line.to_string(),
+            value: line.to_string(),
+            icon: None,
+            preview: None,
+        })
+        .collect()
 }
 
 #[derive(Deserialize)]
@@ -373,8 +398,57 @@ mod tests {
 
     #[test]
     fn malformed_json_reports_an_error() {
-        assert!(parse("not json").is_err());
         assert!(parse(r#"{"results": "nope"}"#).is_err());
+        assert!(parse("{not json}").is_err());
+    }
+
+    #[test]
+    fn plain_lines_become_one_row_each() {
+        let results = parse("first\nsecond\n\n  third  \n").expect("plain output");
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].title, "first");
+        assert_eq!(results[2].title, "third", "surrounding space is trimmed");
+        assert!(
+            results.iter().all(|result| result.value == result.title),
+            "the line is both the title and the value"
+        );
+        assert!(
+            results
+                .iter()
+                .all(|result| result.icon.is_none() && result.preview.is_none())
+        );
+    }
+
+    #[test]
+    fn a_single_line_is_a_single_row() {
+        let results = parse("just one").expect("plain output");
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].value, "just one");
+    }
+
+    #[test]
+    fn the_line_count_is_capped() {
+        let lines = (0..MAX_RESULTS + 50)
+            .map(|index| format!("row {index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(parse(&lines).expect("plain output").len(), MAX_RESULTS);
+    }
+
+    #[test]
+    fn a_command_printing_lines_is_run_and_parsed() {
+        let runner = CustomResultsRunner::new();
+        runner.start("printf 'one\\ntwo\\n'".to_string(), Duration::ZERO);
+
+        let event = wait_for_event(&runner);
+        let ResultsEvent::Ready { results, .. } = event else {
+            panic!("expected results, got {event:?}");
+        };
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[1].title, "two");
     }
 
     #[test]
@@ -456,9 +530,9 @@ mod tests {
     }
 
     #[test]
-    fn a_command_printing_junk_reports_a_failure() {
+    fn a_command_printing_broken_json_reports_a_failure() {
         let runner = CustomResultsRunner::new();
-        runner.start("printf 'not json'".to_string(), Duration::ZERO);
+        runner.start(r#"printf '{"results": ['"#.to_string(), Duration::ZERO);
 
         assert!(matches!(
             wait_for_event(&runner),

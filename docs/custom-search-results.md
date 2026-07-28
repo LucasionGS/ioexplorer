@@ -61,8 +61,31 @@ the shell reads as the value and nothing more.
 
 ## Results payload
 
-The command must print a JSON object with a `results` array on stdout. Anything
-on stderr is ignored.
+The command prints its rows on stdout, in one of two forms. Anything on stderr
+is ignored.
+
+### One row per line
+
+When a row needs nothing but its text, print one per line:
+
+```
+~/Notes/budget.md
+~/Notes/travel.md
+```
+
+Each line becomes a row whose `title` and `value` are both that line, so
+`action` receives it as `{value}`. Blank lines are skipped and surrounding
+whitespace is trimmed. The row shows no subtitle, since it would only repeat the
+title.
+
+This form is chosen whenever the output does not begin with `{` — so a command
+meaning to print JSON that gets it wrong still reports a parse error instead of
+showing its own braces back as a list.
+
+### JSON
+
+For a row that carries more than its text — a separate value, an icon, a preview
+— print a JSON object with a `results` array:
 
 ```json
 {
@@ -202,12 +225,22 @@ Guards against a misbehaving command, all applied per run:
 | Downloaded icon size | 2 MiB |
 | Downloaded preview size | 16 MiB |
 
-If the command fails, times out, or prints something that is not the expected
-JSON, a single row explains what went wrong rather than the list going blank.
+If the command fails, times out, or prints broken JSON, a single row explains
+what went wrong rather than the list going blank.
 
 ## Example
 
-A script that searches your notes:
+A script that searches your notes. The paths are all the rows need, so it prints
+them one per line:
+
+```sh
+#!/bin/sh
+# ~/.local/bin/note-search
+rg --files-with-matches --smart-case "$1" ~/Notes 2>/dev/null | head -20
+```
+
+To show the file name as the heading and keep the full path as the value, the
+same script builds the JSON form instead:
 
 ```sh
 #!/bin/sh

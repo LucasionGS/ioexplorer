@@ -173,7 +173,7 @@ An ad-hoc destination is checked before it is used: no leading `-`, no whitespac
 
 ### Custom search results
 
-A prefix can also produce its own list of rows. Give it `get_results` instead of `command`, and it runs that command with the query, reads a JSON payload from its stdout, and shows one row per entry. `action` runs on whichever row you pick.
+A prefix can also produce its own list of rows. Give it `get_results` instead of `command`, and it runs that command with the query, reads the rows from its stdout, and shows one row per entry. `action` runs on whichever row you pick.
 
 ```toml
 [[spotlight.prefixes]]
@@ -184,6 +184,18 @@ action = "xdg-open {value}"
 delay = 0.5      # seconds of quiet typing before the command runs
 icon_size = 22   # bigger when the rows carry artwork rather than glyphs
 ```
+
+The command prints one row per line when the text is all a row needs — the line
+becomes both the title and the `{value}`:
+
+```
+~/Notes/budget.md
+~/Notes/travel.md
+```
+
+For rows that carry a separate value, an icon, or a preview, it prints JSON
+instead. Output starting with `{` is read as the payload, anything else as
+lines.
 
 ```json
 {
