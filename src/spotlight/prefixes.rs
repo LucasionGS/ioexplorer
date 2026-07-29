@@ -4,9 +4,11 @@
 use std::time::Duration;
 
 use crate::config::{
-    SpotlightConfig, SpotlightPrefixConfig, SpotlightVpnConfig, SpotlightWindowsConfig,
+    SpotlightConfig, SpotlightPrefixConfig, SpotlightSoftwareConfig, SpotlightVpnConfig,
+    SpotlightWindowsConfig,
 };
 use crate::spotlight::ai::{self, AiProvider};
+use crate::spotlight::software;
 use crate::spotlight::vpn;
 
 /// Default quiet-typing window before a `get_results` command runs.
@@ -46,6 +48,11 @@ pub enum PrefixKind {
     Windows,
     /// List the hosts in the user's SSH config and connect to one.
     Ssh,
+    /// Browse the software catalog by category and install an app.
+    ///
+    /// Carries nothing: the catalog lives on the window, and `PrefixKind` is
+    /// cloned on every keystroke.
+    Software,
     /// Report the VPN, and connect it or disconnect it.
     ///
     /// Carries the provider by value: it is a `Copy` enum, and holding it here
@@ -198,6 +205,14 @@ pub fn resolve_with_ai(
         replace_or_append(&mut prefixes, prefix);
     }
 
+    // Registered whatever the catalog holds: it always has the built-in entries
+    // to show, and unlike the VPN there is no machine it cannot work on.
+    if let Some(prefix) = software_prefix(&config.software)
+        && !config.disabled_builtins.contains(&prefix.key)
+    {
+        replace_or_append(&mut prefixes, prefix);
+    }
+
     for entry in &config.prefixes {
         let Some(prefix) = prefix_from_config(entry) else {
             continue;
@@ -290,6 +305,30 @@ fn vpn_prefix(config: &SpotlightVpnConfig, provider: vpn::Provider) -> Option<Pr
         ),
         icon: provider.icon().to_string(),
         kind: PrefixKind::Vpn(provider),
+    })
+}
+
+/// The software prefix, or `None` when it is turned off or given an unusable key.
+fn software_prefix(config: &SpotlightSoftwareConfig) -> Option<Prefix> {
+    if !config.enabled {
+        return None;
+    }
+
+    let key = config.prefix.trim();
+    if key.is_empty() || key.chars().any(char::is_whitespace) {
+        tracing::warn!(
+            prefix = config.prefix,
+            "ignoring the software prefix: it is not a usable key"
+        );
+        return None;
+    }
+
+    Some(Prefix {
+        key: key.to_string(),
+        label: "Install Software".to_string(),
+        description: "Install an app, by category".to_string(),
+        icon: software::SOFTWARE_ICON.to_string(),
+        kind: PrefixKind::Software,
     })
 }
 
@@ -487,8 +526,8 @@ mod tests {
     fn empty_config_yields_every_builtin() {
         let table = resolve_with_ai(&SpotlightConfig::default(), None).0;
 
-        assert_eq!(table.all().len(), 7);
-        for key in ["!", ">", "=", "/", "?", "w", "ssh"] {
+        assert_eq!(table.all().len(), 8);
+        for key in ["!", ">", "=", "/", "?", "w", "ssh", "install"] {
             assert!(table.get(key).is_some(), "missing builtin {key}");
         }
     }
@@ -502,7 +541,7 @@ mod tests {
 
         let table = resolve_with_ai(&config, None).0;
 
-        assert_eq!(table.all().len(), 7);
+        assert_eq!(table.all().len(), 8);
         assert!(matches!(
             table.get("=").expect("overridden prefix").kind,
             PrefixKind::Command { .. }
@@ -519,7 +558,7 @@ mod tests {
         let table = resolve_with_ai(&config, None).0;
 
         assert!(table.get("=").is_none());
-        assert_eq!(table.all().len(), 6);
+        assert_eq!(table.all().len(), 7);
     }
 
     #[test]
@@ -538,7 +577,7 @@ mod tests {
 
         let table = resolve_with_ai(&config, None).0;
 
-        assert_eq!(table.all().len(), 7);
+        assert_eq!(table.all().len(), 8);
     }
 
     #[test]
@@ -811,7 +850,7 @@ mod tests {
         let (table, _) = resolve_with_ai(&config, None);
 
         assert_eq!(table.get("=").expect("= prefix").kind, PrefixKind::Ai(0));
-        assert_eq!(table.all().len(), 7, "it replaces rather than adds");
+        assert_eq!(table.all().len(), 8, "it replaces rather than adds");
     }
 
     #[test]
@@ -831,7 +870,7 @@ mod tests {
     fn resolve_still_returns_a_table_without_ai_configured() {
         let table = resolve_with_ai(&SpotlightConfig::default(), None).0;
 
-        assert_eq!(table.all().len(), 7);
+        assert_eq!(table.all().len(), 8);
         assert!(
             !table
                 .all()
@@ -872,7 +911,7 @@ mod tests {
         let table = resolve_with_ai(&config, None).0;
 
         assert!(table.get("w").is_none());
-        assert_eq!(table.all().len(), 6);
+        assert_eq!(table.all().len(), 7);
     }
 
     /// `disabled_builtins` is the one place a user already looks to remove a
@@ -887,7 +926,56 @@ mod tests {
         let table = resolve_with_ai(&config, None).0;
 
         assert!(table.get("w").is_none());
-        assert_eq!(table.all().len(), 6);
+        assert_eq!(table.all().len(), 7);
+    }
+
+    #[test]
+    fn the_software_prefix_can_be_turned_off() {
+        let config = SpotlightConfig {
+            software: SpotlightSoftwareConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let table = resolve_with_ai(&config, None).0;
+
+        assert!(table.get("install").is_none());
+        assert_eq!(table.all().len(), 7);
+    }
+
+    #[test]
+    fn the_software_prefix_takes_the_key_it_is_given() {
+        let config = SpotlightConfig {
+            software: SpotlightSoftwareConfig {
+                prefix: "soft".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let table = resolve_with_ai(&config, None).0;
+
+        assert!(table.get("install").is_none());
+        assert!(matches!(
+            table.get("soft").expect("software prefix").kind,
+            PrefixKind::Software
+        ));
+    }
+
+    #[test]
+    fn an_unusable_software_prefix_key_is_refused() {
+        for key in ["", "   ", "a b"] {
+            assert!(
+                software_prefix(&SpotlightSoftwareConfig {
+                    prefix: key.to_string(),
+                    ..Default::default()
+                })
+                .is_none(),
+                "{key:?} must not become a prefix"
+            );
+        }
     }
 
     #[test]
@@ -919,7 +1007,7 @@ mod tests {
             table.get("w").expect("w prefix").kind,
             PrefixKind::Command { .. }
         ));
-        assert_eq!(table.all().len(), 7);
+        assert_eq!(table.all().len(), 8);
     }
 
     /// `ssh` is three characters, so it only reaches its prefix if the table is
@@ -948,7 +1036,7 @@ mod tests {
         let table = resolve_with_ai(&SpotlightConfig::default(), None).0;
 
         assert!(table.get("vpn").is_none());
-        assert_eq!(table.all().len(), 7);
+        assert_eq!(table.all().len(), 8);
     }
 
     #[test]
@@ -958,7 +1046,7 @@ mod tests {
         let prefix = table.get("vpn").expect("vpn prefix");
         assert_eq!(prefix.kind, PrefixKind::Vpn(vpn::Provider::Windscribe));
         assert_eq!(prefix.label, "Windscribe");
-        assert_eq!(table.all().len(), 8);
+        assert_eq!(table.all().len(), 9);
     }
 
     #[test]

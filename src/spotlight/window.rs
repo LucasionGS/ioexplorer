@@ -32,6 +32,7 @@ use crate::{
         preview::{self, Preview, PreviewEvent, PreviewKind, PreviewLoader},
         query::{self, Query},
         results::{self, Activation, SpotlightResult},
+        software::Catalog,
         ssh::{self, SshHost},
         vpn::{self, VpnSource, VpnState},
         windows::{self, OpenWindow, WindowSource},
@@ -189,6 +190,9 @@ pub struct SpotlightWindow {
     empty_label: gtk::Label,
     config: SpotlightConfig,
     prefix_table: PrefixTable,
+    /// The software catalog. Resolved once from the config — it is pure data,
+    /// with nothing to load and nothing to invalidate.
+    software: Catalog,
     ai_providers: Vec<AiProvider>,
     ai_session: AiSession,
     /// Runs read-only tools off the main thread.
@@ -557,6 +561,7 @@ impl SpotlightWindow {
             transcript,
             status_label,
             empty_label,
+            software: Catalog::resolve(&config.software),
             config,
             prefix_table,
             ai_providers,
@@ -911,6 +916,10 @@ impl SpotlightWindow {
                         self.ensure_ssh_hosts();
                         self.ssh_rows(prefix, arg, limit)
                     }
+                    PrefixKind::Software => {
+                        self.cancel_async_results();
+                        self.software_rows(&prefix.key, arg, limit)
+                    }
                     PrefixKind::Vpn(provider) => {
                         self.cancel_async_results();
                         self.ensure_vpn(*provider);
@@ -943,6 +952,23 @@ impl SpotlightWindow {
                 }
             }
         };
+
+        // A plain query also offers what it could install, below everything that
+        // is already here.
+        if let Query::Plain(text) = &parsed.query
+            && self.config.software.in_search
+            && let Some(key) = self.software_prefix_key()
+        {
+            results.extend(results::software_search_results(
+                key,
+                text,
+                &self.software,
+                &self.live_index.snapshot(),
+                self.config.software.keep_open,
+                limit,
+            ));
+            results.truncate(limit);
+        }
 
         if let Some(key) = &parsed.hint
             && let Some(prefix) = self.prefix_table.get(key)
@@ -1408,6 +1434,33 @@ impl SpotlightWindow {
     /// Forgets the host list, so the next `ensure_ssh_hosts` really reads it.
     fn invalidate_ssh_hosts(&self) {
         self.ssh_loaded.set(false);
+    }
+
+    /// The rows for the software prefix: categories, or the apps inside one.
+    fn software_rows(&self, prefix_key: &str, arg: &str, limit: usize) -> Vec<SpotlightResult> {
+        results::software_results(
+            prefix_key,
+            arg,
+            &self.software,
+            self.config.software.keep_open,
+            &self.frecency.borrow(),
+            frecency::now_secs(),
+            limit,
+        )
+    }
+
+    /// The key the software prefix actually ended up on, or `None` when it is
+    /// not in the table at all.
+    ///
+    /// Read from the table rather than from the config, so a prefix the user
+    /// disabled or took over for something else does not leave plain queries
+    /// pointing at a key that no longer opens the catalog.
+    fn software_prefix_key(&self) -> Option<&str> {
+        self.prefix_table
+            .all()
+            .iter()
+            .find(|prefix| prefix.kind == PrefixKind::Software)
+            .map(|prefix| prefix.key.as_str())
     }
 
     /// The rows for the ssh prefix, or one row explaining why there are none.

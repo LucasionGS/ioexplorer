@@ -267,6 +267,86 @@ pub struct SpotlightVpnConfig {
     pub provider: Option<String>,
 }
 
+/// The Software section: a two-level catalog of installable applications,
+/// browsed as `install` → category → app.
+///
+/// The catalog itself ships built in, so the section works with no `[spotlight.software]`
+/// block at all. What lands here is what the user changed.
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SpotlightSoftwareConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Prefix that opens the catalog. Defaults to `install`.
+    #[serde(default = "default_software_prefix")]
+    pub prefix: String,
+    /// Also offer software on plain, unprefixed queries, so typing an app's name
+    /// reaches the row that installs it.
+    #[serde(default = "default_true")]
+    pub in_search: bool,
+    /// Hold the terminal open once the install command has finished, so its
+    /// output can still be read. Turn off for a package manager that pauses on
+    /// its own.
+    #[serde(default = "default_true")]
+    pub keep_open: bool,
+    /// Categories merged into the built-in catalog, matched by `id`.
+    #[serde(default)]
+    pub categories: Vec<SpotlightSoftwareCategoryConfig>,
+    /// Built-in category ids to drop entirely, e.g. `["gaming"]`.
+    #[serde(default)]
+    pub disabled_categories: Vec<String>,
+}
+
+/// One category of the software catalog.
+///
+/// Merged into a built-in category of the same `id` rather than replacing it:
+/// adding one app to Creativity should not cost the user the ones already there.
+#[derive(Debug, Clone, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SpotlightSoftwareCategoryConfig {
+    /// The merge key, and what the user types to enter the category.
+    pub id: String,
+    /// Falls back to the built-in label, or to `id` for a new category.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub items: Vec<SpotlightSoftwareItemConfig>,
+}
+
+/// One installable application.
+#[derive(Debug, Clone, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SpotlightSoftwareItemConfig {
+    /// Shown on the row, and the key items are merged on.
+    pub name: String,
+    /// The command line that installs it, run visibly in a terminal.
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Defaults to the category's icon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    /// Extra search terms, e.g. `["photoshop"]` on an image editor.
+    #[serde(default)]
+    pub keywords: Vec<String>,
+}
+
+fn default_software_prefix() -> String {
+    "install".to_string()
+}
+
+impl Default for SpotlightSoftwareConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            prefix: default_software_prefix(),
+            in_search: true,
+            keep_open: true,
+            categories: Vec::new(),
+            disabled_categories: Vec::new(),
+        }
+    }
+}
+
 fn default_vpn_prefix() -> String {
     "vpn".to_string()
 }
@@ -315,6 +395,8 @@ pub struct SpotlightConfig {
     pub windows: SpotlightWindowsConfig,
     #[serde(default)]
     pub vpn: SpotlightVpnConfig,
+    #[serde(default)]
+    pub software: SpotlightSoftwareConfig,
 }
 
 fn default_true() -> bool {
@@ -365,6 +447,7 @@ impl Default for SpotlightConfig {
             ai: Vec::new(),
             windows: SpotlightWindowsConfig::default(),
             vpn: SpotlightVpnConfig::default(),
+            software: SpotlightSoftwareConfig::default(),
         }
     }
 }
@@ -513,6 +596,9 @@ modified = true
         assert_eq!(parsed.spotlight.result_limit, 12);
         assert_eq!(parsed.spotlight.top_ratio, 0.22);
         assert!(parsed.spotlight.prefixes.is_empty());
+        assert_eq!(parsed.spotlight.software.prefix, "install");
+        assert!(parsed.spotlight.software.enabled);
+        assert!(parsed.spotlight.software.keep_open);
     }
 
     #[test]
@@ -547,6 +633,49 @@ command = "xdg-open 'https://google.com/search?q={query_url}'"
         assert_eq!(parsed.spotlight.prefixes.len(), 1);
         assert_eq!(parsed.spotlight.prefixes[0].prefix, "g");
         assert!(!parsed.spotlight.prefixes[0].terminal);
+    }
+
+    /// The shape `docs/software.md` documents has to be the shape serde reads.
+    #[test]
+    fn parses_a_software_catalog() {
+        let parsed: AppConfig = toml::from_str(
+            r#"
+default_view = "icon"
+show_hidden = false
+icon_size = 128
+sidebar_width = 220
+
+[list_columns]
+size = true
+kind = true
+modified = true
+
+[spotlight.software]
+prefix = "soft"
+keep_open = false
+disabled_categories = ["gaming"]
+
+[[spotlight.software.categories]]
+id = "creativity"
+
+[[spotlight.software.categories.items]]
+name = "Inkscape"
+command = "yay -S --needed inkscape"
+description = "Vector graphics"
+keywords = ["svg"]
+"#,
+        )
+        .expect("valid config");
+
+        let software = &parsed.spotlight.software;
+        assert_eq!(software.prefix, "soft");
+        assert!(software.enabled, "an omitted flag keeps its default");
+        assert!(!software.keep_open);
+        assert_eq!(software.disabled_categories, vec!["gaming".to_string()]);
+        assert_eq!(software.categories.len(), 1);
+        assert_eq!(software.categories[0].items.len(), 1);
+        assert_eq!(software.categories[0].items[0].name, "Inkscape");
+        assert_eq!(software.categories[0].items[0].keywords, vec!["svg"]);
     }
 
     #[test]

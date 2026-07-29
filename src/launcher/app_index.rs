@@ -77,6 +77,15 @@ impl AppIndex {
         Self { entries }
     }
 
+    /// Builds an index from entries that were not scanned.
+    ///
+    /// Test-only: the real one comes from [`AppIndex::scan`], which reads the
+    /// desktop database and has to run on the main thread.
+    #[cfg(test)]
+    pub(crate) fn from_entries(entries: Vec<AppEntry>) -> Self {
+        Self { entries }
+    }
+
     pub fn entries(&self) -> &[AppEntry] {
         &self.entries
     }

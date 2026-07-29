@@ -20,6 +20,7 @@ use crate::{
             build_command_line,
         },
         preview::Preview,
+        software::{self, Catalog, Category, Item, SoftwareQuery},
         ssh::{self, SshHost},
         vpn,
         windows::OpenWindow,
@@ -325,6 +326,7 @@ pub fn prefixed_results(
         PrefixKind::FileSearch => Vec::new(), // filled asynchronously by the walker
         PrefixKind::Windows => Vec::new(),    // filled asynchronously by the compositor query
         PrefixKind::Ssh => Vec::new(),        // filled by the window from the ssh config it loaded
+        PrefixKind::Software => Vec::new(),   // filled by the window from the catalog it resolved
         PrefixKind::Vpn(_) => Vec::new(),     // filled asynchronously by the vpn client
         PrefixKind::CustomResults { .. } => Vec::new(), // filled asynchronously by the runner
         PrefixKind::Command { command, terminal } => {
@@ -788,6 +790,227 @@ pub fn ssh_notice(prefix: &Prefix, note: &str) -> SpotlightResult {
     )
 }
 
+// -- software --------------------------------------------------------------
+
+/// The band software rows sit in on a plain query.
+///
+/// Low enough that a real application, path or bookmark always outranks them —
+/// what is installed beats what could be — while still ordering the software
+/// rows among themselves by how well they matched.
+const SOFTWARE_SEARCH_BASE: i32 = i32::MIN + 10_000;
+
+/// How far the "Install Software" row sits above the app rows beneath it, so it
+/// reads as the heading for what follows.
+const SOFTWARE_SECTION_BONUS: i32 = 1_000;
+
+/// Builds the rows for the software prefix: categories at the top level, the
+/// apps of one category once the user has entered it.
+pub fn software_results(
+    prefix_key: &str,
+    arg: &str,
+    catalog: &Catalog,
+    keep_open: bool,
+    frecency: &Frecency,
+    now_secs: u64,
+    limit: usize,
+) -> Vec<SpotlightResult> {
+    match software::parse_arg(catalog, arg) {
+        SoftwareQuery::Items { category, filter } => {
+            let mut results = Vec::new();
+            for item in &category.items {
+                let Some(found) =
+                    fuzzy::match_fields(filter, &software_item_fields(category, item))
+                else {
+                    continue;
+                };
+                let mut row = software_item_row(prefix_key, category, item, keep_open);
+                let key = software_frecency_key(category, item);
+                row.score = found.score + frecency.bonus(&key, now_secs, FRECENCY_MAX_BONUS);
+                row.frecency_key = Some(key);
+                results.push(row);
+            }
+
+            // With nothing typed the category's own order is kept: it is the
+            // order the catalog declares, and an empty query has nothing to
+            // rank by.
+            if !filter.is_empty() {
+                sort_results(&mut results);
+            }
+            results.truncate(limit);
+            results
+        }
+        SoftwareQuery::Categories { filter: "" } => catalog
+            .categories()
+            .iter()
+            .take(limit)
+            .map(|category| software_category_row(prefix_key, category))
+            .collect(),
+        SoftwareQuery::Categories { filter } => {
+            let mut results = Vec::new();
+
+            for category in catalog.categories() {
+                let Some(found) = fuzzy::match_fields(
+                    filter,
+                    &[
+                        Field::new(category.label.as_str(), 100),
+                        Field::new(category.id.as_str(), 80),
+                    ],
+                ) else {
+                    continue;
+                };
+                let mut row = software_category_row(prefix_key, category);
+                row.score = found.score;
+                results.push(row);
+            }
+
+            // Apps are offered from the top level too, so `install gimp` reaches
+            // GIMP without having to know it lives under Creativity.
+            for (category, item) in catalog.items() {
+                let Some(found) =
+                    fuzzy::match_fields(filter, &software_item_fields(category, item))
+                else {
+                    continue;
+                };
+                let mut row = software_item_row(prefix_key, category, item, keep_open);
+                let key = software_frecency_key(category, item);
+                row.score = found.score + frecency.bonus(&key, now_secs, FRECENCY_MAX_BONUS);
+                row.frecency_key = Some(key);
+                results.push(row);
+            }
+
+            sort_results(&mut results);
+            results.truncate(limit);
+            results
+        }
+    }
+}
+
+/// The software rows offered on a plain, unprefixed query: the apps that match,
+/// led by a row that opens the catalog.
+///
+/// Anything already installed is left out. Its launcher entry is the row the
+/// user wants, and offering to install what is sitting right above is noise.
+pub fn software_search_results(
+    prefix_key: &str,
+    query: &str,
+    catalog: &Catalog,
+    index: &AppIndex,
+    keep_open: bool,
+    limit: usize,
+) -> Vec<SpotlightResult> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Vec::new();
+    }
+
+    let mut results = Vec::new();
+
+    if let Some(found) = fuzzy::match_fields(
+        query,
+        &[
+            Field::new("Install Software", 100),
+            Field::new("packages", 60),
+            Field::new("apps", 60),
+        ],
+    ) {
+        let mut row = SpotlightResult::new(
+            "Install Software",
+            "Browse apps by category",
+            IconRef::from_icon_name(software::SOFTWARE_ICON),
+        );
+        let entry = format!("{prefix_key} ");
+        row.primary = Activation::Replace(entry.clone());
+        row.completion = Some(entry);
+        row.score = SOFTWARE_SEARCH_BASE + SOFTWARE_SECTION_BONUS + found.score;
+        results.push(row);
+    }
+
+    for (category, item) in catalog.items() {
+        if is_installed(index, &item.name) {
+            continue;
+        }
+        let Some(found) = fuzzy::match_fields(query, &software_item_fields(category, item)) else {
+            continue;
+        };
+        let mut row = software_item_row(prefix_key, category, item, keep_open);
+        row.score = SOFTWARE_SEARCH_BASE + found.score;
+        // No frecency key: these rows are pinned to the bottom of a plain query
+        // whatever their history, so a bonus would buy nothing.
+        results.push(row);
+    }
+
+    sort_results(&mut results);
+    results.truncate(limit);
+    results
+}
+
+/// Whether the catalog entry named `name` already has a desktop entry.
+///
+/// Both spellings are tried because the two rarely agree: CurseForge ships
+/// `curseforge.desktop`, while Visual Studio Code ships `code.desktop` and is
+/// only recognisable by its name.
+fn is_installed(index: &AppIndex, name: &str) -> bool {
+    index.find_by_app_id(name).is_some() || index.find_by_app_id(&software::slug(name)).is_some()
+}
+
+fn software_item_fields<'a>(category: &'a Category, item: &'a Item) -> Vec<Field<'a>> {
+    let mut fields = vec![
+        Field::new(item.name.as_str(), 100),
+        Field::new(item.description.as_str(), 40),
+        Field::new(category.label.as_str(), 20),
+    ];
+    fields.extend(
+        item.keywords
+            .iter()
+            .map(|keyword| Field::new(keyword.as_str(), 60)),
+    );
+    fields
+}
+
+fn software_frecency_key(category: &Category, item: &Item) -> String {
+    format!("software:{}:{}", category.id, software::slug(&item.name))
+}
+
+/// A category row. Activating it does not close the window — it rewrites the
+/// entry, which is what makes the section a menu rather than a flat list.
+fn software_category_row(prefix_key: &str, category: &Category) -> SpotlightResult {
+    let entry = software::category_query(prefix_key, category);
+    let mut row = SpotlightResult::new(
+        category.label.clone(),
+        match category.items.len() {
+            1 => "1 app".to_string(),
+            count => format!("{count} apps"),
+        },
+        IconRef::from_icon_name(category.icon.clone()),
+    );
+    row.primary = Activation::Replace(entry.clone());
+    row.completion = Some(entry);
+    row
+}
+
+fn software_item_row(
+    prefix_key: &str,
+    category: &Category,
+    item: &Item,
+    keep_open: bool,
+) -> SpotlightResult {
+    let mut row = SpotlightResult::new(
+        item.name.clone(),
+        format!("Install · {}", item.description),
+        IconRef::from_icon_name(item.icon.clone()),
+    );
+    row.primary = Activation::RunInTerminal(software::install_line(item, keep_open));
+    // Not a second way to install but a way *not* to: the command is often
+    // wanted in a script, a note, or a terminal that is already open.
+    row.secondary = Some(Activation::CopyText(item.command.clone()));
+    row.preview = Some(Preview::icon(
+        item.icon.clone(),
+        format!("{}\n\n{}\n\n{}", item.name, item.description, item.command),
+    ));
+    row.completion = Some(format!("{prefix_key} {} {}", category.id, item.name));
+    row
+}
+
 fn shell_results(arg: &str) -> Vec<SpotlightResult> {
     if arg.trim().is_empty() {
         return vec![SpotlightResult::new(
@@ -1121,6 +1344,141 @@ mod tests {
 
         assert_eq!(results[0].title, "Cannot calculate");
         assert_eq!(results[0].primary, Activation::Inert);
+    }
+
+    fn catalog() -> Catalog {
+        Catalog::resolve(&crate::config::SpotlightSoftwareConfig::default())
+    }
+
+    fn software_rows(arg: &str) -> Vec<SpotlightResult> {
+        software_results(
+            "install",
+            arg,
+            &catalog(),
+            true,
+            &Frecency::default(),
+            0,
+            12,
+        )
+    }
+
+    fn titles(results: &[SpotlightResult]) -> Vec<&str> {
+        results.iter().map(|row| row.title.as_str()).collect()
+    }
+
+    #[test]
+    fn the_software_prefix_opens_on_its_categories() {
+        let rows = software_rows("");
+
+        assert_eq!(
+            titles(&rows),
+            ["Creativity", "Gaming", "Communication", "Development"]
+        );
+        assert_eq!(rows[0].subtitle, "2 apps");
+        assert_eq!(
+            rows[0].primary,
+            Activation::Replace("install creativity ".to_string())
+        );
+    }
+
+    #[test]
+    fn a_category_row_completes_to_the_same_text_it_activates_to() {
+        let rows = software_rows("");
+
+        assert_eq!(rows[0].completion.as_deref(), Some("install creativity "));
+    }
+
+    #[test]
+    fn entering_a_category_lists_its_apps() {
+        let rows = software_rows("creativity ");
+
+        assert_eq!(titles(&rows), ["GIMP", "Krita"]);
+        assert_eq!(
+            rows[0].primary,
+            Activation::RunInTerminal(
+                "yay -S --needed gimp; printf '\\n[press Enter to close] '; read -r _".to_string()
+            )
+        );
+        assert_eq!(
+            rows[0].secondary,
+            Some(Activation::CopyText("yay -S --needed gimp".to_string()))
+        );
+    }
+
+    #[test]
+    fn the_top_level_reaches_an_app_without_its_category() {
+        let rows = software_rows("krita");
+
+        assert_eq!(rows[0].title, "Krita");
+        assert!(matches!(rows[0].primary, Activation::RunInTerminal(_)));
+    }
+
+    #[test]
+    fn keeping_the_terminal_open_is_optional() {
+        let rows = software_results(
+            "install",
+            "creativity ",
+            &catalog(),
+            false,
+            &Frecency::default(),
+            0,
+            12,
+        );
+
+        assert_eq!(
+            rows[0].primary,
+            Activation::RunInTerminal("yay -S --needed gimp".to_string())
+        );
+    }
+
+    #[test]
+    fn a_plain_query_offers_to_install_what_is_missing() {
+        let rows = software_search_results(
+            "install",
+            "discord",
+            &catalog(),
+            &AppIndex::default(),
+            true,
+            12,
+        );
+
+        assert_eq!(titles(&rows), ["Discord"]);
+        // Below every real match, so an app that is actually installed always
+        // comes first.
+        assert!(rows[0].score < 0);
+    }
+
+    #[test]
+    fn a_plain_query_stays_quiet_about_what_is_already_installed() {
+        let index = AppIndex::from_entries(vec![AppEntry {
+            desktop_id: "discord.desktop".to_string(),
+            name: "Discord".to_string(),
+            generic_name: None,
+            comment: None,
+            keywords: Vec::new(),
+            categories: Vec::new(),
+            exec_name: Some("discord".to_string()),
+            icon: IconRef::fallback(),
+        }]);
+
+        let rows = software_search_results("install", "discord", &catalog(), &index, true, 12);
+
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn a_plain_query_can_reach_the_catalog_itself() {
+        let rows = software_search_results(
+            "install",
+            "install software",
+            &catalog(),
+            &AppIndex::default(),
+            true,
+            12,
+        );
+
+        assert_eq!(rows[0].title, "Install Software");
+        assert_eq!(rows[0].primary, Activation::Replace("install ".to_string()));
     }
 
     #[test]

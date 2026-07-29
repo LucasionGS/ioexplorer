@@ -16,6 +16,7 @@ mod prefixes;
 mod preview;
 mod query;
 mod results;
+mod software;
 mod ssh;
 mod vpn;
 mod window;

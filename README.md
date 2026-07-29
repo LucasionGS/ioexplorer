@@ -108,6 +108,7 @@ With no prefix, spotlight searches installed applications, your XDG user folders
 | `w` | Switch to an open window |
 | `ssh` | Connect to a host from `~/.ssh/config` |
 | `vpn` | Connect, disconnect, or pick a location (only with a supported VPN client installed) |
+| `install` | Install an app, by category |
 | `?` | List every available prefix |
 
 Add your own prefixes in `~/.config/ioexplorer/config.toml`. `{query}` is substituted shell-quoted, and `{query_url}` percent-encoded for use inside a URL. A template with neither placeholder gets the quoted query appended.
@@ -196,6 +197,34 @@ provider = "windscribe" # optional; detected from what is installed when unset
 Naming a `provider` pins the choice for a machine with more than one client installed, or one whose client detection would not have picked. A name no provider answers to is refused and logged rather than quietly falling back to detection — the fallback is the one outcome that was not asked for.
 
 Neither reply is a machine format: the client has no JSON mode, so the status is read as `Key: value` pairs and a location line is split from its ends inwards. That parsing is written to degrade rather than break — a field the client stops printing costs that field alone, and the status text is kept verbatim for the preview, so anything not interpreted is still in front of you. Both queries run on a worker thread under a five-second deadline, because a VPN client talks to a background daemon and a daemon that stops answering leaves the client waiting rather than exiting.
+
+### Software
+
+`install` is a two-level menu of installable applications: pick a category, pick an app, and the command that installs it runs visibly in your terminal. It ships with GIMP and Krita under Creativity, Steam and CurseForge under Gaming, Discord under Communication, and Visual Studio Code under Development — all through `yay`, so repository and AUR packages work the same way.
+
+The levels are just text. Activating a category rewrites the search rather than closing the window, so `install creativity ` lists what is in Creativity, `Tab` completes into a category, and one backspace over the trailing space comes back out. Typing across the whole catalog works too: `install gimp` reaches GIMP without knowing which category it lives in.
+
+```toml
+[spotlight.software]
+enabled = true      # the prefix
+prefix = "install"
+in_search = true    # also offer software on plain, unprefixed searches
+keep_open = true    # hold the terminal open once the install has finished
+
+[[spotlight.software.categories]]
+id = "creativity"   # merges into the built-in category rather than replacing it
+
+[[spotlight.software.categories.items]]
+name = "Inkscape"
+command = "yay -S --needed inkscape"
+description = "Vector graphics"
+```
+
+With `in_search` on, typing an app's name on an ordinary search offers to install it — below every real match, and never for something already installed, since its launcher entry is the row you actually wanted. `Ctrl+Enter` copies the install command instead of running it. `keep_open` waits for `Enter` once the command exits, because a terminal opened for one command otherwise closes on its last line and takes the result with it.
+
+Nothing here is Arch-specific beyond the commands themselves: point them at `apt`, `dnf`, `flatpak` or a script of your own and the section works the same.
+
+See [docs/software.md](docs/software.md) for the full field reference, the merge rules, and a worked example.
 
 ### Custom search results
 
