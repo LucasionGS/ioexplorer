@@ -263,7 +263,14 @@ fn builtins() -> Vec<Category> {
     const CREATIVITY_ICON: &str = "applications-graphics-symbolic";
     const GAMING_ICON: &str = "applications-games-symbolic";
     const COMMUNICATION_ICON: &str = "chat-message-new-symbolic";
+    const ENTERTAINMENT_ICON: &str = "applications-multimedia-symbolic";
     const DEVELOPMENT_ICON: &str = "applications-engineering-symbolic";
+
+    const YAY_INSTALL_PREFIX: &str = "yay -S --needed --noconfirm";
+
+    fn yay_install(command: &str) -> String { // I use this a lot, a fucking helper
+        format!("{YAY_INSTALL_PREFIX} {command}")
+    }
 
     vec![
         Category {
@@ -274,14 +281,14 @@ fn builtins() -> Vec<Category> {
                 item(
                     "GIMP",
                     "Image editor",
-                    "yay -S --needed gimp",
+                    &yay_install("gimp"),
                     &["photo", "image", "editor", "photoshop"],
                     CREATIVITY_ICON,
                 ),
                 item(
                     "Krita",
                     "Digital painting",
-                    "yay -S --needed krita",
+                    &yay_install("krita"),
                     &["paint", "drawing", "art"],
                     CREATIVITY_ICON,
                 ),
@@ -295,14 +302,14 @@ fn builtins() -> Vec<Category> {
                 item(
                     "Steam",
                     "Game store and launcher",
-                    "yay -S --needed steam",
+                    &yay_install("steam"),
                     &["valve", "games"],
                     GAMING_ICON,
                 ),
                 item(
                     "CurseForge",
                     "Minecraft mod manager",
-                    "yay -S --needed curseforge",
+                    &yay_install("curseforge"),
                     &["minecraft", "mods"],
                     GAMING_ICON,
                 ),
@@ -315,10 +322,31 @@ fn builtins() -> Vec<Category> {
             items: vec![item(
                 "Discord",
                 "Voice and text chat",
-                "yay -S --needed discord",
+                &yay_install("discord"),
                 &["chat", "voice"],
                 COMMUNICATION_ICON,
             )],
+        },
+        Category {
+            id: "entertainment".to_string(),
+            label: "Entertainment".to_string(),
+            icon: ENTERTAINMENT_ICON.to_string(),
+            items: vec![
+                item(
+                    "VLC",
+                    "Media player",
+                    &yay_install("vlc"),
+                    &["video", "audio", "player"],
+                    ENTERTAINMENT_ICON,
+                ),
+                item(
+                    "Toxen",
+                    "Customizable Music Player",
+                    &yay_install("toxen3"),
+                    &["music", "customizable", "player"],
+                    ENTERTAINMENT_ICON,
+                )
+            ],
         },
         Category {
             id: "development".to_string(),
@@ -327,7 +355,7 @@ fn builtins() -> Vec<Category> {
             items: vec![item(
                 "Visual Studio Code",
                 "Code editor",
-                "yay -S --needed visual-studio-code-bin",
+                &yay_install("visual-studio-code-bin"),
                 &["vscode", "editor", "ide"],
                 DEVELOPMENT_ICON,
             )],
