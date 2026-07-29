@@ -18,6 +18,7 @@ use crate::{
     bookmarks,
     config::{AppConfig, CustomActionConfig, ViewMode, clamp_icon_size},
     custom_actions::{self, ActionTarget},
+    live_config::{ConfigChange, LiveConfig},
     providers::{FileItem, FileKind, Provider, ProviderError, ProviderUri, local::LocalProvider},
     selector::{SelectorMode, SelectorOptions},
     state::AppState,
@@ -618,7 +619,9 @@ pub struct AppWindow {
     computer_page: ComputerPage,
     settings_page: SettingsPage,
     theme_css_path: RefCell<Option<PathBuf>>,
-    live_theme: Option<theme::LiveTheme>,
+    /// The process-wide config watcher, which also owns the user CSS provider.
+    /// Set by [`AppWindow::bind_live_config`] once the window exists.
+    live_config: RefCell<Option<Rc<LiveConfig>>>,
     theme_editor_updating: Cell<bool>,
     list_box: gtk::ListBox,
     list_scroll: gtk::ScrolledWindow,
@@ -689,7 +692,6 @@ impl AppWindow {
             theme_css_path.as_deref(),
             &config.actions,
         );
-        let live_theme = theme::LiveTheme::new();
         let entries = Rc::new(RefCell::new(Vec::new()));
         let media_details_cache = Rc::new(RefCell::new(HashMap::new()));
         let selected_indices = Rc::new(RefCell::new(BTreeSet::new()));
@@ -898,7 +900,7 @@ impl AppWindow {
             computer_page,
             settings_page,
             theme_css_path: RefCell::new(theme_css_path),
-            live_theme,
+            live_config: RefCell::new(None),
             theme_editor_updating: Cell::new(false),
             list_box,
             list_scroll,
@@ -1477,6 +1479,67 @@ impl AppWindow {
             .connect_clicked(move |_| this.reset_theme_editor());
     }
 
+    /// Starts following external edits to `config.toml` and the theme CSS.
+    pub(crate) fn bind_live_config(self: &Rc<Self>, live: &Rc<LiveConfig>) {
+        *self.live_config.borrow_mut() = Some(Rc::clone(live));
+
+        let weak_self = Rc::downgrade(self);
+        live.connect_changed(move |change| {
+            if let Some(this) = weak_self.upgrade() {
+                this.apply_config_change(change);
+            }
+        });
+
+        let weak_self = Rc::downgrade(self);
+        live.connect_css_changed(move |_| {
+            if let Some(this) = weak_self.upgrade() {
+                this.refresh_theme_editor_from_disk();
+            }
+        });
+    }
+
+    /// Applies a config edit made outside this window.
+    ///
+    /// The view mode, hidden-file toggle and icon size are deliberately left
+    /// alone: those are session state this window owns, persisted separately in
+    /// [`AppState`], and resetting them because a file changed on disk would
+    /// lose the user's place.
+    fn apply_config_change(self: &Rc<Self>, change: &ConfigChange) {
+        *self.config.borrow_mut() = (*change.config).clone();
+
+        if change.sidebar_width_changed() {
+            self.sidebar.set_width(change.config.sidebar_width);
+        }
+
+        if change.custom_css_changed() {
+            let path = theme::effective_custom_css_path(&change.config);
+            self.settings_page.set_theme_css_path(path.as_deref());
+            *self.theme_css_path.borrow_mut() = path;
+            self.refresh_theme_editor_from_disk();
+        }
+
+        if change.actions_changed() {
+            *self.custom_action_configs.borrow_mut() = change.config.actions.clone();
+            self.refresh_action_editor();
+        }
+
+        if change.list_columns_changed() {
+            self.render_entries();
+        }
+    }
+
+    /// Pulls the theme colours back out of the CSS file into the editor.
+    ///
+    /// Guarded, or every widget this updates would write the file straight back.
+    fn refresh_theme_editor_from_disk(self: &Rc<Self>) {
+        let path = self.theme_css_path.borrow().clone();
+        let settings = theme::load_generated_settings(path.as_deref());
+
+        self.theme_editor_updating.set(true);
+        self.settings_page.set_theme_settings(&settings);
+        self.theme_editor_updating.set(false);
+    }
+
     fn update_theme_from_editor(self: &Rc<Self>) {
         if self.theme_editor_updating.get() {
             return;
@@ -1496,8 +1559,8 @@ impl AppWindow {
 
         match theme::save_generated_theme(&path, &settings) {
             Ok(css) => {
-                if let Some(live_theme) = &self.live_theme {
-                    live_theme.apply_css(&css);
+                if let Some(live) = self.live_config.borrow().as_ref() {
+                    live.apply_css_now(&css);
                 }
 
                 match self.save_theme_css_path(path.clone()) {
@@ -1525,6 +1588,9 @@ impl AppWindow {
 
         config.custom_css = Some(path);
         config.save()?;
+        if let Some(live) = self.live_config.borrow().as_ref() {
+            live.note_config_written(&config);
+        }
         *self.config.borrow_mut() = config;
         Ok(())
     }
@@ -3389,6 +3455,9 @@ impl AppWindow {
 
         match config.save() {
             Ok(()) => {
+                if let Some(live) = self.live_config.borrow().as_ref() {
+                    live.note_config_written(&config);
+                }
                 *self.config.borrow_mut() = config;
                 *self.custom_action_configs.borrow_mut() = next_actions;
                 self.refresh_action_editor();

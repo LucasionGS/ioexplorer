@@ -1,9 +1,9 @@
-use std::{env, path::PathBuf};
+use std::{cell::RefCell, env, path::PathBuf, rc::Rc};
 
 use gtk::prelude::*;
 use tracing_subscriber::{EnvFilter, fmt};
 
-use crate::{config::AppConfig, selector, theme, ui::window::AppWindow};
+use crate::{live_config::LiveConfig, selector, ui::window::AppWindow};
 
 pub const APP_ID: &str = "io.github.ionix.IoExplorer";
 
@@ -24,20 +24,18 @@ pub fn run() -> glib::ExitCode {
         .flags(gio::ApplicationFlags::HANDLES_OPEN)
         .build();
 
-    app.connect_startup(|_| {
-        let config = AppConfig::load();
-        theme::install(&config);
+    let live_config = selector::install_live_config(&app);
+
+    app.connect_activate({
+        let live_config = Rc::clone(&live_config);
+        move |app| {
+            let window = new_window(app, &live_config);
+            window.present();
+        }
     });
 
-    app.connect_activate(|app| {
-        let config = AppConfig::load();
-        let window = AppWindow::new(app, config);
-        window.present();
-    });
-
-    app.connect_open(|app, files, _hint| {
-        let config = AppConfig::load();
-        let window = AppWindow::new(app, config);
+    app.connect_open(move |app, files, _hint| {
+        let window = new_window(app, &live_config);
         let paths = files.iter().filter_map(gio::File::path).collect::<Vec<_>>();
         window.open_paths(paths);
         window.present();
@@ -46,20 +44,34 @@ pub fn run() -> glib::ExitCode {
     app.run()
 }
 
+/// Builds a window from the watched config and subscribes it to later edits.
+fn new_window(
+    app: &gtk::Application,
+    live_config: &RefCell<Option<Rc<LiveConfig>>>,
+) -> Rc<AppWindow> {
+    let live = live_config.borrow().clone();
+    let config = live
+        .as_ref()
+        .map(|live| (*live.config()).clone())
+        .unwrap_or_default();
+
+    let window = AppWindow::new(app, config);
+    if let Some(live) = &live {
+        window.bind_live_config(live);
+    }
+    window
+}
+
 fn run_select(paths: Vec<PathBuf>) -> glib::ExitCode {
     let app = gtk::Application::builder()
         .application_id(APP_ID)
         .flags(gio::ApplicationFlags::NON_UNIQUE)
         .build();
 
-    app.connect_startup(|_| {
-        let config = AppConfig::load();
-        theme::install(&config);
-    });
+    let live_config = selector::install_live_config(&app);
 
     app.connect_activate(move |app| {
-        let config = AppConfig::load();
-        let window = AppWindow::new(app, config);
+        let window = new_window(app, &live_config);
         window.reveal_paths(paths.clone());
         window.present();
     });

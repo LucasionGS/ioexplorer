@@ -2,7 +2,7 @@ use std::{cell::RefCell, env, path::PathBuf, rc::Rc};
 
 use gtk::prelude::*;
 
-use crate::{config::AppConfig, theme, ui::window::AppWindow};
+use crate::{live_config::LiveConfig, ui::window::AppWindow};
 
 const SELECTOR_APP_ID: &str = "io.github.ionix.IoExplorer.Selector";
 
@@ -169,6 +169,28 @@ impl SelectorOptions {
     }
 }
 
+/// Builds the process-wide config watcher during `startup` and hands back the
+/// cell later callbacks read it from.
+///
+/// It has to be built there rather than up front: installing a CSS provider
+/// needs a display, which does not exist until GTK has started up. The cell
+/// also keeps the watcher alive for the process, since dropping it would cancel
+/// its monitors.
+pub fn install_live_config(app: &gtk::Application) -> Rc<RefCell<Option<Rc<LiveConfig>>>> {
+    let live_config: Rc<RefCell<Option<Rc<LiveConfig>>>> = Rc::new(RefCell::new(None));
+
+    app.connect_startup({
+        let live_config = Rc::clone(&live_config);
+        move |_| {
+            let watcher = LiveConfig::new();
+            watcher.install_sighup_handler();
+            *live_config.borrow_mut() = Some(watcher);
+        }
+    });
+
+    live_config
+}
+
 fn run(options: SelectorOptions) -> glib::ExitCode {
     let result = Rc::new(RefCell::new(None::<Vec<String>>));
     let app = gtk::Application::builder()
@@ -176,21 +198,26 @@ fn run(options: SelectorOptions) -> glib::ExitCode {
         .flags(gio::ApplicationFlags::NON_UNIQUE)
         .build();
 
-    app.connect_startup(|_| {
-        let config = AppConfig::load();
-        theme::install(&config);
-    });
+    let live_config = install_live_config(&app);
 
     let activate_options = options.clone();
     let activate_result = Rc::clone(&result);
     app.connect_activate(move |app| {
-        let config = AppConfig::load();
+        let live = live_config.borrow().clone();
+        let config = live
+            .as_ref()
+            .map(|live| (*live.config()).clone())
+            .unwrap_or_default();
+
         let window = AppWindow::new_for_chooser(
             app,
             config,
             activate_options.clone(),
             Rc::clone(&activate_result),
         );
+        if let Some(live) = &live {
+            window.bind_live_config(live);
+        }
         window.present();
     });
 

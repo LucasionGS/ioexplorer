@@ -38,15 +38,22 @@ impl Default for ThemeSettings {
     }
 }
 
+/// The user's CSS, held in a provider we keep a handle on so the file can be
+/// re-read into it after an external edit.
+///
+/// GTK takes its own reference once the provider is installed, so this handle
+/// exists purely to reload — dropping it does not uninstall the stylesheet.
 #[derive(Clone)]
-pub struct LiveTheme {
+pub struct UserCss {
     provider: gtk::CssProvider,
 }
 
-impl LiveTheme {
+impl UserCss {
+    /// Installs an empty provider just above `STYLE_PROVIDER_PRIORITY_USER`, so
+    /// the user's CSS wins over the bundled stylesheet. `None` without a display.
     pub fn new() -> Option<Self> {
         let Some(display) = gtk::gdk::Display::default() else {
-            tracing::warn!("no display available for live CSS provider");
+            tracing::warn!("no display available for the user CSS provider");
             return None;
         };
 
@@ -59,12 +66,33 @@ impl LiveTheme {
         Some(Self { provider })
     }
 
-    pub fn apply_css(&self, css: &str) {
+    pub fn load(&self, css: &str) {
         self.provider.load_from_string(css);
+    }
+
+    pub fn clear(&self) {
+        self.provider.load_from_string("");
     }
 }
 
-pub fn install(config: &AppConfig) {
+/// Installs the bundled stylesheet and the user's CSS, returning the handle the
+/// latter can be reloaded through.
+pub fn install(config: &AppConfig) -> Option<UserCss> {
+    install_bundled();
+
+    let user_css = UserCss::new()?;
+    if let Some(path) = effective_custom_css_path(config) {
+        match fs::read_to_string(&path) {
+            Ok(css) => user_css.load(&css),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => tracing::warn!(?path, %error, "failed to load custom CSS"),
+        }
+    }
+
+    Some(user_css)
+}
+
+pub fn install_bundled() {
     let Some(display) = gtk::gdk::Display::default() else {
         tracing::warn!("no display available for CSS provider");
         return;
@@ -77,21 +105,6 @@ pub fn install(config: &AppConfig) {
         &provider,
         gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
-
-    if let Some(path) = &config.custom_css {
-        match fs::read_to_string(path) {
-            Ok(css) => {
-                let custom = gtk::CssProvider::new();
-                custom.load_from_string(&css);
-                gtk::style_context_add_provider_for_display(
-                    &display,
-                    &custom,
-                    gtk::STYLE_PROVIDER_PRIORITY_USER,
-                );
-            }
-            Err(error) => tracing::warn!(?path, %error, "failed to load custom CSS"),
-        }
-    }
 }
 
 pub fn default_custom_css_path() -> Option<PathBuf> {
@@ -122,10 +135,7 @@ pub fn save_generated_theme(path: &Path, settings: &ThemeSettings) -> io::Result
     };
     let updated = css_with_auto_generated_theme(&existing, settings);
 
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(path, &updated)?;
+    crate::config::write_atomic(path, &updated)?;
     Ok(updated)
 }
 

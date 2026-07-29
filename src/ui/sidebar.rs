@@ -21,6 +21,9 @@ pub struct Sidebar {
     pub computer_button: gtk::ToggleButton,
     pub settings_button: gtk::ToggleButton,
     pub list: gtk::ListBox,
+    /// Retained so the width can follow a config reload; the root alone is not
+    /// enough, since the scroller carries the minimum content width.
+    scroll: gtk::ScrolledWindow,
     places: RefCell<Vec<SidebarPlace>>,
 }
 
@@ -84,10 +87,16 @@ impl Sidebar {
             computer_button,
             settings_button,
             list,
+            scroll,
             places: RefCell::new(Vec::new()),
         };
         sidebar.set_bookmarks(bookmarks);
         sidebar
+    }
+
+    pub fn set_width(&self, width: i32) {
+        self.scroll.set_min_content_width(width);
+        self.root.set_size_request(width, -1);
     }
 
     pub fn place_at(&self, index: usize) -> Option<SidebarPlace> {

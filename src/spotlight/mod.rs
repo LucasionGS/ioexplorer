@@ -16,6 +16,7 @@ mod prefixes;
 mod preview;
 mod query;
 mod results;
+mod runtime;
 mod software;
 mod ssh;
 mod vpn;
@@ -28,11 +29,11 @@ use gtk::prelude::*;
 use tracing_subscriber::{EnvFilter, fmt};
 
 use crate::{
-    config::AppConfig,
     launcher::toggle::{self, ToggleMessage},
-    theme,
+    selector,
 };
 
+use runtime::SpotlightRuntime;
 use window::SpotlightWindow;
 
 const SPOTLIGHT_APP_ID: &str = "io.github.ionix.IoExplorer.Spotlight";
@@ -89,23 +90,29 @@ fn run_application(mode: LaunchMode) -> glib::ExitCode {
         .flags(gio::ApplicationFlags::NON_UNIQUE)
         .build();
 
-    app.connect_startup(|_| {
-        let config = AppConfig::load();
-        theme::install(&config);
-    });
+    let live_config = selector::install_live_config(&app);
 
     app.connect_activate(move |app| {
-        let config = AppConfig::load();
-        let vpn_provider = vpn::resolve(&config.spotlight.vpn);
-        let (prefix_table, ai_providers) =
-            prefixes::resolve_with_ai(&config.spotlight, vpn_provider);
-        let window = SpotlightWindow::new(
-            app,
-            config.spotlight,
-            prefix_table,
-            ai_providers,
-            mode.is_server(),
-        );
+        let live = live_config.borrow().clone();
+        let config = live
+            .as_ref()
+            .map(|live| live.config().spotlight.clone())
+            .unwrap_or_default();
+
+        let window = SpotlightWindow::new(app, SpotlightRuntime::resolve(config), mode.is_server());
+
+        // The server outlives any number of config edits, so it re-resolves
+        // rather than making the user restart the daemon.
+        if let Some(live) = &live {
+            let weak_window = Rc::downgrade(&window);
+            live.connect_changed(move |change| {
+                if change.spotlight_changed()
+                    && let Some(window) = weak_window.upgrade()
+                {
+                    window.apply_config(change.config.spotlight.clone());
+                }
+            });
+        }
 
         match &mode {
             LaunchMode::Server(receiver) => {

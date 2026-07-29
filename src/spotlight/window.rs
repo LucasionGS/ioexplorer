@@ -20,7 +20,7 @@ use crate::{
     spotlight::{
         ToggleRequest,
         ai::{
-            AiError, AiEvent, AiProvider, AiSession, Block, ChatMessage, Provider, Role, markdown,
+            AiError, AiEvent, AiSession, Block, ChatMessage, Provider, Role, markdown,
             tools::{self, AppSummary, ToolCall, ToolDef, ToolKind, ToolOutcome, ToolRunner},
         },
         custom_results::{CustomResult, CustomResultsRunner, ResultsEvent},
@@ -32,7 +32,7 @@ use crate::{
         preview::{self, Preview, PreviewEvent, PreviewKind, PreviewLoader},
         query::{self, Query},
         results::{self, Activation, SpotlightResult},
-        software::Catalog,
+        runtime::SpotlightRuntime,
         ssh::{self, SshHost},
         vpn::{self, VpnSource, VpnState},
         windows::{self, OpenWindow, WindowSource},
@@ -188,12 +188,11 @@ pub struct SpotlightWindow {
     transcript: gtk::Box,
     status_label: gtk::Label,
     empty_label: gtk::Label,
-    config: SpotlightConfig,
-    prefix_table: PrefixTable,
-    /// The software catalog. Resolved once from the config — it is pure data,
-    /// with nothing to load and nothing to invalidate.
-    software: Catalog,
-    ai_providers: Vec<AiProvider>,
+    /// The config section and everything derived from it. Held behind a
+    /// `RefCell` so an external edit to `config.toml` can swap it, and read via
+    /// [`SpotlightWindow::runtime`], which hands out an `Rc` snapshot rather
+    /// than a borrow guard — nothing here may be borrowed across a callback.
+    runtime: RefCell<Rc<SpotlightRuntime>>,
     ai_session: AiSession,
     /// Runs read-only tools off the main thread.
     tool_runner: ToolRunner,
@@ -296,11 +295,10 @@ pub struct SpotlightWindow {
 impl SpotlightWindow {
     pub fn new(
         app: &gtk::Application,
-        config: SpotlightConfig,
-        prefix_table: PrefixTable,
-        ai_providers: Vec<AiProvider>,
+        runtime: Rc<SpotlightRuntime>,
         server_mode: bool,
     ) -> Rc<Self> {
+        let config = &runtime.config;
         let card = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(10)
@@ -561,10 +559,7 @@ impl SpotlightWindow {
             transcript,
             status_label,
             empty_label,
-            software: Catalog::resolve(&config.software),
-            config,
-            prefix_table,
-            ai_providers,
+            runtime: RefCell::new(runtime),
             ai_session: AiSession::new(),
             tool_runner: ToolRunner::new(),
             approval_card: RefCell::new(None),
@@ -738,6 +733,14 @@ impl SpotlightWindow {
         self.live_index.connect_changed(move |_| this.rebuild());
     }
 
+    /// The current config and the tables built from it.
+    ///
+    /// Returns a snapshot rather than a borrow guard, so callers are free to
+    /// hold it across anything that might reload the config underneath them.
+    fn runtime(&self) -> Rc<SpotlightRuntime> {
+        Rc::clone(&self.runtime.borrow())
+    }
+
     /// Re-applies the top offset, skipping the work when nothing moved.
     ///
     /// Setting a margin requests a layout, and a layout can call back into
@@ -749,7 +752,7 @@ impl SpotlightWindow {
         let margin = layout::apply_top_offset(
             &self.window,
             &self.stage,
-            self.config.clamped_top_ratio(),
+            self.runtime().config.clamped_top_ratio(),
             MAX_CARD_HEIGHT,
         );
         self.applied_top_margin.set(margin);
@@ -860,9 +863,10 @@ impl SpotlightWindow {
             return;
         }
 
+        let rt = self.runtime();
         let raw = self.entry.text().to_string();
-        let parsed = query::parse(&raw, &self.prefix_table);
-        let limit = self.config.clamped_result_limit();
+        let parsed = query::parse(&raw, &rt.prefixes);
+        let limit = rt.config.clamped_result_limit();
 
         let mut active_prefix: Option<&Prefix> = None;
         let mut results = match &parsed.query {
@@ -881,7 +885,7 @@ impl SpotlightWindow {
                 self.cancel_async_results();
                 self.ensure_windows();
                 let open = self.open_windows.borrow();
-                let searchable: &[OpenWindow] = match self.config.windows.in_search {
+                let searchable: &[OpenWindow] = match rt.config.windows.in_search {
                     true => &open,
                     false => &[],
                 };
@@ -895,7 +899,7 @@ impl SpotlightWindow {
                 )
             }
             Query::Prefixed { key, arg } => {
-                let Some(prefix) = self.prefix_table.get(key) else {
+                let Some(prefix) = rt.prefixes.get(key) else {
                     return;
                 };
                 active_prefix = Some(prefix);
@@ -918,7 +922,7 @@ impl SpotlightWindow {
                     }
                     PrefixKind::Software => {
                         self.cancel_async_results();
-                        self.software_rows(&prefix.key, arg, limit)
+                        self.software_rows(&rt, &prefix.key, arg, limit)
                     }
                     PrefixKind::Vpn(provider) => {
                         self.cancel_async_results();
@@ -947,7 +951,7 @@ impl SpotlightWindow {
                     }
                     _ => {
                         self.cancel_async_results();
-                        results::prefixed_results(prefix, arg, &self.prefix_table, limit)
+                        results::prefixed_results(prefix, arg, &rt.prefixes, limit)
                     }
                 }
             }
@@ -956,22 +960,22 @@ impl SpotlightWindow {
         // A plain query also offers what it could install, below everything that
         // is already here.
         if let Query::Plain(text) = &parsed.query
-            && self.config.software.in_search
-            && let Some(key) = self.software_prefix_key()
+            && rt.config.software.in_search
+            && let Some(key) = software_prefix_key(&rt.prefixes)
         {
             results.extend(results::software_search_results(
                 key,
                 text,
-                &self.software,
+                &rt.software,
                 &self.live_index.snapshot(),
-                self.config.software.keep_open,
+                rt.config.software.keep_open,
                 limit,
             ));
             results.truncate(limit);
         }
 
         if let Some(key) = &parsed.hint
-            && let Some(prefix) = self.prefix_table.get(key)
+            && let Some(prefix) = rt.prefixes.get(key)
         {
             results.insert(0, results::hint_result(prefix));
             results.truncate(limit);
@@ -980,7 +984,7 @@ impl SpotlightWindow {
         // A plain query with a `default = true` provider also offers to ask it.
         if let Query::Plain(text) = &parsed.query
             && !text.trim().is_empty()
-            && let Some((index, provider)) = self
+            && let Some((index, provider)) = rt
                 .ai_providers
                 .iter()
                 .enumerate()
@@ -1245,7 +1249,7 @@ impl SpotlightWindow {
     fn preview_fits(&self) -> bool {
         let available = self.window.width();
         available == 0
-            || available >= self.config.clamped_width() + 2 * (PREVIEW_WIDTH + PREVIEW_GAP)
+            || available >= self.runtime().config.clamped_width() + 2 * (PREVIEW_WIDTH + PREVIEW_GAP)
     }
 
     fn move_selection(self: &Rc<Self>, delta: i32) {
@@ -1306,11 +1310,12 @@ impl SpotlightWindow {
         }
 
         // Only re-render while the file-search prefix is still active.
-        let parsed = query::parse(&self.entry.text(), &self.prefix_table);
+        let rt = self.runtime();
+        let parsed = query::parse(&self.entry.text(), &rt.prefixes);
         let Query::Prefixed { key, .. } = &parsed.query else {
             return;
         };
-        let Some(prefix) = self.prefix_table.get(key) else {
+        let Some(prefix) = rt.prefixes.get(key) else {
             return;
         };
         if !matches!(prefix.kind, PrefixKind::FileSearch) {
@@ -1318,7 +1323,7 @@ impl SpotlightWindow {
         }
 
         let selected = self.selected.get();
-        let results = self.file_results(self.config.clamped_result_limit());
+        let results = self.file_results(rt.config.clamped_result_limit());
         self.render(results);
         self.select(selected);
     }
@@ -1437,30 +1442,22 @@ impl SpotlightWindow {
     }
 
     /// The rows for the software prefix: categories, or the apps inside one.
-    fn software_rows(&self, prefix_key: &str, arg: &str, limit: usize) -> Vec<SpotlightResult> {
+    fn software_rows(
+        &self,
+        rt: &SpotlightRuntime,
+        prefix_key: &str,
+        arg: &str,
+        limit: usize,
+    ) -> Vec<SpotlightResult> {
         results::software_results(
             prefix_key,
             arg,
-            &self.software,
-            self.config.software.keep_open,
+            &rt.software,
+            rt.config.software.keep_open,
             &self.frecency.borrow(),
             frecency::now_secs(),
             limit,
         )
-    }
-
-    /// The key the software prefix actually ended up on, or `None` when it is
-    /// not in the table at all.
-    ///
-    /// Read from the table rather than from the config, so a prefix the user
-    /// disabled or took over for something else does not leave plain queries
-    /// pointing at a key that no longer opens the catalog.
-    fn software_prefix_key(&self) -> Option<&str> {
-        self.prefix_table
-            .all()
-            .iter()
-            .find(|prefix| prefix.kind == PrefixKind::Software)
-            .map(|prefix| prefix.key.as_str())
     }
 
     /// The rows for the ssh prefix, or one row explaining why there are none.
@@ -1698,14 +1695,15 @@ impl SpotlightWindow {
             return false;
         }
 
-        let parsed = query::parse(&self.entry.text(), &self.prefix_table);
+        let rt = self.runtime();
+        let parsed = query::parse(&self.entry.text(), &rt.prefixes);
         let Query::Prefixed { key, arg } = &parsed.query else {
             return false;
         };
         // A prefix with nothing typed after it has not run anything to page.
         !arg.trim().is_empty()
             && matches!(
-                self.prefix_table.get(key).map(|prefix| &prefix.kind),
+                rt.prefixes.get(key).map(|prefix| &prefix.kind),
                 Some(PrefixKind::CustomResults {
                     paginated: true,
                     ..
@@ -1735,11 +1733,12 @@ impl SpotlightWindow {
         self.custom_pending.set(false);
 
         // Only re-render while a get_results prefix is still active.
-        let parsed = query::parse(&self.entry.text(), &self.prefix_table);
+        let rt = self.runtime();
+        let parsed = query::parse(&self.entry.text(), &rt.prefixes);
         let Query::Prefixed { key, arg } = &parsed.query else {
             return;
         };
-        let Some(prefix) = self.prefix_table.get(key) else {
+        let Some(prefix) = rt.prefixes.get(key) else {
             return;
         };
         let PrefixKind::CustomResults {
@@ -1759,7 +1758,7 @@ impl SpotlightWindow {
             action.as_deref(),
             *terminal,
             *icon_size,
-            self.config.clamped_result_limit(),
+            rt.config.clamped_result_limit(),
         );
         self.render(results);
         self.select(selected);
@@ -1856,7 +1855,8 @@ impl SpotlightWindow {
     /// A prompt from the results list always starts a fresh conversation;
     /// re-entering without one resumes whatever is already there.
     fn enter_chat(self: &Rc<Self>, provider_index: usize, prompt: &str) {
-        let Some(provider) = self.ai_providers.get(provider_index) else {
+        let rt = self.runtime();
+        let Some(provider) = rt.ai_providers.get(provider_index) else {
             return;
         };
 
@@ -2754,6 +2754,30 @@ impl SpotlightWindow {
         });
     }
 
+    /// Adopts a reloaded config, re-resolving everything derived from it.
+    ///
+    /// The width applies straight away because it costs nothing while hidden,
+    /// but the layout and the result list are only redone when the window is on
+    /// screen: the daemon spends most of its life hidden, [`show`](Self::show)
+    /// redoes both anyway, and [`reflow`](Self::reflow) reads a surface height
+    /// that means nothing for an unmapped window.
+    ///
+    /// A running conversation survives: [`ChatState`] holds cloned provider
+    /// data rather than an index into the swapped-out list.
+    pub fn apply_config(self: &Rc<Self>, config: SpotlightConfig) {
+        let runtime = SpotlightRuntime::resolve(config);
+        let width = runtime.config.clamped_width();
+        *self.runtime.borrow_mut() = runtime;
+
+        self.card.set_width_request(width);
+        self.window.set_default_width(width);
+
+        if self.window.is_visible() {
+            self.reflow();
+            self.rebuild();
+        }
+    }
+
     /// Hiding keeps the conversation: reopening and re-entering chat resumes it.
     /// The daemon holds it in memory only — nothing is written to disk, and it
     /// is gone on restart.
@@ -2797,6 +2821,20 @@ impl SpotlightWindow {
             self.app.quit();
         }
     }
+}
+
+/// The key the software prefix actually ended up on, or `None` when it is not
+/// in the table at all.
+///
+/// Read from the table rather than from the config, so a prefix the user
+/// disabled or took over for something else does not leave plain queries
+/// pointing at a key that no longer opens the catalog.
+fn software_prefix_key(prefixes: &PrefixTable) -> Option<&str> {
+    prefixes
+        .all()
+        .iter()
+        .find(|prefix| prefix.kind == PrefixKind::Software)
+        .map(|prefix| prefix.key.as_str())
 }
 
 fn footer(keys: &[(&str, &str)]) -> gtk::Box {

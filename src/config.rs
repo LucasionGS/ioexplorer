@@ -1,4 +1,7 @@
-use std::{fs, io, path::PathBuf};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+};
 
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
@@ -14,7 +17,7 @@ pub enum ViewMode {
     Icon,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ListColumns {
     pub size: bool,
     pub kind: bool,
@@ -469,7 +472,7 @@ impl SpotlightConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
 pub struct AppConfig {
     pub default_view: ViewMode,
     pub show_hidden: bool,
@@ -502,19 +505,68 @@ impl Default for AppConfig {
     }
 }
 
+/// Why a config file could not be turned into an [`AppConfig`].
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    #[error("failed to read {path}: {source}")]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("failed to parse {path}: {source}")]
+    Parse {
+        path: PathBuf,
+        #[source]
+        source: toml::de::Error,
+    },
+}
+
 impl AppConfig {
     pub fn load() -> Self {
-        let Some(path) = Self::config_path() else {
-            return Self::default();
+        match Self::load_result() {
+            Ok(Some(config)) => config,
+            Ok(None) => Self::default(),
+            Err(error) => {
+                tracing::warn!(%error, "failed to load config, using defaults");
+                Self::default()
+            }
+        }
+    }
+
+    /// Reads and parses a config file.
+    ///
+    /// `Ok(None)` means the file is absent, which is a first run rather than a
+    /// failure. Everything else is returned instead of swallowed, so a *reload*
+    /// can keep the last good config rather than silently resetting someone who
+    /// is halfway through editing it.
+    pub fn try_load_from(path: &Path) -> Result<Option<Self>, ConfigError> {
+        let contents = match fs::read_to_string(path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => {
+                return Err(ConfigError::Read {
+                    path: path.to_path_buf(),
+                    source,
+                });
+            }
         };
 
-        match fs::read_to_string(path) {
-            Ok(contents) => toml::from_str(&contents).unwrap_or_else(|error| {
-                tracing::warn!(%error, "failed to parse config, using defaults");
-                Self::default()
-            }),
-            Err(_) => Self::default(),
-        }
+        toml::from_str(&contents)
+            .map(Some)
+            .map_err(|source| ConfigError::Parse {
+                path: path.to_path_buf(),
+                source,
+            })
+    }
+
+    /// [`try_load_from`](Self::try_load_from) against [`config_path`](Self::config_path).
+    pub fn load_result() -> Result<Option<Self>, ConfigError> {
+        let Some(path) = Self::config_path() else {
+            return Ok(None);
+        };
+
+        Self::try_load_from(&path)
     }
 
     pub fn config_path() -> Option<PathBuf> {
@@ -527,13 +579,39 @@ impl AppConfig {
             return Ok(());
         };
 
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        let contents = toml::to_string_pretty(self).map_err(io::Error::other)?;
-        fs::write(path, contents)
+        self.save_to(&path)
     }
+
+    pub fn save_to(&self, path: &Path) -> io::Result<()> {
+        let contents = toml::to_string_pretty(self).map_err(io::Error::other)?;
+        write_atomic(path, &contents)
+    }
+}
+
+/// Writes `contents` to `path` by renaming a sibling temporary over it.
+///
+/// A plain `fs::write` truncates first, so anything watching the file can read
+/// it in that window and see an empty or half-written config. A rename within
+/// the same directory is atomic, and produces one event rather than a burst.
+pub fn write_atomic(path: &Path, contents: &str) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| io::Error::other(format!("{} has no file name", path.display())))?;
+    let mut temp_name = file_name.to_os_string();
+    temp_name.push(format!(".{}.tmp", std::process::id()));
+    let temp = path.with_file_name(temp_name);
+
+    fs::write(&temp, contents)?;
+    if let Err(error) = fs::rename(&temp, path) {
+        let _ = fs::remove_file(&temp);
+        return Err(error);
+    }
+
+    Ok(())
 }
 
 pub fn clamp_icon_size(icon_size: i32) -> i32 {
@@ -543,6 +621,59 @@ pub fn clamp_icon_size(icon_size: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_missing_config_is_not_a_failure() {
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        let loaded = AppConfig::try_load_from(&dir.path().join("config.toml"));
+
+        assert!(matches!(loaded, Ok(None)));
+    }
+
+    #[test]
+    fn reads_a_valid_config() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("config.toml");
+        let written = AppConfig {
+            sidebar_width: 321,
+            ..AppConfig::default()
+        };
+        written.save_to(&path).expect("write the config under test");
+
+        let loaded = AppConfig::try_load_from(&path).expect("readable").expect("present");
+
+        assert_eq!(loaded, written);
+    }
+
+    #[test]
+    fn a_malformed_config_reports_the_parse_error() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "default_view = ").expect("write the config under test");
+
+        let error = AppConfig::try_load_from(&path).expect_err("malformed TOML");
+
+        assert!(matches!(error, ConfigError::Parse { .. }));
+    }
+
+    #[test]
+    fn atomic_writes_replace_the_file_and_leave_no_temporary() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("theme.css");
+
+        write_atomic(&path, "first").expect("first write");
+        write_atomic(&path, "second").expect("overwrite");
+
+        assert_eq!(fs::read_to_string(&path).expect("readable"), "second");
+        let leftovers: Vec<_> = fs::read_dir(dir.path())
+            .expect("listable")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name())
+            .filter(|name| name != "theme.css")
+            .collect();
+        assert!(leftovers.is_empty(), "stray files: {leftovers:?}");
+    }
 
     #[test]
     fn parses_view_mode_names() {

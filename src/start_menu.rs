@@ -14,13 +14,12 @@ use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use tracing_subscriber::{EnvFilter, fmt};
 
 use crate::{
-    config::AppConfig,
     launcher::{
         app_index::{AppIndex, IconRef, LiveAppIndex},
         icons, spawn,
         toggle::{self, ToggleMessage},
     },
-    theme,
+    live_config::LiveConfig,
 };
 
 const START_MENU_APP_ID: &str = "io.github.ionix.IoExplorer.StartMenu";
@@ -95,12 +94,23 @@ fn run_application(mode: LaunchMode, placement: StartPlacement) -> glib::ExitCod
         .flags(gio::ApplicationFlags::NON_UNIQUE)
         .build();
 
-    app.connect_startup(|_| {
-        let config = AppConfig::load();
-        theme::install(&config);
+    // The start menu keeps no config of its own, but it does render the user's
+    // theme, so it holds a watcher purely to keep that CSS current.
+    let live_config: Rc<RefCell<Option<Rc<LiveConfig>>>> = Rc::new(RefCell::new(None));
+
+    app.connect_startup({
+        let live_config = Rc::clone(&live_config);
+        move |_| {
+            let watcher = LiveConfig::new();
+            watcher.install_sighup_handler();
+            *live_config.borrow_mut() = Some(watcher);
+        }
     });
 
     app.connect_activate(move |app| {
+        // Captured, not read: the watcher has to outlive `activate`, and
+        // dropping it would cancel its monitors and freeze the theme.
+        let _live_config = &live_config;
         let window = StartMenuWindow::new(app, mode.is_server(), placement);
         if let LaunchMode::Server(receiver) = &mode
             && let Some(receiver) = receiver.borrow_mut().take()

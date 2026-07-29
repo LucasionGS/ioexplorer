@@ -8,6 +8,7 @@ mod bookmarks;
 mod config;
 mod custom_actions;
 mod launcher;
+mod live_config;
 mod providers;
 mod selector;
 mod state;
