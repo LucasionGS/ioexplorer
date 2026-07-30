@@ -1,10 +1,22 @@
-use std::{cell::RefCell, env, path::PathBuf, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    env,
+    path::PathBuf,
+    rc::Rc,
+};
 
 use gtk::prelude::*;
 
 use crate::{live_config::LiveConfig, ui::window::AppWindow};
 
 const SELECTOR_APP_ID: &str = "io.github.ionix.IoExplorer.Selector";
+
+/// Exit code for "the user closed the chooser without picking anything".
+///
+/// Deliberately distinct from `FAILURE`, which now means the chooser never got
+/// as far as showing a window. A caller that cannot tell those apart reports a
+/// broken chooser as a cancelled one, and the user sees nothing happen at all.
+pub const EXIT_CANCELLED: u8 = 2;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SelectorMode {
@@ -193,6 +205,7 @@ pub fn install_live_config(app: &gtk::Application) -> Rc<RefCell<Option<Rc<LiveC
 
 fn run(options: SelectorOptions) -> glib::ExitCode {
     let result = Rc::new(RefCell::new(None::<Vec<String>>));
+    let presented = Rc::new(Cell::new(false));
     let app = gtk::Application::builder()
         .application_id(SELECTOR_APP_ID)
         .flags(gio::ApplicationFlags::NON_UNIQUE)
@@ -202,7 +215,9 @@ fn run(options: SelectorOptions) -> glib::ExitCode {
 
     let activate_options = options.clone();
     let activate_result = Rc::clone(&result);
+    let activate_presented = Rc::clone(&presented);
     app.connect_activate(move |app| {
+        activate_presented.set(true);
         let live = live_config.borrow().clone();
         let config = live
             .as_ref()
@@ -221,10 +236,20 @@ fn run(options: SelectorOptions) -> glib::ExitCode {
         window.present();
     });
 
-    app.run_with_args(&["ioexplorer-selector"]);
+    let status = app.run_with_args(&["ioexplorer-selector"]);
+
+    // No activation means no window was ever shown — no display to connect to,
+    // most commonly. That is a failure to run, not a user declining to choose.
+    if !presented.get() {
+        return if status == glib::ExitCode::SUCCESS {
+            glib::ExitCode::FAILURE
+        } else {
+            status
+        };
+    }
 
     let Some(uris) = result.borrow().clone() else {
-        return glib::ExitCode::FAILURE;
+        return glib::ExitCode::from(EXIT_CANCELLED);
     };
 
     for uri in uris {

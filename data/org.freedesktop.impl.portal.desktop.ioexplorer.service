@@ -1,3 +1,4 @@
 [D-BUS Service]
 Name=org.freedesktop.impl.portal.desktop.ioexplorer
-Exec=ioexplorer-portal
+Exec=/usr/bin/ioexplorer-portal
+SystemdService=ioexplorer-portal.service

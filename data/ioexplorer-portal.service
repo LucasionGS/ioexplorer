@@ -1,0 +1,9 @@
+[Unit]
+Description=IoExplorer Portal Backend (FileChooser)
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=dbus
+BusName=org.freedesktop.impl.portal.desktop.ioexplorer
+ExecStart=/usr/bin/ioexplorer-portal

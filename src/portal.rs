@@ -3,6 +3,8 @@ use std::{env, path::PathBuf, process::Command};
 use gio::{glib, prelude::*};
 use tracing_subscriber::{EnvFilter, fmt};
 
+use crate::selector;
+
 const PORTAL_BUS_NAME: &str = "org.freedesktop.impl.portal.desktop.ioexplorer";
 const PORTAL_OBJECT_PATH: &str = "/org/freedesktop/portal/desktop";
 const FILE_CHOOSER_INTERFACE: &str = "org.freedesktop.impl.portal.FileChooser";
@@ -148,7 +150,13 @@ fn handle_file_chooser_call(method_name: &str, parameters: &glib::Variant) -> (u
 }
 
 fn run_selector(args: Vec<String>) -> (u32, glib::Variant) {
-    let output = match Command::new(selector_binary()).args(args).output() {
+    let mut command = Command::new(selector_binary());
+    command.args(args);
+    for (key, value) in session_display_environment() {
+        command.env(key, value);
+    }
+
+    let output = match command.output() {
         Ok(output) => output,
         Err(error) => {
             tracing::error!(%error, "failed to launch IoExplorer selector");
@@ -156,8 +164,19 @@ fn run_selector(args: Vec<String>) -> (u32, glib::Variant) {
         }
     };
 
-    if !output.status.success() {
+    if output.status.code() == Some(i32::from(selector::EXIT_CANCELLED)) {
         return (RESPONSE_CANCELLED, empty_results());
+    }
+
+    if !output.status.success() {
+        // Reporting this as a cancellation is what makes a broken chooser look
+        // like nothing happening at all, so say what went wrong instead.
+        tracing::error!(
+            status = ?output.status.code(),
+            stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+            "IoExplorer selector exited without choosing"
+        );
+        return (RESPONSE_ERROR, empty_results());
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -173,6 +192,80 @@ fn run_selector(args: Vec<String>) -> (u32, glib::Variant) {
     let results = glib::VariantDict::new(None);
     results.insert_value("uris", &uris.to_variant());
     (RESPONSE_SUCCESS, results.to_variant())
+}
+
+/// Variables the chooser needs in order to open a window at all.
+const SESSION_DISPLAY_KEYS: &[&str] = &[
+    "WAYLAND_DISPLAY",
+    "DISPLAY",
+    "XDG_CURRENT_DESKTOP",
+    "XDG_SESSION_TYPE",
+];
+
+/// The session's display variables, taken from systemd rather than trusted from
+/// our own environment.
+///
+/// D-Bus can activate this backend before the compositor has published
+/// `WAYLAND_DISPLAY` into the activation environment — in which case we inherit
+/// no display at all, and every chooser we spawn dies with "Failed to open
+/// display" before drawing anything. The session manager always knows the
+/// current values, so ask it rather than assume we were started late enough.
+///
+/// Only fills gaps: a variable we already hold was set deliberately and wins.
+fn session_display_environment() -> Vec<(String, String)> {
+    let missing = SESSION_DISPLAY_KEYS
+        .iter()
+        .filter(|key| env::var_os(key).is_none())
+        .count();
+    if missing == 0 {
+        return Vec::new();
+    }
+
+    let output = match Command::new("systemctl")
+        .args(["--user", "show-environment"])
+        .output()
+    {
+        Ok(output) if output.status.success() => output.stdout,
+        Ok(_) | Err(_) => {
+            tracing::warn!("could not read the session environment from systemd");
+            return Vec::new();
+        }
+    };
+
+    let imported = parse_systemd_environment(&String::from_utf8_lossy(&output))
+        .into_iter()
+        .filter(|(key, _)| env::var_os(key).is_none())
+        .collect::<Vec<_>>();
+    if !imported.is_empty() {
+        tracing::info!(
+            keys = ?imported.iter().map(|(key, _)| key.as_str()).collect::<Vec<_>>(),
+            "took display variables from the session environment"
+        );
+    }
+    imported
+}
+
+/// Parses `systemctl --user show-environment` output, keeping the display
+/// variables and discarding everything else in the session environment.
+fn parse_systemd_environment(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .filter_map(|line| line.split_once('='))
+        .filter(|(key, _)| SESSION_DISPLAY_KEYS.contains(key))
+        .filter_map(|(key, value)| {
+            let value = unquote_systemd_value(value)?;
+            (!value.is_empty()).then(|| (key.to_string(), value))
+        })
+        .collect()
+}
+
+/// systemd quotes values that need it. Display variables never do, so anything
+/// carrying escapes is skipped rather than half-parsed into something wrong.
+fn unquote_systemd_value(value: &str) -> Option<String> {
+    let Some(inner) = value.strip_prefix('"').and_then(|v| v.strip_suffix('"')) else {
+        return (!value.contains(['"', '\'', '\\'])).then(|| value.to_string());
+    };
+
+    (!inner.contains('\\')).then(|| inner.to_string())
 }
 
 fn selector_binary() -> PathBuf {
@@ -273,6 +366,38 @@ mod tests {
         let options = glib::VariantDict::new(Some(&options_variant));
 
         assert!(lookup_bool(&options, "multiple"));
+    }
+
+    #[test]
+    fn keeps_only_display_variables_from_the_session_environment() {
+        let imported = parse_systemd_environment(
+            "LANG=en_US.UTF-8\n\
+             WAYLAND_DISPLAY=wayland-1\n\
+             PATH=/usr/bin\n\
+             DISPLAY=:0\n",
+        );
+
+        assert_eq!(
+            imported,
+            vec![
+                ("WAYLAND_DISPLAY".to_string(), "wayland-1".to_string()),
+                ("DISPLAY".to_string(), ":0".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn unwraps_quoted_values_and_skips_escaped_ones() {
+        assert_eq!(
+            parse_systemd_environment("XDG_CURRENT_DESKTOP=\"GNOME:Ubuntu\"\n"),
+            vec![(
+                "XDG_CURRENT_DESKTOP".to_string(),
+                "GNOME:Ubuntu".to_string()
+            )]
+        );
+        // Half-parsing an escaped value would hand the chooser a wrong display.
+        assert!(parse_systemd_environment("DISPLAY=\"a\\nb\"\n").is_empty());
+        assert!(parse_systemd_environment("DISPLAY=\n").is_empty());
     }
 
     #[test]
