@@ -14,6 +14,7 @@ use crate::{
     spotlight::{
         calc,
         custom_results::CustomResult,
+        passwords,
         paths::{self, PathCandidate},
         prefixes::{
             DEFAULT_RESULTS_ICON_SIZE, Prefix, PrefixKind, PrefixTable, build_action_line,
@@ -38,6 +39,15 @@ pub enum Activation {
     RunShell(String),
     RunInTerminal(String),
     CopyText(String),
+    /// Fetch a secret from a password manager and put *that* on the clipboard.
+    ///
+    /// Distinct from [`Activation::CopyText`] rather than folded into it,
+    /// because the difference is the whole point: a row is rebuilt and cloned on
+    /// every keystroke and derives `Debug`, so a `CopyText` holding a password
+    /// would leave copies of it across the process and in any trace of a result.
+    /// This carries the identifiers to ask for one, and the value exists only
+    /// between the client answering and the clipboard taking it.
+    CopySecret(passwords::SecretRequest),
     /// Rewrite the entry text, e.g. accepting a prefix hint or a path completion.
     Replace(String),
     /// Open the chat view and send `prompt` to the provider at this index.
@@ -328,6 +338,7 @@ pub fn prefixed_results(
         PrefixKind::Ssh => Vec::new(),        // filled by the window from the ssh config it loaded
         PrefixKind::Software => Vec::new(),   // filled by the window from the catalog it resolved
         PrefixKind::Vpn(_) => Vec::new(),     // filled asynchronously by the vpn client
+        PrefixKind::Passwords(_) => Vec::new(), // filled asynchronously by the vault search
         PrefixKind::CustomResults { .. } => Vec::new(), // filled asynchronously by the runner
         PrefixKind::Command { command, terminal } => {
             command_results(prefix, command, *terminal, arg)
@@ -671,6 +682,181 @@ fn vpn_location_caption(location: &vpn::Location, state: &vpn::VpnState, line: &
 
 /// The row shown instead of a VPN list when there is nothing to list.
 pub fn vpn_notice(prefix: &Prefix, note: &str) -> SpotlightResult {
+    SpotlightResult::new(
+        prefix.label.clone(),
+        note,
+        IconRef::from_icon_name(prefix.icon.clone()),
+    )
+}
+
+// -- password managers -----------------------------------------------------
+
+/// Artwork for a vault entry.
+const PASSWORD_ENTRY_ICON: &str = "dialog-password-symbolic";
+/// Artwork for the one-time-code row, deliberately not the entry's: the two rows
+/// sit next to each other and copy different things, and at a glance that has to
+/// be visible.
+const PASSWORD_TOTP_ICON: &str = "changes-prevent-symbolic";
+
+/// Builds the rows for the password prefix: one per matching entry, each
+/// followed by a code row where the entry has a one-time-password field.
+///
+/// The vault has already filtered by the same text — see
+/// [`passwork::search_args`](super::passwords) — so the fuzzy pass here is
+/// ranking rather than filtering, and it re-ranks a listing fetched two
+/// keystrokes ago while the current one is still in flight. That is what keeps
+/// the list from emptying and refilling under the user as they type.
+pub fn password_results(
+    prefix: &Prefix,
+    arg: &str,
+    provider: passwords::Provider,
+    state: &passwords::VaultState,
+    frecency: &Frecency,
+    now_secs: u64,
+    limit: usize,
+) -> Vec<SpotlightResult> {
+    let query = arg.trim();
+    // Grouped, then sorted by group, rather than sorted flat: a code row is only
+    // ever wanted for the entry it belongs to, and scoring it just below its
+    // entry would still let another entry on the same score slip between them.
+    let mut groups: Vec<Vec<SpotlightResult>> = Vec::new();
+
+    for entry in &state.entries {
+        let tags = entry.tags.join(" ");
+        let Some(found) = fuzzy::match_fields(
+            query,
+            &[
+                Field::new(entry.name.as_str(), 100),
+                Field::new(entry.login.as_str(), 80),
+                Field::new(entry.url.as_str(), 60),
+                Field::new(entry.folder.as_str(), 40),
+                Field::new(tags.as_str(), 30),
+            ],
+        ) else {
+            continue;
+        };
+
+        let key = format!("password:{}:{}", provider.id(), entry.id);
+        let mut row = password_entry_row(prefix, provider, entry);
+        row.score = found.score + frecency.bonus(&key, now_secs, FRECENCY_MAX_BONUS);
+        row.frecency_key = Some(key);
+
+        let mut group = vec![row];
+        if let Some(field) = &entry.totp_field {
+            let mut code = password_totp_row(provider, entry, field);
+            code.score = group[0].score.saturating_sub(1);
+            group.push(code);
+        }
+        groups.push(group);
+    }
+
+    // The same ordering `sort_results` applies, read off each group's heading.
+    groups.sort_by(|left, right| {
+        let (left, right) = (&left[0], &right[0]);
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.title.chars().count().cmp(&right.title.chars().count()))
+            .then_with(|| left.title.cmp(&right.title))
+    });
+
+    let mut results = groups.into_iter().flatten().collect::<Vec<_>>();
+    results.truncate(limit);
+    results
+}
+
+fn password_entry_row(
+    prefix: &Prefix,
+    provider: passwords::Provider,
+    entry: &passwords::Entry,
+) -> SpotlightResult {
+    let request = |field| passwords::SecretRequest {
+        provider,
+        id: entry.id.clone(),
+        shortcut: entry.shortcut,
+        field,
+    };
+
+    let mut row = SpotlightResult::new(
+        entry.name.clone(),
+        entry.summary(),
+        IconRef::from_icon_name(PASSWORD_ENTRY_ICON),
+    );
+    row.primary = Activation::CopySecret(request(passwords::SecretField::Password));
+    // Only where there is one to copy. An empty secondary would answer Ctrl+Enter
+    // by falling through to the primary, which silently copies the password when
+    // the user asked for the username — the one mistake this row must not make.
+    row.secondary = match entry.login.is_empty() {
+        true => None,
+        false => Some(Activation::CopySecret(request(
+            passwords::SecretField::Login,
+        ))),
+    };
+    row.preview = Some(Preview::icon(
+        PASSWORD_ENTRY_ICON,
+        password_caption(provider, entry),
+    ));
+    row.completion = Some(format!("{} {}", prefix.key, entry.name));
+    row
+}
+
+fn password_totp_row(
+    provider: passwords::Provider,
+    entry: &passwords::Entry,
+    field: &str,
+) -> SpotlightResult {
+    let mut row = SpotlightResult::new(
+        format!("{} · one-time code", entry.name),
+        format!("Copy the current code from {field}"),
+        IconRef::from_icon_name(PASSWORD_TOTP_ICON),
+    );
+    row.primary = Activation::CopySecret(passwords::SecretRequest {
+        provider,
+        id: entry.id.clone(),
+        shortcut: entry.shortcut,
+        field: passwords::SecretField::Totp(field.to_string()),
+    });
+    row.preview = Some(Preview::icon(
+        PASSWORD_TOTP_ICON,
+        format!(
+            "{}\n{}\n\nEnter copies the code {} derives from {field}.",
+            entry.name,
+            provider.label(),
+            provider.label()
+        ),
+    ));
+    // No frecency key. Codes are asked for as often as their entry is, and
+    // teaching the ranking to float them above it would put the second step of
+    // a login ahead of the first.
+    row
+}
+
+/// The panel beside the list. Says what each key does, because a row that copies
+/// something invisible gives no other feedback that it worked.
+fn password_caption(provider: passwords::Provider, entry: &passwords::Entry) -> String {
+    let mut lines = vec![entry.name.clone()];
+
+    let summary = entry.summary();
+    if !summary.is_empty() {
+        lines.push(summary);
+    }
+    if !entry.tags.is_empty() {
+        lines.push(entry.tags.join(", "));
+    }
+
+    lines.push(String::new());
+    lines.push(format!(
+        "Enter copies the password from {}",
+        provider.label()
+    ));
+    if !entry.login.is_empty() {
+        lines.push("Ctrl+Enter copies the username".to_string());
+    }
+    lines.join("\n")
+}
+
+/// The row shown instead of vault entries when there are none to show.
+pub fn passwords_notice(prefix: &Prefix, note: &str) -> SpotlightResult {
     SpotlightResult::new(
         prefix.label.clone(),
         note,
@@ -1280,7 +1466,7 @@ mod tests {
     use crate::spotlight::{prefixes, preview::PreviewKind};
 
     fn table() -> PrefixTable {
-        prefixes::resolve_with_ai(&SpotlightConfig::default(), None).0
+        prefixes::resolve_with_ai(&SpotlightConfig::default(), None, None).0
     }
 
     #[test]
@@ -1660,11 +1846,15 @@ mod tests {
     // -- vpn ---------------------------------------------------------------
 
     fn vpn_prefix() -> Prefix {
-        prefixes::resolve_with_ai(&SpotlightConfig::default(), Some(vpn::Provider::Windscribe))
-            .0
-            .get("vpn")
-            .expect("vpn prefix")
-            .clone()
+        prefixes::resolve_with_ai(
+            &SpotlightConfig::default(),
+            Some(vpn::Provider::Windscribe),
+            None,
+        )
+        .0
+        .get("vpn")
+        .expect("vpn prefix")
+        .clone()
     }
 
     fn vpn_location(name: &str, region: &str, nickname: &str) -> vpn::Location {
@@ -1820,6 +2010,206 @@ mod tests {
 
         assert_eq!(vpn_rows("", &state, 5).len(), 5);
         assert_eq!(vpn_rows("city", &state, 5).len(), 5);
+    }
+
+    // -- password managers --------------------------------------------------
+
+    fn password_prefix() -> Prefix {
+        let config = SpotlightConfig {
+            passwords: crate::config::SpotlightPasswordsConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        prefixes::resolve_with_ai(&config, None, Some(passwords::Provider::Passwork))
+            .0
+            .get("pw")
+            .expect("passwords prefix")
+            .clone()
+    }
+
+    fn vault_entry(name: &str, login: &str, totp: Option<&str>) -> passwords::Entry {
+        passwords::Entry {
+            id: format!("id-{name}"),
+            shortcut: false,
+            name: name.to_string(),
+            login: login.to_string(),
+            url: format!("https://{}.example.com", name.to_lowercase()),
+            folder: "Work / Dev".to_string(),
+            tags: vec!["ci".to_string()],
+            totp_field: totp.map(str::to_string),
+        }
+    }
+
+    fn vault_state(query: &str, entries: Vec<passwords::Entry>) -> passwords::VaultState {
+        passwords::VaultState {
+            query: query.to_string(),
+            entries,
+        }
+    }
+
+    fn password_rows(
+        arg: &str,
+        state: &passwords::VaultState,
+        limit: usize,
+    ) -> Vec<SpotlightResult> {
+        password_results(
+            &password_prefix(),
+            arg,
+            passwords::Provider::Passwork,
+            state,
+            &Frecency::default(),
+            0,
+            limit,
+        )
+    }
+
+    fn secret(row: &SpotlightResult) -> &passwords::SecretRequest {
+        match &row.primary {
+            Activation::CopySecret(request) => request,
+            other => panic!("expected a secret activation, got {other:?}"),
+        }
+    }
+
+    /// The invariant the whole design rests on: a row knows how to *ask* for a
+    /// secret and never holds one. Rows are cloned on every keystroke, so a
+    /// password in here would be copied across the process on every letter typed.
+    #[test]
+    fn a_row_carries_identifiers_rather_than_a_secret() {
+        let state = vault_state("", vec![vault_entry("GitHub", "lucasion", None)]);
+
+        let rows = password_rows("", &state, 10);
+
+        assert_eq!(rows.len(), 1);
+        let request = secret(&rows[0]);
+        assert_eq!(request.id, "id-GitHub");
+        assert!(!request.shortcut);
+        assert_eq!(request.field, passwords::SecretField::Password);
+    }
+
+    #[test]
+    fn enter_copies_the_password_and_ctrl_enter_the_username() {
+        let state = vault_state("", vec![vault_entry("GitHub", "lucasion", None)]);
+
+        let rows = password_rows("", &state, 10);
+
+        assert_eq!(rows[0].title, "GitHub");
+        assert_eq!(
+            rows[0].subtitle,
+            "lucasion · Work / Dev · https://github.example.com"
+        );
+        assert_eq!(secret(&rows[0]).field, passwords::SecretField::Password);
+        assert_eq!(
+            rows[0].secondary,
+            Some(Activation::CopySecret(passwords::SecretRequest {
+                provider: passwords::Provider::Passwork,
+                id: "id-GitHub".to_string(),
+                shortcut: false,
+                field: passwords::SecretField::Login,
+            }))
+        );
+        assert_eq!(rows[0].completion.as_deref(), Some("pw GitHub"));
+    }
+
+    /// Falling through to the primary is what an absent secondary does, and here
+    /// that would copy the password when the user asked for a username they can
+    /// see the row does not have.
+    #[test]
+    fn an_entry_without_a_login_offers_no_secondary() {
+        let state = vault_state("", vec![vault_entry("Router", "", None)]);
+
+        let rows = password_rows("", &state, 10);
+
+        assert_eq!(rows[0].secondary, None);
+    }
+
+    #[test]
+    fn an_entry_with_a_totp_field_gains_a_code_row() {
+        let state = vault_state("", vec![vault_entry("GitHub", "lucasion", Some("TOTP"))]);
+
+        let rows = password_rows("", &state, 10);
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].title, "GitHub · one-time code");
+        assert_eq!(
+            secret(&rows[1]).field,
+            passwords::SecretField::Totp("TOTP".to_string())
+        );
+        // The code is worthless a minute later, so nothing is learned by
+        // recording it — and a code row outranking its own entry would put the
+        // second step of a login ahead of the first.
+        assert_eq!(rows[1].frecency_key, None);
+    }
+
+    /// A code row belongs directly under the entry it belongs to, whatever else
+    /// scores alongside it. Ranking it as a row of its own lets another entry on
+    /// the same score slip between the two.
+    #[test]
+    fn a_code_row_stays_with_its_entry() {
+        let state = vault_state(
+            "",
+            vec![
+                vault_entry("GitHub", "lucasion", Some("TOTP")),
+                vault_entry("GitLab", "lucasion", Some("TOTP")),
+            ],
+        );
+
+        let titles = password_rows("", &state, 10)
+            .into_iter()
+            .map(|row| row.title)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            titles,
+            [
+                "GitHub",
+                "GitHub · one-time code",
+                "GitLab",
+                "GitLab · one-time code",
+            ]
+        );
+    }
+
+    /// The vault has already filtered by the same text, so this pass is ranking.
+    /// It still has to rank, because the listing being re-ranked was fetched for
+    /// whatever the user had typed two keystrokes ago.
+    #[test]
+    fn typing_reorders_a_listing_fetched_for_an_earlier_query() {
+        let state = vault_state(
+            "git",
+            vec![
+                vault_entry("GitLab", "lucasion", None),
+                vault_entry("GitHub", "lucasion", None),
+            ],
+        );
+
+        let rows = password_rows("github", &state, 10);
+
+        assert_eq!(rows[0].title, "GitHub");
+    }
+
+    /// A shortcut is fetched with a different flag, and the row is what carries
+    /// that as far as the client.
+    #[test]
+    fn a_shortcut_entry_stays_marked_as_one() {
+        let entry = passwords::Entry {
+            shortcut: true,
+            ..vault_entry("Shared", "ops", None)
+        };
+
+        let rows = password_rows("", &vault_state("", vec![entry]), 10);
+
+        assert!(secret(&rows[0]).shortcut);
+    }
+
+    #[test]
+    fn the_limit_counts_code_rows_too() {
+        let entries = (0..20)
+            .map(|index| vault_entry(&format!("Site{index}"), "user", Some("TOTP")))
+            .collect();
+
+        assert_eq!(password_rows("", &vault_state("", entries), 7).len(), 7);
     }
 
     fn ssh_prefix() -> Prefix {

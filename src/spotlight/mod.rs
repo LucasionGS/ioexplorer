@@ -11,6 +11,7 @@ mod file_search;
 mod image_cache;
 mod keys;
 mod layout;
+mod passwords;
 mod paths;
 mod prefixes;
 mod preview;

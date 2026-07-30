@@ -4,11 +4,40 @@
 //! days does not accumulate zombies.
 
 use std::{
-    io,
+    env, fs, io,
     path::{Path, PathBuf},
     process::Command,
     thread,
 };
+
+/// Whether `program` is an executable somewhere on `PATH`.
+///
+/// Deliberately not shelling out to `which`: that is another subprocess on a
+/// path taken at startup, and it would report differently depending on which
+/// `which` the distribution ships.
+pub fn on_path(program: &str) -> bool {
+    let Some(path) = env::var_os("PATH") else {
+        return false;
+    };
+
+    env::split_paths(&path)
+        .map(|directory| directory.join(program))
+        .any(|candidate| is_executable(&candidate))
+}
+
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::metadata(path)
+        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &Path) -> bool {
+    path.is_file()
+}
 
 /// Resolves the file-manager binary: explicit override, then a sibling of the
 /// running executable (so a `target/debug` build finds its own peer), then PATH.
@@ -90,4 +119,20 @@ fn terminal_candidates() -> Vec<String> {
         .map(str::to_string),
     );
     candidates
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nothing_on_the_path_is_found_when_there_is_no_path() {
+        assert!(!on_path("a-program-that-does-not-exist-anywhere"));
+    }
+
+    /// Every machine running this has a shell, and it is always executable.
+    #[test]
+    fn a_program_every_unix_has_is_found() {
+        assert!(on_path("sh"));
+    }
 }

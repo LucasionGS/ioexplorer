@@ -108,6 +108,7 @@ With no prefix, spotlight searches installed applications, your XDG user folders
 | `w` | Switch to an open window |
 | `ssh` | Connect to a host from `~/.ssh/config` |
 | `vpn` | Connect, disconnect, or pick a location (only with a supported VPN client installed) |
+| `pw` | Search a password vault and copy a secret (off until enabled) |
 | `install` | Install an app, by category |
 | `?` | List every available prefix |
 
@@ -128,6 +129,10 @@ in_search = true     # also offer open windows on an unprefixed query
 [spotlight.vpn]
 enabled = true       # the VPN prefix, when a supported client is installed
 prefix = "vpn"
+
+[spotlight.passwords]
+enabled = false      # the password-manager prefix; off unless you turn it on
+prefix = "pw"
 
 [[spotlight.prefixes]]
 prefix = "g"
@@ -197,6 +202,50 @@ provider = "windscribe" # optional; detected from what is installed when unset
 Naming a `provider` pins the choice for a machine with more than one client installed, or one whose client detection would not have picked. A name no provider answers to is refused and logged rather than quietly falling back to detection — the fallback is the one outcome that was not asked for.
 
 Neither reply is a machine format: the client has no JSON mode, so the status is read as `Key: value` pairs and a location line is split from its ends inwards. That parsing is written to degrade rather than break — a field the client stops printing costs that field alone, and the status text is kept verbatim for the preview, so anything not interpreted is still in front of you. Both queries run on a worker thread under a five-second deadline, because a VPN client talks to a background daemon and a daemon that stops answering leaves the client waiting rather than exiting.
+
+### Password managers
+
+`pw` searches your password vault and copies a secret out of it. Each match is one row — the entry's name, with its login, its folder and its URL underneath — and `Enter` copies the password, `Ctrl+Enter` the username. An entry that carries a one-time-password field gains a second row directly beneath it that copies the current code.
+
+Unlike every other prefix here, this one is off until you ask for it. The VPN prefix appears wherever a client is installed because the worst it can do is report a disconnected tunnel; this one sends a long-lived API token to a remote vault on your behalf, and that is not a decision a default gets to make.
+
+| Provider | Server | Talks to | Status |
+| --- | --- | --- | --- |
+| `passwork` | Passwork 7 and later | `passwork-cli` | Supported |
+| `passwork-v4` | Passwork 6 and earlier | the v4 HTTP API directly | Supported, no one-time codes |
+
+**Which one you need depends on your server, and getting it wrong is the most likely first failure.** Passwork replaced its API wholesale between major versions and the two share no endpoint. `passwork-cli` — every released version of it — speaks only the v1 API that Passwork 7 introduced; against an older server every request 404s to an HTML page and the client dies trying to parse it. There is no CLI for v4, so that provider talks to the vault itself. If you are unsure which you have, open `https://your-vault/api/v4/info` in a browser: a page means v4, a 404 means v7.
+
+`provider` is detected from what is installed only for CLI-backed providers. `passwork-v4` needs nothing on `PATH`, so it is never auto-detected — name it explicitly or you will get the v1 provider.
+
+```toml
+[spotlight.passwords]
+enabled = true
+prefix = "pw"
+provider = "passwork"   # or "passwork-v4"; detected from what is installed when unset
+
+# Optional for `passwork`, required for `passwork-v4`.
+host = "https://vault.example.com"
+token_command = "secret-tool lookup passwork token"
+
+# `passwork` only.
+master_key_command = "pass passwork/master-key"
+refresh_token_command = "secret-tool lookup passwork refresh-token"
+```
+
+There are two ways to supply credentials, and they compose. The plain one is the environment: export `PASSWORK_HOST` and `PASSWORK_TOKEN` in the systemd user unit or your shell profile, write nothing above, and `passwork-cli` picks them up itself. The other is the `*_command` keys — a shell command per credential, run when a search needs one. Anything you do not name is left to the inherited environment, so mixing the two works: `host` in the config, the token out of your keyring. `passwork-v4` has no client to inherit an environment, so it needs `host` and `token_command` spelled out; for it, `token_command` yields the **API key**, which is exchanged for a session token and reused until it nears expiry.
+
+The token is deliberately not a config field. `config.toml` is a plaintext file in a directory the hot-reload watcher polls, and a long-lived vault token does not belong in one. Resolved credentials are cached for five minutes so a `pass` or `gpg` command does not prompt on every keystroke, and re-resolved as soon as the config names a different command.
+
+No secret ever reaches a command line or a result row. The search returns metadata only — names, logins, URLs — and the password itself is fetched by a separate call at the moment you press `Enter`, going straight to the clipboard. Rows are rebuilt and cloned on every keystroke, so one holding a password would leave copies of it across the process. Every client invocation is an argv with no shell involved: a shell line would put the entry name where `ps` prints it for every user on the machine, and credentials go through the environment for the same reason. A one-time code is derived inside the client from a secret this process never sees.
+
+Searching happens on the vault's server rather than over a local snapshot — a Passwork install can hold tens of thousands of entries — so what you type is sent as a query 250 ms after you stop typing, and the results are fuzzy-ranked locally on top of that. The listing that is already on screen keeps being re-ranked while the next query is in flight, so the list does not empty and refill under you. Entries you copy from often rise to the top through the same launch history as everything else. Nothing is cached to disk, and the whole listing is dropped when the launcher is hidden.
+
+The v4 API refuses a search shorter than two characters, so on `passwork-v4` the opening state shows your recently-used entries instead. That provider also does not offer one-time-code rows: deriving a code means implementing HMAC-SHA1 over the shared secret, which the v1 path gets for free from the CLI, and a row that cannot deliver is worse than no row.
+
+Some Passwork instances encrypt password values in the browser and some do not; it is a per-instance setting. `passwork-v4` handles an instance with it off and refuses the other one outright, reporting that it cannot decrypt rather than putting undecryptable bytes on your clipboard and calling them a password.
+
+Pressing `Enter` blocks the window while the client answers, under a ten-second deadline. That is deliberate and the only place in the launcher that does it: the alternative is closing the window and putting a password on the clipboard whenever the answer turns up, at a moment you are no longer thinking about it.
 
 ### Software
 

@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 use crate::{
     config::SpotlightConfig,
-    spotlight::{ai::AiProvider, prefixes, software::Catalog, vpn},
+    spotlight::{ai::AiProvider, passwords, prefixes, software::Catalog, vpn},
 };
 
 /// The config section and the tables built from it, swapped together.
@@ -19,16 +19,22 @@ pub struct SpotlightRuntime {
     pub prefixes: prefixes::PrefixTable,
     pub software: Catalog,
     pub ai_providers: Vec<AiProvider>,
+    /// The password manager in play, kept here as well as inside the prefix it
+    /// produced. The window's tick sends a debounced vault query without a
+    /// prefix in hand, and re-scanning `PATH` on every tick to find out who to
+    /// ask would be absurd.
+    pub passwords: Option<passwords::Provider>,
 }
 
 impl SpotlightRuntime {
     /// Resolves the whole runtime from a config section.
     ///
-    /// Scans `PATH` for a VPN client, so unlike [`prefixes::resolve_with_ai`]
-    /// this is not pure over its input.
+    /// Scans `PATH` for a VPN and a password-manager client, so unlike
+    /// [`prefixes::resolve_with_ai`] this is not pure over its input.
     pub fn resolve(config: SpotlightConfig) -> Rc<Self> {
         let vpn = vpn::resolve(&config.vpn);
-        let (prefixes, ai_providers) = prefixes::resolve_with_ai(&config, vpn);
+        let passwords = passwords::resolve(&config.passwords);
+        let (prefixes, ai_providers) = prefixes::resolve_with_ai(&config, vpn, passwords);
         let software = Catalog::resolve(&config.software);
 
         Rc::new(Self {
@@ -36,6 +42,7 @@ impl SpotlightRuntime {
             prefixes,
             software,
             ai_providers,
+            passwords,
         })
     }
 }

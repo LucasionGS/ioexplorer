@@ -28,6 +28,7 @@ use crate::{
         image_cache,
         keys::{self, Action},
         layout,
+        passwords::{self, CredentialSource, PasswordSource, VaultState},
         prefixes::{FIRST_PAGE, Prefix, PrefixKind, PrefixTable, build_results_line},
         preview::{self, Preview, PreviewEvent, PreviewKind, PreviewLoader},
         query::{self, Query},
@@ -117,6 +118,26 @@ const WINDOW_LIST_TTL: Duration = Duration::from_millis(1_500);
 /// connection changes on the scale of seconds, and the query is two subprocesses
 /// rather than one socket round-trip.
 const VPN_STATE_TTL: Duration = Duration::from_secs(5);
+/// Quiet time before a typed vault query is sent.
+///
+/// The search runs on the vault's server, not on a local snapshot, so unlike the
+/// window list this is not one query per keystroke filtered locally — it is one
+/// network round trip per keystroke unless something stops it. Longer than the
+/// preview debounce because the cost is someone else's server rather than a
+/// local decode.
+const PASSWORD_QUERY_DEBOUNCE: Duration = Duration::from_millis(250);
+/// How long a vault listing answers for before the same query is asked again.
+///
+/// Generous next to the VPN's: vault entries change when a human edits them, not
+/// on their own, and the listing is only re-fetched from scratch on every open
+/// anyway.
+const PASSWORD_LIST_TTL: Duration = Duration::from_secs(60);
+/// How long a one-shot launcher lingers after a copy, serving the clipboard.
+///
+/// Long enough to switch window and paste at a human pace; short enough that a
+/// password does not sit in the selection for the rest of the afternoon. The
+/// `--server` daemon ignores this entirely — it is always there to serve.
+const CLIPBOARD_HANDOFF: Duration = Duration::from_secs(90);
 /// Cap on `pause_turn` resumes. The server-side tool loop hit its own iteration
 /// limit and wants to continue; this bounds how often we let it.
 const MAX_PAUSE_RESUMES: usize = 5;
@@ -259,6 +280,26 @@ pub struct SpotlightWindow {
     /// Why the last query failed, so the prefix can say so instead of looking
     /// like it is still asking.
     vpn_error: RefCell<Option<String>>,
+    /// Background source of vault listings, and the credential cache the
+    /// clipboard path shares with them.
+    password_source: PasswordSource,
+    /// The entries the vault last returned, and the query they answer. Metadata
+    /// only — no secret is ever held here, and the whole thing is dropped when
+    /// the window is hidden.
+    password_state: RefCell<Option<VaultState>>,
+    /// A query the user has typed that has not been sent yet, and when they
+    /// typed it. The debounce lives here rather than in a timer of its own: the
+    /// tick already runs, and one clock is easier to reason about than two.
+    password_pending: RefCell<Option<(String, Instant)>>,
+    /// The query that was last sent, and when. A repeat of it inside the TTL is
+    /// answered from `password_state` instead of asking the vault again.
+    password_sent: RefCell<Option<(String, Instant)>>,
+    /// Why the last search failed, so the prefix can say so instead of looking
+    /// like an empty vault.
+    password_error: RefCell<Option<String>>,
+    /// Whether this process is currently the clipboard's owner, and so has to
+    /// outlive the window that put it there.
+    holds_clipboard: Cell<bool>,
     custom_results: CustomResultsRunner,
     custom_rows: RefCell<Vec<CustomResult>>,
     custom_error: RefCell<Option<String>>,
@@ -589,6 +630,12 @@ impl SpotlightWindow {
             vpn_state: RefCell::new(None),
             vpn_requested: Cell::new(None),
             vpn_error: RefCell::new(None),
+            password_source: PasswordSource::new(),
+            password_state: RefCell::new(None),
+            password_pending: RefCell::new(None),
+            password_sent: RefCell::new(None),
+            password_error: RefCell::new(None),
+            holds_clipboard: Cell::new(false),
             custom_results: CustomResultsRunner::new(),
             custom_rows: RefCell::new(Vec::new()),
             custom_error: RefCell::new(None),
@@ -772,6 +819,8 @@ impl SpotlightWindow {
             this.drain_file_search();
             this.drain_windows();
             this.drain_vpn();
+            this.flush_password_query();
+            this.drain_passwords();
             this.drain_custom_results();
             this.drain_previews();
             this.drain_ai();
@@ -928,6 +977,11 @@ impl SpotlightWindow {
                         self.cancel_async_results();
                         self.ensure_vpn(*provider);
                         self.vpn_rows(prefix, arg, *provider, limit)
+                    }
+                    PrefixKind::Passwords(provider) => {
+                        self.cancel_async_results();
+                        self.ensure_passwords(arg);
+                        self.password_rows(prefix, arg, *provider, limit)
                     }
                     PrefixKind::CustomResults {
                         command,
@@ -1249,7 +1303,8 @@ impl SpotlightWindow {
     fn preview_fits(&self) -> bool {
         let available = self.window.width();
         available == 0
-            || available >= self.runtime().config.clamped_width() + 2 * (PREVIEW_WIDTH + PREVIEW_GAP)
+            || available
+                >= self.runtime().config.clamped_width() + 2 * (PREVIEW_WIDTH + PREVIEW_GAP)
     }
 
     fn move_selection(self: &Rc<Self>, delta: i32) {
@@ -1579,6 +1634,146 @@ impl SpotlightWindow {
         vec![results::vpn_notice(prefix, note)]
     }
 
+    // -- password managers -------------------------------------------------
+
+    /// Notes what the user is looking for. Cheap enough to call from `rebuild`,
+    /// which runs on every keystroke — the query is only *sent* once typing
+    /// stops, from [`flush_password_query`](Self::flush_password_query).
+    fn ensure_passwords(&self, arg: &str) {
+        let query = arg.trim().to_string();
+
+        let answered = self
+            .password_sent
+            .borrow()
+            .as_ref()
+            .is_some_and(|(sent, at)| *sent == query && at.elapsed() < PASSWORD_LIST_TTL);
+        if answered {
+            // A query already in flight or already answered. Drop anything
+            // pending, which is the case of the user typing a character and
+            // deleting it again before the debounce elapsed.
+            self.password_pending.borrow_mut().take();
+            return;
+        }
+
+        let mut pending = self.password_pending.borrow_mut();
+        match pending.as_ref() {
+            // Same text as last keystroke — the entry emits changes for more
+            // than typing — so the clock keeps running rather than restarting
+            // and never elapsing.
+            Some((waiting, _)) if *waiting == query => {}
+            _ => *pending = Some((query, Instant::now())),
+        }
+    }
+
+    /// Sends the pending query once the user has stopped typing.
+    fn flush_password_query(self: &Rc<Self>) {
+        let ready = self
+            .password_pending
+            .borrow()
+            .as_ref()
+            .is_some_and(|(_, typed_at)| typed_at.elapsed() >= PASSWORD_QUERY_DEBOUNCE);
+        if !ready {
+            return;
+        }
+
+        let rt = self.runtime();
+        let Some(provider) = rt.passwords else {
+            // The section was turned off while a query was waiting.
+            self.password_pending.borrow_mut().take();
+            return;
+        };
+        let Some((query, _)) = self.password_pending.borrow_mut().take() else {
+            return;
+        };
+
+        *self.password_sent.borrow_mut() = Some((query.clone(), Instant::now()));
+        self.password_source.refresh(
+            provider,
+            &CredentialSource::from_config(&rt.config.passwords),
+            &query,
+        );
+    }
+
+    /// Forgets the listing and everything derived from it.
+    ///
+    /// Called when the window is hidden rather than when it is shown, which is
+    /// the opposite of the VPN. A location list is public information; a list of
+    /// the user's accounts and the sites they hold is not, and a daemon that
+    /// spends most of the day hidden should not be holding one the whole time.
+    fn invalidate_passwords(&self) {
+        self.password_pending.borrow_mut().take();
+        self.password_sent.borrow_mut().take();
+        self.password_state.borrow_mut().take();
+        self.password_error.borrow_mut().take();
+    }
+
+    fn drain_passwords(self: &Rc<Self>) {
+        let Some(reply) = self.password_source.drain() else {
+            return;
+        };
+
+        match reply {
+            Ok(state) => {
+                *self.password_state.borrow_mut() = Some(state);
+                *self.password_error.borrow_mut() = None;
+            }
+            // Unlike the VPN, the previous listing is kept. It claims nothing
+            // that could have become untrue — the entries either still exist or
+            // fail at the point of fetching — and dropping it would empty the
+            // list under a user whose search simply timed out.
+            Err(error) => *self.password_error.borrow_mut() = Some(error),
+        }
+        self.rebuild();
+    }
+
+    /// The rows for the password prefix, or one row explaining why there are none.
+    fn password_rows(
+        &self,
+        prefix: &Prefix,
+        arg: &str,
+        provider: passwords::Provider,
+        limit: usize,
+    ) -> Vec<SpotlightResult> {
+        let state = self.password_state.borrow();
+
+        // The error is shown only when there is nothing else to show. A stale
+        // listing the user can still act on beats a message about a search that
+        // failed, and the rows below are re-ranked against what they are typing
+        // either way.
+        let Some(state) = state.as_ref() else {
+            if let Some(error) = self.password_error.borrow().as_deref() {
+                return vec![results::passwords_notice(prefix, error)];
+            }
+            return vec![results::passwords_notice(
+                prefix,
+                &format!("Searching {}…", provider.label()),
+            )];
+        };
+
+        let rows = results::password_results(
+            prefix,
+            arg,
+            provider,
+            state,
+            &self.frecency.borrow(),
+            frecency::now_secs(),
+            limit,
+        );
+        if !rows.is_empty() {
+            return rows;
+        }
+
+        // A listing that answers an older query would otherwise read as "no
+        // match" for one the vault has not been asked about yet.
+        let searching = state.query != arg.trim();
+        let note = match (searching, state.entries.is_empty()) {
+            (true, _) => "Searching…".to_string(),
+            (false, true) => format!("{} matched nothing", provider.label()),
+            (false, false) => "No entry matches".to_string(),
+        };
+        vec![results::passwords_notice(prefix, &note)]
+    }
+
     // -- custom results ----------------------------------------------------
 
     /// Cancels both asynchronous result sources at once.
@@ -1837,15 +2032,68 @@ impl SpotlightWindow {
                 .map_err(|error| format!("failed to run command: {error}")),
             Activation::RunInTerminal(line) => spawn::spawn_in_terminal(line)
                 .map_err(|error| format!("failed to open a terminal: {error}")),
-            Activation::CopyText(text) => {
-                let display = gtk::gdk::Display::default()
-                    .ok_or_else(|| "no display available for the clipboard".to_string())?;
-                display.clipboard().set_text(text);
-                Ok(())
+            Activation::CopyText(text) => self.copy_to_clipboard(text),
+            // The one activation that blocks the main loop. Everything else here
+            // either hands work to another process or has its answer already;
+            // this has to hold a secret it does not yet have, and the clipboard
+            // is only worth setting while the user is still waiting for it.
+            // `MAX_RUNTIME` in the passwords module bounds the wait.
+            Activation::CopySecret(request) => {
+                let secret = self.password_source.fetch_secret(
+                    request,
+                    &CredentialSource::from_config(&self.runtime().config.passwords),
+                )?;
+                self.copy_to_clipboard(&secret)
             }
             // Both are handled before `perform` is reached.
             Activation::Replace(_) | Activation::AskAi { .. } | Activation::Inert => Ok(()),
         }
+    }
+
+    /// Puts `text` on the clipboard and records that something is now waiting
+    /// on this process to still be here.
+    ///
+    /// On Wayland the clipboard is not a place data is put — it is a promise to
+    /// hand data over when someone asks, kept by the process that made it. A
+    /// launcher that copies and exits in the same breath has broken the promise
+    /// before anyone could call it in, and the paste comes back empty. See
+    /// [`close`](Self::close), which is where that is paid for.
+    fn copy_to_clipboard(&self, text: &str) -> Result<(), String> {
+        let display = gtk::gdk::Display::default()
+            .ok_or_else(|| "no display available for the clipboard".to_string())?;
+
+        display.clipboard().set_text(text);
+        self.holds_clipboard.set(true);
+        Ok(())
+    }
+
+    /// Stays alive, invisibly, for as long as anything might still ask for what
+    /// was copied.
+    ///
+    /// Only the one-shot launcher needs this: the `--server` daemon outlives any
+    /// paste by definition. Quitting is driven by losing the selection rather
+    /// than by the clock alone, so the usual case — copy, switch window, paste,
+    /// copy something else — ends the process the moment it stops being useful.
+    fn linger_for_clipboard(&self) {
+        let Some(display) = gtk::gdk::Display::default() else {
+            self.app.quit();
+            return;
+        };
+
+        // Another client taking the selection means our copy has either been
+        // used or been superseded; either way nobody is waiting on us.
+        let app = self.app.clone();
+        display.clipboard().connect_changed(move |clipboard| {
+            if !clipboard.is_local() {
+                app.quit();
+            }
+        });
+
+        // And a backstop, so a copy nobody ever pastes does not leave a process
+        // behind for the rest of the session. It also bounds how long a password
+        // stays on the clipboard, which is worth having on its own.
+        let app = self.app.clone();
+        glib::timeout_add_local_once(CLIPBOARD_HANDOFF, move || app.quit());
     }
 
     // -- chat --------------------------------------------------------------
@@ -2784,6 +3032,10 @@ impl SpotlightWindow {
     pub fn hide(&self) {
         self.file_search.cancel();
         self.file_hits.borrow_mut().clear();
+        // The vault listing goes with it: the daemon spends most of the day
+        // hidden, and a list of the user's accounts is not something to hold
+        // through all of it for the sake of one round trip on the next open.
+        self.invalidate_passwords();
         self.cancel_custom_results();
         // A stream would otherwise keep appending into a hidden transcript.
         self.ai_session.cancel();
@@ -2816,10 +3068,18 @@ impl SpotlightWindow {
         // swallows every click on the desktop.
         if self.server_mode {
             self.hide();
-        } else {
-            self.window.set_visible(false);
-            self.app.quit();
+            return;
         }
+
+        self.window.set_visible(false);
+        // Quitting now would take the clipboard with us — the selection belongs
+        // to this process, not to the compositor, and no clipboard manager is
+        // guaranteed to be there to catch it.
+        if self.holds_clipboard.get() {
+            self.linger_for_clipboard();
+            return;
+        }
+        self.app.quit();
     }
 }
 

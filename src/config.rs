@@ -270,6 +270,48 @@ pub struct SpotlightVpnConfig {
     pub provider: Option<String>,
 }
 
+/// The password-manager prefix: searching a vault and copying a secret out of it.
+///
+/// Off unless the user asks for it, unlike the VPN. The VPN prefix appears
+/// wherever a client is installed because the worst it can do is report a
+/// disconnected tunnel; this one sends a long-lived API token to a remote vault
+/// on the user's behalf, and turning that on because a binary happens to be on
+/// `PATH` is not a decision this config gets to make for them.
+///
+/// The credentials themselves are deliberately not fields here. `config.toml` is
+/// world-readable in a directory the hot-reload watcher polls, so the token is
+/// named by the command that prints it — `secret-tool`, `pass`, `gpg` — or left
+/// out entirely, in which case the client reads it from the environment
+/// IoExplorer was started with.
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SpotlightPasswordsConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Prefix that searches the vault. Defaults to `pw`.
+    #[serde(default = "default_passwords_prefix")]
+    pub prefix: String,
+    /// Which password manager to drive, e.g. `passwork`. Left unset, the
+    /// installed clients are detected instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// The vault server the client talks to. Not a secret, so it is spelled out
+    /// rather than fetched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// Shell command whose output is the API token, e.g.
+    /// `secret-tool lookup passwork token`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_command: Option<String>,
+    /// Shell command whose output is the refresh token, where the deployment
+    /// issues short-lived access tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_token_command: Option<String>,
+    /// Shell command whose output is the master key, for a vault using
+    /// client-side encryption.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub master_key_command: Option<String>,
+}
+
 /// The Software section: a two-level catalog of installable applications,
 /// browsed as `install` → category → app.
 ///
@@ -364,6 +406,24 @@ impl Default for SpotlightVpnConfig {
     }
 }
 
+fn default_passwords_prefix() -> String {
+    "pw".to_string()
+}
+
+impl Default for SpotlightPasswordsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            prefix: default_passwords_prefix(),
+            provider: None,
+            host: None,
+            token_command: None,
+            refresh_token_command: None,
+            master_key_command: None,
+        }
+    }
+}
+
 fn default_windows_prefix() -> String {
     "w".to_string()
 }
@@ -398,6 +458,8 @@ pub struct SpotlightConfig {
     pub windows: SpotlightWindowsConfig,
     #[serde(default)]
     pub vpn: SpotlightVpnConfig,
+    #[serde(default)]
+    pub passwords: SpotlightPasswordsConfig,
     #[serde(default)]
     pub software: SpotlightSoftwareConfig,
 }
@@ -450,6 +512,7 @@ impl Default for SpotlightConfig {
             ai: Vec::new(),
             windows: SpotlightWindowsConfig::default(),
             vpn: SpotlightVpnConfig::default(),
+            passwords: SpotlightPasswordsConfig::default(),
             software: SpotlightSoftwareConfig::default(),
         }
     }
@@ -631,6 +694,59 @@ mod tests {
         assert!(matches!(loaded, Ok(None)));
     }
 
+    /// The block the README tells users to write, parsed as written.
+    #[test]
+    fn the_documented_passwords_section_parses() {
+        let config = toml::from_str::<SpotlightConfig>(
+            r#"
+[passwords]
+enabled = true
+prefix = "pw"
+provider = "passwork"
+host = "https://vault.example.com"
+token_command = "secret-tool lookup passwork token"
+master_key_command = "pass passwork/master-key"
+refresh_token_command = "secret-tool lookup passwork refresh-token"
+"#,
+        )
+        .expect("valid spotlight config");
+
+        let passwords = &config.passwords;
+        assert!(passwords.enabled);
+        assert_eq!(passwords.prefix, "pw");
+        assert_eq!(passwords.provider.as_deref(), Some("passwork"));
+        assert_eq!(passwords.host.as_deref(), Some("https://vault.example.com"));
+        assert_eq!(
+            passwords.token_command.as_deref(),
+            Some("secret-tool lookup passwork token")
+        );
+        assert_eq!(
+            passwords.master_key_command.as_deref(),
+            Some("pass passwork/master-key")
+        );
+    }
+
+    /// Turning the section on is the whole of the setup for someone who exports
+    /// the client's own variables elsewhere, so it has to parse on its own.
+    #[test]
+    fn the_passwords_section_needs_nothing_but_enabled() {
+        let config = toml::from_str::<SpotlightConfig>("[passwords]\nenabled = true\n")
+            .expect("valid spotlight config");
+
+        assert!(config.passwords.enabled);
+        assert_eq!(config.passwords.prefix, "pw");
+        assert_eq!(config.passwords.token_command, None);
+    }
+
+    /// A config with no `[spotlight.passwords]` block at all must not produce a
+    /// prefix that talks to a vault.
+    #[test]
+    fn passwords_are_off_without_a_section() {
+        let config = toml::from_str::<SpotlightConfig>("").expect("valid spotlight config");
+
+        assert!(!config.passwords.enabled);
+    }
+
     #[test]
     fn reads_a_valid_config() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -641,7 +757,9 @@ mod tests {
         };
         written.save_to(&path).expect("write the config under test");
 
-        let loaded = AppConfig::try_load_from(&path).expect("readable").expect("present");
+        let loaded = AppConfig::try_load_from(&path)
+            .expect("readable")
+            .expect("present");
 
         assert_eq!(loaded, written);
     }

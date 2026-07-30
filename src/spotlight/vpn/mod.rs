@@ -20,9 +20,7 @@
 mod windscribe;
 
 use std::{
-    env, fs,
     io::Read,
-    path::Path,
     process::{Command, Stdio},
     sync::{
         Arc,
@@ -33,7 +31,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::config::SpotlightVpnConfig;
+use crate::{config::SpotlightVpnConfig, launcher::spawn::on_path};
 
 /// How long a client may take before it is killed and reported as unreachable.
 const MAX_RUNTIME: Duration = Duration::from_secs(5);
@@ -184,35 +182,6 @@ pub fn resolve(config: &SpotlightVpnConfig) -> Option<Provider> {
     }
 
     Some(provider)
-}
-
-/// Whether `program` is an executable somewhere on `PATH`.
-///
-/// Deliberately not shelling out to `which`: that is another subprocess on a
-/// path taken at startup, and it would report differently depending on which
-/// `which` the distribution ships.
-fn on_path(program: &str) -> bool {
-    let Some(path) = env::var_os("PATH") else {
-        return false;
-    };
-
-    env::split_paths(&path)
-        .map(|directory| directory.join(program))
-        .any(|candidate| is_executable(&candidate))
-}
-
-#[cfg(unix)]
-fn is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-
-    fs::metadata(path)
-        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
-}
-
-#[cfg(not(unix))]
-fn is_executable(path: &Path) -> bool {
-    path.is_file()
 }
 
 /// What the client says about the connection.
@@ -507,11 +476,6 @@ mod tests {
         if let Some(provider) = detect() {
             assert!(provider.installed(), "{} is not installed", provider.id());
         }
-    }
-
-    #[test]
-    fn nothing_on_the_path_is_found_when_there_is_no_path() {
-        assert!(!on_path("a-program-that-does-not-exist-anywhere"));
     }
 
     #[test]

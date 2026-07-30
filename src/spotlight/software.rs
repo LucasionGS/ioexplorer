@@ -268,7 +268,8 @@ fn builtins() -> Vec<Category> {
 
     const YAY_INSTALL_PREFIX: &str = "yay -S --needed --noconfirm";
 
-    fn yay_install(command: &str) -> String { // I use this a lot, a fucking helper
+    fn yay_install(command: &str) -> String {
+        // I use this a lot, a fucking helper
         format!("{YAY_INSTALL_PREFIX} {command}")
     }
 
@@ -345,7 +346,7 @@ fn builtins() -> Vec<Category> {
                     &yay_install("toxen3"),
                     &["music", "customizable", "player"],
                     ENTERTAINMENT_ICON,
-                )
+                ),
             ],
         },
         Category {
