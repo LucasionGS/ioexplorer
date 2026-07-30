@@ -10,7 +10,7 @@ use std::{
 };
 
 use gdk_pixbuf::prelude::*;
-use gio::prelude::{AppInfoExt, FileExt, FileExtManual, FileMonitorExt};
+use gio::prelude::{AppInfoExt, FileExt, FileMonitorExt};
 use gtk::prelude::*;
 use url::Url;
 
@@ -33,6 +33,10 @@ use crate::{
     },
 };
 
+const DROP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Headers only. The body is deliberately unbounded: a dropped link may point at
+/// a large file, and a slow transfer is still a transfer.
+const DROP_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 const MOUSE_BUTTON_BACK: u32 = 8;
 const MOUSE_BUTTON_FORWARD: u32 = 9;
 const FOLDER_MONITOR_DEBOUNCE_MS: u64 = 250;
@@ -3831,6 +3835,18 @@ impl AppWindow {
             dnd::DropPayload::LocalPaths { operation, paths } => {
                 self.transfer_paths_into_target(operation, paths, target_dir);
             }
+            dnd::DropPayload::Data {
+                bytes,
+                mime_type,
+                suggested_name,
+            } => {
+                self.save_dropped_bytes_into_target(
+                    &bytes,
+                    &mime_type,
+                    suggested_name.as_deref(),
+                    target_dir,
+                );
+            }
             dnd::DropPayload::Uris(uris) => self.import_uri_drop_into_target(uris, target_dir),
             dnd::DropPayload::Texture(texture) => {
                 self.save_dropped_texture_into_target(texture, target_dir);
@@ -3885,6 +3901,27 @@ impl AppWindow {
                 this.status_label.set_text(&error);
             }
         });
+    }
+
+    fn save_dropped_bytes_into_target(
+        self: &Rc<Self>,
+        bytes: &[u8],
+        mime_type: &str,
+        suggested_name: Option<&str>,
+        target_dir: PathBuf,
+    ) {
+        let file_name = dropped_file_name_for_bytes(suggested_name, mime_type, bytes);
+        let target = next_available_path(&target_dir.join(file_name));
+        match std::fs::write(&target, bytes) {
+            Ok(()) => {
+                self.status_label
+                    .set_text(&format!("Imported {}", target.display()));
+                self.refresh();
+            }
+            Err(error) => self
+                .status_label
+                .set_text(&format!("Failed to import dropped data: {error}")),
+        }
     }
 
     fn save_dropped_texture_into_target(
@@ -4449,18 +4486,48 @@ fn scroll_adjustment_to_reveal(adjustment: &gtk::Adjustment, start: f64, end: f6
     set_adjustment_value(adjustment, target);
 }
 
-async fn copy_remote_uri_into_target(uri: &str, target_dir: &Path) -> Result<PathBuf, glib::Error> {
+/// Last-resort import for a drop that only gave us a link.
+///
+/// This is a fresh request that carries none of the originating app's session,
+/// so anything behind a login will answer 401/403 here. It runs on a worker
+/// thread with timeouts: GIO's https handling goes through gvfs and can stall
+/// indefinitely, which leaves the drop looking like it is still importing.
+async fn copy_remote_uri_into_target(uri: &str, target_dir: &Path) -> Result<PathBuf, String> {
     let file_name = dropped_file_name_for_uri(uri);
     let target = next_available_path(&target_dir.join(file_name));
-    let source_file = gio::File::for_uri(uri);
-    let target_file = gio::File::for_path(&target);
-    let (copy, _progress) = source_file.copy_future(
-        &target_file,
-        gio::FileCopyFlags::NONE,
-        glib::Priority::DEFAULT,
-    );
-    copy.await?;
+
+    let uri = uri.to_string();
+    let destination = target.clone();
+    gio::spawn_blocking(move || download_uri_to_path(&uri, &destination))
+        .await
+        .map_err(|_| "the download task did not finish".to_string())??;
+
     Ok(target)
+}
+
+fn download_uri_to_path(uri: &str, target: &Path) -> Result<(), String> {
+    let response = ureq::get(uri)
+        .config()
+        .timeout_connect(Some(DROP_CONNECT_TIMEOUT))
+        .timeout_recv_response(Some(DROP_RESPONSE_TIMEOUT))
+        .build()
+        .call()
+        .map_err(|error| error.to_string())?;
+
+    // Downloaded beside the target and renamed, so a transfer cut off halfway
+    // never leaves a truncated file sitting in the user's folder.
+    let partial = target.with_extension("part");
+    let mut reader = response.into_body().into_reader();
+    let mut file = fs::File::create(&partial).map_err(|error| error.to_string())?;
+    let copied = std::io::copy(&mut reader, &mut file).map_err(|error| {
+        let _ = fs::remove_file(&partial);
+        error.to_string()
+    });
+
+    match copied {
+        Ok(_) => fs::rename(&partial, target).map_err(|error| error.to_string()),
+        Err(error) => Err(error),
+    }
 }
 
 fn partition_drop_uris(uris: Vec<String>) -> (Vec<PathBuf>, Vec<String>) {
@@ -4514,6 +4581,100 @@ fn dropped_file_name_for_uri(uri: &str) -> String {
         .unwrap_or_else(|| "Dropped File".to_string());
 
     sanitize_dropped_file_name(&candidate, "Dropped File")
+}
+
+/// Names a drop we received as raw bytes.
+///
+/// The source's own name wins when it gave one. Otherwise the mime type is often
+/// just `application/octet-stream`, so the content itself is the better witness of
+/// what this file is than anything the drag advertised.
+fn dropped_file_name_for_bytes(
+    suggested_name: Option<&str>,
+    mime_type: &str,
+    bytes: &[u8],
+) -> String {
+    if let Some(name) = suggested_name {
+        let name = sanitize_dropped_file_name(name, "Dropped File");
+        if name != "Dropped File" {
+            return name;
+        }
+    }
+
+    let extension = sniff_extension(bytes).or_else(|| extension_for_mime_type(mime_type));
+    let stem = match extension {
+        Some(extension) if IMAGE_DROP_EXTENSIONS.contains(&extension) => "Dropped Image",
+        _ => "Dropped File",
+    };
+
+    match extension {
+        Some(extension) => format!("{stem}.{extension}"),
+        None => stem.to_string(),
+    }
+}
+
+const IMAGE_DROP_EXTENSIONS: &[&str] = &[
+    "png", "jpg", "webp", "avif", "gif", "tiff", "bmp", "svg", "ico",
+];
+
+/// Identifies a dropped file from its leading bytes.
+fn sniff_extension(bytes: &[u8]) -> Option<&'static str> {
+    match bytes {
+        [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, ..] => Some("png"),
+        [0xFF, 0xD8, 0xFF, ..] => Some("jpg"),
+        [b'G', b'I', b'F', b'8', ..] => Some("gif"),
+        [b'B', b'M', ..] => Some("bmp"),
+        [0x00, 0x00, 0x01, 0x00, ..] => Some("ico"),
+        [b'%', b'P', b'D', b'F', ..] => Some("pdf"),
+        [0x49, 0x49, 0x2A, 0x00, ..] | [0x4D, 0x4D, 0x00, 0x2A, ..] => Some("tiff"),
+        // RIFF and ISO-BMFF both name the real format a few bytes in.
+        [
+            b'R',
+            b'I',
+            b'F',
+            b'F',
+            _,
+            _,
+            _,
+            _,
+            b'W',
+            b'E',
+            b'B',
+            b'P',
+            ..,
+        ] => Some("webp"),
+        [
+            _,
+            _,
+            _,
+            _,
+            b'f',
+            b't',
+            b'y',
+            b'p',
+            b'a',
+            b'v',
+            b'i',
+            b'f',
+            ..,
+        ] => Some("avif"),
+        _ => None,
+    }
+}
+
+fn extension_for_mime_type(mime_type: &str) -> Option<&'static str> {
+    match mime_type.split(';').next()?.trim() {
+        "image/png" => Some("png"),
+        "image/jpeg" => Some("jpg"),
+        "image/webp" => Some("webp"),
+        "image/avif" => Some("avif"),
+        "image/gif" => Some("gif"),
+        "image/tiff" => Some("tiff"),
+        "image/bmp" => Some("bmp"),
+        "image/svg+xml" => Some("svg"),
+        "image/x-icon" | "image/vnd.microsoft.icon" => Some("ico"),
+        "application/pdf" => Some("pdf"),
+        _ => None,
+    }
 }
 
 fn sanitize_dropped_file_name(name: &str, fallback: &str) -> String {
@@ -5846,11 +6007,11 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        FileClipboardOperation, copy_path_into, drop_target_is_selected, dropped_file_name_for_uri,
-        file_clipboard_payload, file_uri_list_payload, folder_monitor_event_affects_listing,
-        format_media_duration, is_desktop_entry_file, is_gif_image_path, move_path_into,
-        new_folder_target, next_tab_index_after_close, parse_ffprobe_output, partition_drop_uris,
-        tab_title,
+        FileClipboardOperation, copy_path_into, drop_target_is_selected,
+        dropped_file_name_for_bytes, dropped_file_name_for_uri, file_clipboard_payload,
+        file_uri_list_payload, folder_monitor_event_affects_listing, format_media_duration,
+        is_desktop_entry_file, is_gif_image_path, move_path_into, new_folder_target,
+        next_tab_index_after_close, parse_ffprobe_output, partition_drop_uris, tab_title,
     };
 
     #[test]
@@ -5962,6 +6123,49 @@ mod tests {
         assert_eq!(
             dropped_file_name_for_uri("https://example.com/"),
             "Dropped File"
+        );
+    }
+
+    const JPEG: &[u8] = &[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
+
+    #[test]
+    fn prefers_the_name_the_drag_source_supplied() {
+        assert_eq!(
+            dropped_file_name_for_bytes(Some("177109.jpg"), "application/octet-stream", JPEG),
+            "177109.jpg"
+        );
+    }
+
+    #[test]
+    fn identifies_octet_stream_drops_by_their_content() {
+        // The mime type says nothing here, so the magic number has to carry it.
+        assert_eq!(
+            dropped_file_name_for_bytes(None, "application/octet-stream", JPEG),
+            "Dropped Image.jpg"
+        );
+        assert_eq!(
+            dropped_file_name_for_bytes(None, "application/octet-stream", b"%PDF-1.7"),
+            "Dropped File.pdf"
+        );
+    }
+
+    #[test]
+    fn falls_back_to_the_mime_type_for_unrecognised_content() {
+        assert_eq!(
+            dropped_file_name_for_bytes(None, "image/webp", b"not really webp"),
+            "Dropped Image.webp"
+        );
+        assert_eq!(
+            dropped_file_name_for_bytes(None, "text/csv", b"a,b,c"),
+            "Dropped File"
+        );
+    }
+
+    #[test]
+    fn keeps_a_supplied_name_from_escaping_the_target_folder() {
+        assert_eq!(
+            dropped_file_name_for_bytes(Some("../../etc/passwd"), "application/octet-stream", JPEG),
+            ".._.._etc_passwd"
         );
     }
 
