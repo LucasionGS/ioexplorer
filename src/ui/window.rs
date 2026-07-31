@@ -3124,6 +3124,11 @@ impl AppWindow {
             .filter(|item| item.kind == FileKind::Directory)
             .and_then(|item| item.uri.local_path().ok())
             .map(|path| self.bookmark_action_for_folder(path));
+        let extract: Option<context_menu::MenuAction> =
+            archive_paths(&selected_items).map(|archives| {
+                let this = Rc::clone(self);
+                Rc::new(move || this.extract_archives(archives.clone())) as context_menu::MenuAction
+            });
         let rename: context_menu::RenameAction = {
             let this = Rc::clone(self);
             Rc::new(move |path| this.show_rename_dialog(path))
@@ -3146,6 +3151,7 @@ impl AppWindow {
             context_menu::FileEntryActions {
                 view,
                 bookmark,
+                extract,
                 copy,
                 cut,
                 rename,
@@ -3959,6 +3965,55 @@ impl AppWindow {
                 .status_label
                 .set_text(&format!("Failed to rename {}: {error}", source.display())),
         }
+    }
+
+    /// Unpacks each archive into a new folder beside it.
+    ///
+    /// Into a folder rather than over the current one: an archive that turns
+    /// out to hold fifty loose files would otherwise scatter them through the
+    /// folder the user was looking at, with nothing to undo it.
+    fn extract_archives(self: &Rc<Self>, archives: Vec<ArchivePath>) {
+        if archives.is_empty() {
+            return;
+        }
+
+        self.status_label.set_text(&match archives.as_slice() {
+            [only] => format!("Extracting {}...", only.display_name()),
+            archives => format!("Extracting {} archives...", archives.len()),
+        });
+
+        let this = Rc::clone(self);
+        glib::MainContext::default().spawn_local(async move {
+            let total = archives.len();
+            let mut extracted = 0;
+            let mut last_error = None;
+
+            for archive in archives {
+                // Resolved one at a time rather than up front: extracting
+                // `photos.zip` twice in a row should give `photos` and
+                // `photos 2`, which needs the first to exist already.
+                let destination = next_available_path(&archive.destination);
+                match crate::archive::extract(archive.format, &archive.path, &destination).await {
+                    Ok(()) => extracted += 1,
+                    Err(error) => {
+                        last_error = Some(format!(
+                            "Failed to extract {}: {error}",
+                            archive.display_name()
+                        ));
+                    }
+                }
+            }
+
+            if extracted > 0 {
+                this.refresh();
+            }
+
+            this.status_label.set_text(&match last_error {
+                Some(error) => error,
+                None if total == 1 => "Extracted 1 archive".to_string(),
+                None => format!("Extracted {extracted} archives"),
+            });
+        });
     }
 
     fn delete_paths(self: &Rc<Self>, paths: Vec<PathBuf>) {
@@ -5556,6 +5611,54 @@ fn is_desktop_entry_file(item: &FileItem) -> bool {
     item.kind == FileKind::File && item.name.to_ascii_lowercase().ends_with(".desktop")
 }
 
+/// An archive picked out of a selection, with the folder it should unpack into
+/// already worked out from its name.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ArchivePath {
+    path: PathBuf,
+    destination: PathBuf,
+    format: crate::archive::ArchiveFormat,
+}
+
+impl ArchivePath {
+    fn for_item(item: &FileItem) -> Option<Self> {
+        if item.kind != FileKind::File {
+            return None;
+        }
+
+        let recognized = crate::archive::recognize(&item.name)?;
+        let path = item.uri.local_path().ok()?;
+        let destination = path.parent()?.join(recognized.stem);
+
+        Some(Self {
+            path,
+            destination,
+            format: recognized.format,
+        })
+    }
+
+    fn display_name(&self) -> String {
+        self.path
+            .file_name()
+            .unwrap_or(self.path.as_os_str())
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+/// The selection as archives, or `None` if any of it is something else.
+///
+/// All or nothing: offering "Extract 3 Archives" over a selection of five
+/// would quietly skip the two that are not, which is worse than not offering
+/// it at all.
+fn archive_paths(items: &[FileItem]) -> Option<Vec<ArchivePath>> {
+    if items.is_empty() {
+        return None;
+    }
+
+    items.iter().map(ArchivePath::for_item).collect()
+}
+
 fn is_previewable_image_file(item: &FileItem) -> bool {
     item.kind == FileKind::File
         && views::thumbnail::is_previewable_image(&item.name)
@@ -6192,12 +6295,56 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        FileClipboardOperation, copy_path_into, drop_target_is_selected,
+        FileClipboardOperation, archive_paths, copy_path_into, drop_target_is_selected,
         dropped_file_name_for_bytes, dropped_file_name_for_uri, file_clipboard_payload,
         file_uri_list_payload, folder_monitor_event_affects_listing, format_media_duration,
         is_desktop_entry_file, is_gif_image_path, move_path_into, new_folder_target,
         next_tab_index_after_close, parse_ffprobe_output, partition_drop_uris, tab_title,
     };
+
+    fn entry(name: &str, kind: FileKind) -> FileItem {
+        FileItem {
+            uri: ProviderUri::local(format!("/tmp/{name}")),
+            name: name.to_string(),
+            display_name: None,
+            icon: None,
+            kind,
+            size: Some(1),
+            modified: None,
+            created: None,
+            hidden: false,
+        }
+    }
+
+    #[test]
+    fn an_archive_selection_carries_the_folder_it_unpacks_into() {
+        let archives =
+            archive_paths(&[entry("photos.tar.gz", FileKind::File)]).expect("an archive");
+
+        assert_eq!(archives.len(), 1);
+        assert_eq!(archives[0].path, PathBuf::from("/tmp/photos.tar.gz"));
+        assert_eq!(archives[0].destination, PathBuf::from("/tmp/photos"));
+    }
+
+    #[test]
+    fn a_mixed_selection_is_not_offered_extraction() {
+        let mixed = archive_paths(&[
+            entry("photos.zip", FileKind::File),
+            entry("notes.txt", FileKind::File),
+        ]);
+
+        assert!(mixed.is_none());
+    }
+
+    #[test]
+    fn a_folder_named_like_an_archive_is_not_extractable() {
+        assert!(archive_paths(&[entry("backup.tar", FileKind::Directory)]).is_none());
+    }
+
+    #[test]
+    fn an_empty_selection_is_not_offered_extraction() {
+        assert!(archive_paths(&[]).is_none());
+    }
 
     #[test]
     fn detects_desktop_entry_files_for_launching() {

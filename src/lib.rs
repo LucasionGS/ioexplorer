@@ -4,6 +4,7 @@ pub mod portal;
 pub mod spotlight;
 pub mod start_menu;
 
+mod archive;
 mod bookmarks;
 mod config;
 mod custom_actions;

@@ -204,6 +204,8 @@ pub enum FileEntryContext {
 pub struct FileEntryActions {
     pub view: Option<ViewAction>,
     pub bookmark: Option<BookmarkAction>,
+    /// Present only when every selected entry is an archive.
+    pub extract: Option<MenuAction>,
     pub copy: ClipboardAction,
     pub cut: ClipboardAction,
     pub rename: RenameAction,
@@ -216,6 +218,7 @@ impl FileEntryContext {
         let FileEntryActions {
             view,
             bookmark,
+            extract,
             copy,
             cut,
             rename,
@@ -229,6 +232,7 @@ impl FileEntryContext {
                 path: paths[0].clone(),
                 view,
                 bookmark,
+                extract,
                 copy,
                 cut,
                 rename,
@@ -238,6 +242,7 @@ impl FileEntryContext {
             _ => Some(Self::Multi(FileMultiSelectionContext {
                 paths,
                 view,
+                extract,
                 copy,
                 cut,
                 delete,
@@ -260,6 +265,7 @@ pub struct FileSingleSelectionContext {
     path: PathBuf,
     view: Option<ViewAction>,
     bookmark: Option<BookmarkAction>,
+    extract: Option<MenuAction>,
     copy: ClipboardAction,
     cut: ClipboardAction,
     rename: RenameAction,
@@ -279,6 +285,15 @@ impl ContextMenuContext for FileSingleSelectionContext {
             )
         });
         let bookmark = self.bookmark.as_ref().map(BookmarkAction::context_action);
+        let extract = self.extract.as_ref().map(|extract| {
+            let extract = Rc::clone(extract);
+            ContextMenuAction::new(
+                "Extract Here",
+                Some("package-x-generic-symbolic"),
+                false,
+                Rc::new(move || extract()),
+            )
+        });
         let copy_paths = vec![self.path.clone()];
         let copy = Rc::clone(&self.copy);
         let cut_paths = vec![self.path.clone()];
@@ -291,6 +306,7 @@ impl ContextMenuContext for FileSingleSelectionContext {
         let mut actions = Vec::new();
         actions.extend(view);
         actions.extend(bookmark);
+        actions.extend(extract);
         actions.extend(self.custom_actions.iter().map(CustomAction::context_action));
         actions.extend([
             ContextMenuAction::new(
@@ -325,6 +341,7 @@ impl ContextMenuContext for FileSingleSelectionContext {
 pub struct FileMultiSelectionContext {
     paths: Vec<PathBuf>,
     view: Option<ViewAction>,
+    extract: Option<MenuAction>,
     copy: ClipboardAction,
     cut: ClipboardAction,
     delete: DeleteAction,
@@ -342,6 +359,15 @@ impl ContextMenuContext for FileMultiSelectionContext {
                 Rc::new(move || view()),
             )
         });
+        let extract = self.extract.as_ref().map(|extract| {
+            let extract = Rc::clone(extract);
+            ContextMenuAction::new(
+                format!("Extract {} Archives", self.paths.len()),
+                Some("package-x-generic-symbolic"),
+                false,
+                Rc::new(move || extract()),
+            )
+        });
         let copy_paths = self.paths.clone();
         let copy = Rc::clone(&self.copy);
         let copy_label = format!("Copy {} Items", copy_paths.len());
@@ -354,6 +380,7 @@ impl ContextMenuContext for FileMultiSelectionContext {
 
         let mut actions = Vec::new();
         actions.extend(view);
+        actions.extend(extract);
         actions.extend(self.custom_actions.iter().map(CustomAction::context_action));
         actions.extend([
             ContextMenuAction::new(
@@ -559,6 +586,70 @@ mod tests {
     }
 
     #[test]
+    fn an_archive_offers_extraction() {
+        let context = FileEntryContext::for_paths(
+            vec![PathBuf::from("/tmp/photos.tar.gz")],
+            FileEntryActions {
+                extract: Some(noop_menu_action()),
+                ..file_entry_actions(None, None, Vec::new())
+            },
+        )
+        .expect("single context");
+
+        let labels = context
+            .actions()
+            .into_iter()
+            .map(|action| action.label)
+            .collect::<Vec<_>>();
+        assert_eq!(labels, ["Extract Here", "Copy", "Cut", "Rename", "Delete"]);
+    }
+
+    #[test]
+    fn several_archives_extract_together() {
+        let context = FileEntryContext::for_paths(
+            vec![PathBuf::from("/tmp/a.zip"), PathBuf::from("/tmp/b.zip")],
+            FileEntryActions {
+                extract: Some(noop_menu_action()),
+                ..file_entry_actions(None, None, Vec::new())
+            },
+        )
+        .expect("multi context");
+
+        let labels = context
+            .actions()
+            .into_iter()
+            .map(|action| action.label)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            [
+                "Extract 2 Archives",
+                "Copy 2 Items",
+                "Cut 2 Items",
+                "Delete 2 Items"
+            ]
+        );
+    }
+
+    /// The menu item is the only thing telling the user a file is an archive,
+    /// so it must not appear for anything that is not one.
+    #[test]
+    fn a_selection_that_is_not_an_archive_offers_no_extraction() {
+        let context = FileEntryContext::for_paths(
+            vec![PathBuf::from("/tmp/notes.txt")],
+            file_entry_actions(None, None, Vec::new()),
+        )
+        .expect("single context");
+
+        let labels = context
+            .actions()
+            .into_iter()
+            .map(|action| action.label)
+            .collect::<Vec<_>>();
+        assert!(!labels.contains(&"Extract Here".to_string()));
+    }
+
+    #[test]
     fn sidebar_bookmark_context_removes_bookmark() {
         let context = SidebarBookmarkContext::new(noop_menu_action());
 
@@ -602,6 +693,7 @@ mod tests {
         FileEntryActions {
             view,
             bookmark,
+            extract: None,
             copy: noop_clipboard(),
             cut: noop_clipboard(),
             rename: noop_rename(),
