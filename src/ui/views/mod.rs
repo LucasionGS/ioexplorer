@@ -47,7 +47,7 @@ pub fn format_size(item: &FileItem) -> String {
     format_bytes(size)
 }
 
-pub fn format_modified(time: Option<SystemTime>) -> String {
+pub fn format_timestamp(time: Option<SystemTime>) -> String {
     let Some(time) = time else {
         return String::new();
     };

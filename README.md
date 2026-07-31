@@ -512,6 +512,7 @@ custom_css = "/home/user/.config/ioexplorer/theme.css"
 size = true
 kind = true
 modified = true
+created = false
 
 [sort]
 key = "name"          # name, modified, created, size, or extension
@@ -550,7 +551,7 @@ When the managed block already exists, IoExplorer replaces only that block. When
 
 In icon view, use Ctrl+scroll to resize file entries. The chosen icon size is saved in `~/.local/state/ioexplorer/state` and overrides the configured `icon_size` on later launches.
 
-Listings can be sorted by name, modified date, created date, size, or extension, in either direction, from the sort button in the toolbar or from Settings -> View. `folders_first` keeps directories above files whichever key is chosen; turn it off to let folders sort in with everything else. Created dates come from the filesystem's birth time and are unavailable on filesystems that do not record one. Like the view mode and icon size, the chosen order is saved in `~/.local/state/ioexplorer/state` and overrides the configured `[sort]` on later launches.
+Listings can be sorted by name, modified date, created date, size, or extension, in either direction, from the sort button in the toolbar, from Settings -> View, or by clicking a column header in list view. Clicking the header already sorted reverses it; an arrow marks the active column. The Kind header sorts by extension, which is the grouping a type column is generally wanted for. `[list_columns]` chooses which columns appear, and so which headers are available — `created` is off by default. `folders_first` keeps directories above files whichever key is chosen; turn it off to let folders sort in with everything else. Created dates come from the filesystem's birth time and are unavailable on filesystems that do not record one. Like the view mode and icon size, the chosen order is saved in `~/.local/state/ioexplorer/state` and overrides the configured `[sort]` on later launches.
 
 Custom actions can also be added, edited, deleted, reordered, and configured with Run on each from Settings -> Actions. Changes are saved back to `config.toml` and take effect immediately for context menus. The editor shows command variables that can be used in custom commands: `{path}`, `{name}`, `{parent}`, `{stem}`, `{extension}`, `{uri}`, and `{kind}`.
 

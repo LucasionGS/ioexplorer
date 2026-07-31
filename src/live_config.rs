@@ -403,6 +403,7 @@ mod tests {
                 size: false,
                 kind: false,
                 modified: false,
+                created: false,
             }
         });
         assert!(columns.list_columns_changed());

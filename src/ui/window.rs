@@ -21,7 +21,7 @@ use crate::{
     live_config::{ConfigChange, LiveConfig},
     providers::{FileItem, FileKind, Provider, ProviderError, ProviderUri, local::LocalProvider},
     selector::{SelectorMode, SelectorOptions},
-    sorting::{self, SortOrder},
+    sorting::{self, SortKey, SortOrder},
     state::AppState,
     theme,
     ui::{
@@ -208,8 +208,10 @@ impl DetailsPanel {
         if let Some(media) = media {
             self.append_media_rows(&media);
         }
-        let modified = views::format_modified(item.modified);
-        self.append_row("Modified", &modified);
+        self.append_row("Modified", &views::format_timestamp(item.modified));
+        if let Some(created) = item.created {
+            self.append_row("Created", &views::format_timestamp(Some(created)));
+        }
         self.append_row("Location", &item_location(item));
         if item.hidden {
             self.append_row("Hidden", "Yes");
@@ -235,7 +237,7 @@ impl DetailsPanel {
         if let Some(duration) = combined_media_duration(items, media_details_cache) {
             self.append_row("Duration", &format_media_duration(duration));
         }
-        let modified = views::format_modified(latest_modified(items));
+        let modified = views::format_timestamp(latest_modified(items));
         self.append_row("Latest", &modified);
         if let Some(location) = common_item_location(items) {
             self.append_row("Location", &location);
@@ -630,6 +632,7 @@ pub struct AppWindow {
     live_config: RefCell<Option<Rc<LiveConfig>>>,
     theme_editor_updating: Cell<bool>,
     list_box: gtk::ListBox,
+    list_header: gtk::Box,
     list_scroll: gtk::ScrolledWindow,
     flow_box: gtk::FlowBox,
     grid_scroll: gtk::ScrolledWindow,
@@ -736,8 +739,19 @@ impl AppWindow {
         );
 
         let list_rubberband = rubberband_widget();
-        let list_overlay = gtk::Overlay::builder().child(&list_scroll).build();
+        let list_overlay = gtk::Overlay::builder()
+            .child(&list_scroll)
+            .vexpand(true)
+            .build();
         list_overlay.add_overlay(&list_rubberband);
+        // Above the scrolled window rather than inside it, so the headers stay
+        // put while the rows scroll under them.
+        let list_header = views::list::header_box();
+        let list_page = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .build();
+        list_page.append(&list_header);
+        list_page.append(&list_overlay);
         let allow_multiple_selection = chooser_request
             .as_ref()
             .is_none_or(|request| request.options.multiple);
@@ -779,7 +793,7 @@ impl AppWindow {
             .transition_type(gtk::StackTransitionType::Crossfade)
             .build();
         stack.set_focusable(true);
-        stack.add_named(&list_overlay, Some("list"));
+        stack.add_named(&list_page, Some("list"));
         stack.add_named(&grid_overlay, Some("icon"));
         stack.add_named(&computer_page.root, Some("computer"));
         stack.add_named(&settings_page.root, Some("settings"));
@@ -911,6 +925,7 @@ impl AppWindow {
             live_config: RefCell::new(None),
             theme_editor_updating: Cell::new(false),
             list_box,
+            list_header,
             list_scroll,
             flow_box,
             grid_scroll,
@@ -942,6 +957,7 @@ impl AppWindow {
 
         this.setup_callbacks();
         this.refresh_action_editor();
+        this.render_list_header();
         this.apply_view_mode(this.view_mode.get());
         this.load_uri(start_uri, false);
         this.initialize_chooser_state();
@@ -1554,6 +1570,7 @@ impl AppWindow {
         }
 
         if change.list_columns_changed() {
+            self.render_list_header();
             self.render_entries();
         }
     }
@@ -2423,6 +2440,36 @@ impl AppWindow {
         }
     }
 
+    /// Rebuilds the list view's column headers.
+    ///
+    /// Cheap enough to redo outright whenever the columns or the sort move,
+    /// which saves tracking which header carries the arrow.
+    fn render_list_header(self: &Rc<Self>) {
+        let this = Rc::clone(self);
+        views::list::populate_header(
+            &self.list_header,
+            &self.config.borrow().list_columns,
+            self.sort_order.get(),
+            Rc::new(move |key| this.sort_by_column(key)),
+        );
+    }
+
+    /// Sorts by a clicked column: a second click on the column already sorted
+    /// reverses it, which is what a header arrow invites.
+    fn sort_by_column(self: &Rc<Self>, key: SortKey) {
+        let current = self.sort_order.get();
+        let order = if current.key == key {
+            SortOrder {
+                descending: !current.descending,
+                ..current
+            }
+        } else {
+            SortOrder { key, ..current }
+        };
+
+        self.set_sort_order(order);
+    }
+
     /// Re-orders the current listing.
     ///
     /// The folder is not re-read: the entries in hand are the same ones, so
@@ -2437,6 +2484,7 @@ impl AppWindow {
         self.sort_order.set(order);
         self.topbar.sort_menu.set_order(order);
         self.settings_page.set_sort_order(order);
+        self.render_list_header();
         self.save_ui_state();
 
         if self.active_page.get() != AppPage::Files {

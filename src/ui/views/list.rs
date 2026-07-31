@@ -1,16 +1,206 @@
+use std::rc::Rc;
+
 use gtk::prelude::*;
 
 use crate::{
     config::ListColumns,
     providers::{FileItem, FileKind},
+    sorting::{SortKey, SortOrder},
     ui::{
         dnd,
         views::{
             EntryContextMenuHandler, EntrySelectionHandler, FileDragHandler, FolderDropHandler,
-            format_modified, format_size, image_for_item,
+            format_size, format_timestamp, image_for_item,
         },
     },
 };
+
+/// A column header being clicked, carrying what that column sorts by.
+pub type ColumnSortHandler = Rc<dyn Fn(SortKey)>;
+
+/// The row's leading icon, which the header has to skip past to line its first
+/// title up with the names below it.
+const ICON_SIZE: i32 = 24;
+const COLUMN_SPACING: i32 = 12;
+/// The row container's own start margin plus the margin `.content-list row`
+/// gives every row. The header sits outside the list — above the scrolled
+/// window, so it stays put — and so has to reproduce that inset by hand.
+const HEADER_MARGIN: i32 = 16;
+
+/// A metadata column: the title its header shows, the width header and cell
+/// both request, what the cell reads off an entry, and what clicking the header
+/// sorts by. One definition per column, so a header can never drift out of
+/// alignment with the cells under it.
+#[derive(Clone, Copy)]
+struct MetaColumn {
+    title: &'static str,
+    width: i32,
+    sort: SortKey,
+    value: fn(&FileItem) -> String,
+}
+
+fn kind_value(item: &FileItem) -> String {
+    item.kind.label().to_string()
+}
+
+fn size_value(item: &FileItem) -> String {
+    format_size(item)
+}
+
+fn modified_value(item: &FileItem) -> String {
+    format_timestamp(item.modified)
+}
+
+fn created_value(item: &FileItem) -> String {
+    format_timestamp(item.created)
+}
+
+const KIND_COLUMN: MetaColumn = MetaColumn {
+    title: "Kind",
+    width: 96,
+    // The kind itself is Folder/File/Link, which "folders first" already
+    // separates out. Extension is the ordering someone clicking a type column
+    // is actually after: every .txt together, every .rs together.
+    sort: SortKey::Extension,
+    value: kind_value,
+};
+
+const SIZE_COLUMN: MetaColumn = MetaColumn {
+    title: "Size",
+    width: 96,
+    sort: SortKey::Size,
+    value: size_value,
+};
+
+const MODIFIED_COLUMN: MetaColumn = MetaColumn {
+    title: "Modified",
+    width: 148,
+    sort: SortKey::Modified,
+    value: modified_value,
+};
+
+const CREATED_COLUMN: MetaColumn = MetaColumn {
+    title: "Created",
+    width: 148,
+    sort: SortKey::Created,
+    value: created_value,
+};
+
+fn meta_columns(columns: &ListColumns) -> Vec<MetaColumn> {
+    let mut enabled = Vec::new();
+    if columns.kind {
+        enabled.push(KIND_COLUMN);
+    }
+    if columns.size {
+        enabled.push(SIZE_COLUMN);
+    }
+    if columns.modified {
+        enabled.push(MODIFIED_COLUMN);
+    }
+    if columns.created {
+        enabled.push(CREATED_COLUMN);
+    }
+    enabled
+}
+
+/// The empty header bar. [`populate_header`] fills it, and refills it whenever
+/// the columns or the sort change.
+pub fn header_box() -> gtk::Box {
+    gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(COLUMN_SPACING)
+        .margin_start(HEADER_MARGIN)
+        .margin_end(HEADER_MARGIN)
+        .css_classes(["list-header"])
+        .build()
+}
+
+pub fn populate_header(
+    header: &gtk::Box,
+    columns: &ListColumns,
+    order: SortOrder,
+    sort_handler: ColumnSortHandler,
+) {
+    while let Some(child) = header.first_child() {
+        child.unparent();
+    }
+
+    // Stands in for the row icon, so "Name" starts where the names do.
+    header.append(
+        &gtk::Box::builder()
+            .width_request(ICON_SIZE)
+            .orientation(gtk::Orientation::Horizontal)
+            .build(),
+    );
+    header.append(&header_button(
+        "Name",
+        SortKey::Name,
+        None,
+        order,
+        sort_handler.clone(),
+    ));
+
+    for column in meta_columns(columns) {
+        header.append(&header_button(
+            column.title,
+            column.sort,
+            Some(column.width),
+            order,
+            sort_handler.clone(),
+        ));
+    }
+}
+
+fn header_button(
+    title: &str,
+    sort: SortKey,
+    width: Option<i32>,
+    order: SortOrder,
+    sort_handler: ColumnSortHandler,
+) -> gtk::Button {
+    let content = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(4)
+        .build();
+    content.append(
+        &gtk::Label::builder()
+            .label(title)
+            .xalign(0.0)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .build(),
+    );
+
+    let active = order.key == sort;
+    if active {
+        content.append(
+            &gtk::Image::builder()
+                .icon_name(if order.descending {
+                    "pan-down-symbolic"
+                } else {
+                    "pan-up-symbolic"
+                })
+                .pixel_size(12)
+                .build(),
+        );
+    }
+
+    let button = gtk::Button::builder()
+        .child(&content)
+        .tooltip_text(format!("Sort by {}", sort.label()))
+        .css_classes(["list-header-button"])
+        .build();
+    button.set_focusable(false);
+    if active {
+        button.add_css_class("list-header-active");
+    }
+    match width {
+        Some(width) => button.set_width_request(width),
+        None => button.set_hexpand(true),
+    }
+
+    button.connect_clicked(move |_| sort_handler(sort));
+    button
+}
 
 pub fn populate(
     list: &gtk::ListBox,
@@ -25,11 +215,12 @@ pub fn populate(
         list.remove(&row);
     }
 
+    let columns = meta_columns(columns);
     for (index, item) in items.iter().enumerate() {
         list.append(&row_for(
             index,
             item,
-            columns,
+            &columns,
             folder_drop_handler.clone(),
             file_drag_handler.clone(),
             selection_handler.clone(),
@@ -41,7 +232,7 @@ pub fn populate(
 fn row_for(
     index: usize,
     item: &FileItem,
-    columns: &ListColumns,
+    columns: &[MetaColumn],
     folder_drop_handler: FolderDropHandler,
     file_drag_handler: FileDragHandler,
     selection_handler: EntrySelectionHandler,
@@ -54,7 +245,7 @@ fn row_for(
 
     let container = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
-        .spacing(12)
+        .spacing(COLUMN_SPACING)
         .margin_top(6)
         .margin_bottom(6)
         .margin_start(10)
@@ -62,7 +253,7 @@ fn row_for(
         .css_classes(["file-row"])
         .build();
 
-    let icon = image_for_item(item, 24);
+    let icon = image_for_item(item, ICON_SIZE);
     let name = gtk::Label::builder()
         .label(item.display_name())
         .xalign(0.0)
@@ -73,14 +264,8 @@ fn row_for(
     container.append(&icon);
     container.append(&name);
 
-    if columns.kind {
-        container.append(&meta_label(item.kind.label(), 96));
-    }
-    if columns.size {
-        container.append(&meta_label(&format_size(item), 96));
-    }
-    if columns.modified {
-        container.append(&meta_label(&format_modified(item.modified), 148));
+    for column in columns {
+        container.append(&meta_label(&(column.value)(item), column.width));
     }
 
     row.set_child(Some(&container));
@@ -137,4 +322,65 @@ fn meta_label(text: &str, width: i32) -> gtk::Label {
         .ellipsize(gtk::pango::EllipsizeMode::End)
         .css_classes(["dim-label"])
         .build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn all_columns() -> ListColumns {
+        ListColumns {
+            size: true,
+            kind: true,
+            modified: true,
+            created: true,
+        }
+    }
+
+    #[test]
+    fn columns_appear_in_a_fixed_order() {
+        let titles: Vec<_> = meta_columns(&all_columns())
+            .into_iter()
+            .map(|column| column.title)
+            .collect();
+
+        assert_eq!(titles, ["Kind", "Size", "Modified", "Created"]);
+    }
+
+    #[test]
+    fn a_disabled_column_is_dropped_without_shifting_the_rest() {
+        let columns = ListColumns {
+            size: false,
+            ..all_columns()
+        };
+
+        let titles: Vec<_> = meta_columns(&columns)
+            .into_iter()
+            .map(|column| column.title)
+            .collect();
+
+        assert_eq!(titles, ["Kind", "Modified", "Created"]);
+    }
+
+    /// Two headers offering the same key would leave the sort arrow drawn twice.
+    #[test]
+    fn every_column_sorts_by_a_different_key() {
+        let columns = meta_columns(&all_columns());
+
+        for (index, column) in columns.iter().enumerate() {
+            assert_ne!(
+                column.sort,
+                SortKey::Name,
+                "{} duplicates Name",
+                column.title
+            );
+            assert!(
+                !columns[..index]
+                    .iter()
+                    .any(|earlier| earlier.sort == column.sort),
+                "{} duplicates an earlier column",
+                column.title
+            );
+        }
+    }
 }

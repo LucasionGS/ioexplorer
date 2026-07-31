@@ -24,6 +24,11 @@ pub struct ListColumns {
     pub size: bool,
     pub kind: bool,
     pub modified: bool,
+    /// Off by default: a fourth metadata column crowds the row, and most
+    /// filesystems' birth times are less useful than the modified time beside
+    /// it. Defaulted rather than required so configs predating it still load.
+    #[serde(default)]
+    pub created: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
@@ -567,6 +572,7 @@ impl Default for AppConfig {
                 size: true,
                 kind: true,
                 modified: true,
+                created: false,
             },
             sort: SortOrder::default(),
             actions: Vec::new(),
