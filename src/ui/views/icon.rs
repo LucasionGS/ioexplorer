@@ -1,7 +1,8 @@
 use std::{
     cell::RefCell,
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     ffi::{OsStr, OsString},
+    mem,
     path::{Path, PathBuf},
     rc::Rc,
     time::SystemTime,
@@ -26,6 +27,23 @@ pub type ThumbnailCache = Rc<RefCell<ThumbnailCacheStore>>;
 pub struct ThumbnailCacheStore {
     entries: HashMap<PathBuf, ThumbnailCacheEntry>,
     pending: HashSet<PathBuf>,
+    queue: VecDeque<ThumbnailRequest>,
+    /// Whether a worker is draining `queue`. Only ever one.
+    running: bool,
+    /// Bumped whenever the grid is repopulated, so work queued for a listing
+    /// the user has already navigated away from can be dropped on sight.
+    generation: u64,
+}
+
+/// A thumbnail waiting its turn.
+struct ThumbnailRequest {
+    path: PathBuf,
+    validation: ThumbnailValidation,
+    source: ThumbnailSource,
+    icon: gtk::Image,
+    icon_size: i32,
+    thumbnail_width: i32,
+    generation: u64,
 }
 
 #[derive(Clone)]
@@ -66,13 +84,32 @@ pub fn new_thumbnail_cache() -> ThumbnailCache {
     Rc::new(RefCell::new(ThumbnailCacheStore {
         entries: HashMap::new(),
         pending: HashSet::new(),
+        queue: VecDeque::new(),
+        running: false,
+        generation: 0,
     }))
 }
 
 pub fn clear_thumbnail_cache(thumbnail_cache: &ThumbnailCache) {
     let mut cache = thumbnail_cache.borrow_mut();
     cache.entries.clear();
-    cache.pending.clear();
+    discard_queued(&mut cache);
+}
+
+/// Drops thumbnails queued for a listing that is being replaced.
+///
+/// Without this, opening a folder of photos and immediately leaving it would
+/// still render every one of them before the new folder got a turn.
+pub fn discard_queued_thumbnails(thumbnail_cache: &ThumbnailCache) {
+    discard_queued(&mut thumbnail_cache.borrow_mut());
+}
+
+fn discard_queued(cache: &mut ThumbnailCacheStore) {
+    cache.generation = cache.generation.wrapping_add(1);
+    let queued = mem::take(&mut cache.queue);
+    for request in queued {
+        cache.pending.remove(&request.path);
+    }
 }
 
 #[derive(Clone)]
@@ -90,6 +127,9 @@ pub fn populate(
     selection_handler: EntrySelectionHandler,
     context_menu_handler: EntryContextMenuHandler,
 ) {
+    // The tiles these were queued against are about to be destroyed.
+    discard_queued_thumbnails(&options.thumbnail_cache);
+
     while let Some(child) = flow.child_at_index(0) {
         flow.remove(&child);
     }
@@ -270,37 +310,102 @@ fn request_thumbnail(
         return;
     }
 
-    let icon = icon.clone();
-    glib::MainContext::default().spawn_local(async move {
-        let render = match source {
-            ThumbnailSource::Image => load_image_thumbnail(&path, icon_size, thumbnail_width).await,
-            ThumbnailSource::Video => load_video_thumbnail(&path, icon_size, thumbnail_width).await,
-        };
-
-        let render = match render {
-            Ok(render) => render,
-            Err(error) => {
-                tracing::debug!(%error, "failed to create thumbnail preview");
-                unmark_thumbnail_pending(&thumbnail_cache, &path);
-                return;
-            }
-        };
+    {
         let mut cache = thumbnail_cache.borrow_mut();
-        cache.pending.remove(&path);
-        cache.entries.insert(
+        let generation = cache.generation;
+        cache.queue.push_back(ThumbnailRequest {
             path,
+            validation,
+            source,
+            icon: icon.clone(),
+            icon_size,
+            thumbnail_width,
+            generation,
+        });
+    }
+
+    start_thumbnail_worker(&thumbnail_cache);
+}
+
+/// Renders queued thumbnails one at a time.
+///
+/// Every visible tile used to start its own decode the moment the folder
+/// appeared, so opening a directory of photos kicked off dozens of concurrent
+/// decodes — and for videos, dozens of concurrent ffmpeg processes — which is
+/// what made the window lock up. A single worker returns to the main loop
+/// between items, so the grid stays interactive while previews fill in.
+fn start_thumbnail_worker(thumbnail_cache: &ThumbnailCache) {
+    {
+        let mut cache = thumbnail_cache.borrow_mut();
+        if cache.running {
+            return;
+        }
+        cache.running = true;
+    }
+
+    let thumbnail_cache = Rc::clone(thumbnail_cache);
+    glib::MainContext::default().spawn_local(async move {
+        while let Some(request) = next_thumbnail_request(&thumbnail_cache) {
+            render_queued_thumbnail(&thumbnail_cache, request).await;
+        }
+
+        thumbnail_cache.borrow_mut().running = false;
+    });
+}
+
+fn next_thumbnail_request(thumbnail_cache: &ThumbnailCache) -> Option<ThumbnailRequest> {
+    let mut cache = thumbnail_cache.borrow_mut();
+    while let Some(request) = cache.queue.pop_front() {
+        // Stale listing, or a tile that has since left the widget tree: the
+        // decode would be thrown away, so skip straight past it.
+        if request.generation != cache.generation || request.icon.root().is_none() {
+            cache.pending.remove(&request.path);
+            continue;
+        }
+        return Some(request);
+    }
+
+    None
+}
+
+async fn render_queued_thumbnail(thumbnail_cache: &ThumbnailCache, request: ThumbnailRequest) {
+    let render = match request.source {
+        ThumbnailSource::Image => {
+            load_image_thumbnail(&request.path, request.icon_size, request.thumbnail_width).await
+        }
+        ThumbnailSource::Video => {
+            load_video_thumbnail(&request.path, request.icon_size, request.thumbnail_width).await
+        }
+    };
+
+    let render = match render {
+        Ok(render) => render,
+        Err(error) => {
+            tracing::debug!(%error, "failed to create thumbnail preview");
+            unmark_thumbnail_pending(thumbnail_cache, &request.path);
+            return;
+        }
+    };
+
+    {
+        let mut cache = thumbnail_cache.borrow_mut();
+        cache.pending.remove(&request.path);
+        cache.entries.insert(
+            request.path.clone(),
             ThumbnailCacheEntry {
-                validation,
+                validation: request.validation,
                 texture: render.texture.clone(),
                 pixel_size: render.pixel_size,
-                icon_size,
+                icon_size: request.icon_size,
             },
         );
+    }
 
-        if icon.root().is_some() {
-            apply_thumbnail(&icon, &render.texture, render.pixel_size);
-        }
-    });
+    // Cached above regardless, so a tile that scrolled away still gets its
+    // thumbnail for free the next time it comes back into view.
+    if request.icon.root().is_some() {
+        apply_thumbnail(&request.icon, &render.texture, render.pixel_size);
+    }
 }
 
 async fn load_image_thumbnail(
