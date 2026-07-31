@@ -513,6 +513,11 @@ size = true
 kind = true
 modified = true
 
+[sort]
+key = "name"          # name, modified, created, size, or extension
+descending = false
+folders_first = true
+
 [[actions]]
 label = "Open in Editor"
 command = "code --reuse-window"
@@ -544,6 +549,8 @@ Settings -> Theme writes generated CSS to the configured `custom_css` path. Them
 When the managed block already exists, IoExplorer replaces only that block. When no block exists, it prepends the managed block before the existing CSS.
 
 In icon view, use Ctrl+scroll to resize file entries. The chosen icon size is saved in `~/.local/state/ioexplorer/state` and overrides the configured `icon_size` on later launches.
+
+Listings can be sorted by name, modified date, created date, size, or extension, in either direction, from the sort button in the toolbar or from Settings -> View. `folders_first` keeps directories above files whichever key is chosen; turn it off to let folders sort in with everything else. Created dates come from the filesystem's birth time and are unavailable on filesystems that do not record one. Like the view mode and icon size, the chosen order is saved in `~/.local/state/ioexplorer/state` and overrides the configured `[sort]` on later launches.
 
 Custom actions can also be added, edited, deleted, reordered, and configured with Run on each from Settings -> Actions. Changes are saved back to `config.toml` and take effect immediately for context menus. The editor shows command variables that can be used in custom commands: `{path}`, `{name}`, `{parent}`, `{stem}`, `{extension}`, `{uri}`, and `{kind}`.
 

@@ -1,6 +1,6 @@
 use gtk::prelude::*;
 
-use crate::config::ViewMode;
+use crate::{config::ViewMode, sorting::SortOrder, ui::sort_menu::SortMenu};
 
 pub struct TopBar {
     pub root: gtk::Box,
@@ -15,12 +15,13 @@ pub struct TopBar {
     pub path_entry: gtk::Entry,
     pub list_button: gtk::ToggleButton,
     pub icon_button: gtk::ToggleButton,
+    pub sort_menu: SortMenu,
     pub show_hidden_button: gtk::ToggleButton,
     pub details_button: gtk::ToggleButton,
 }
 
 impl TopBar {
-    pub fn new(default_view: ViewMode, show_hidden: bool) -> Self {
+    pub fn new(default_view: ViewMode, show_hidden: bool, sort: SortOrder) -> Self {
         let root = gtk::Box::builder()
             .orientation(gtk::Orientation::Horizontal)
             .spacing(8)
@@ -69,6 +70,7 @@ impl TopBar {
             .tooltip_text("Icon View")
             .build();
         icon_button.set_focusable(false);
+        let sort_menu = SortMenu::new(sort);
         let show_hidden_button = gtk::ToggleButton::builder()
             .icon_name("view-hidden-symbolic")
             .tooltip_text("Show Hidden Files")
@@ -99,6 +101,7 @@ impl TopBar {
         let view_group = toolbar_group(&[
             list_button.upcast_ref(),
             icon_button.upcast_ref(),
+            sort_menu.button.upcast_ref(),
             show_hidden_button.upcast_ref(),
             details_button.upcast_ref(),
         ]);
@@ -122,6 +125,7 @@ impl TopBar {
             path_entry,
             list_button,
             icon_button,
+            sort_menu,
             show_hidden_button,
             details_button,
         }

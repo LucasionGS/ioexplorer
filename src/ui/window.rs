@@ -21,6 +21,7 @@ use crate::{
     live_config::{ConfigChange, LiveConfig},
     providers::{FileItem, FileKind, Provider, ProviderError, ProviderUri, local::LocalProvider},
     selector::{SelectorMode, SelectorOptions},
+    sorting::{self, SortOrder},
     state::AppState,
     theme,
     ui::{
@@ -616,6 +617,7 @@ pub struct AppWindow {
     view_mode: Cell<ViewMode>,
     show_hidden: Cell<bool>,
     icon_size: Cell<i32>,
+    sort_order: Cell<SortOrder>,
     topbar: TopBar,
     sidebar: Sidebar,
     tab_bar: gtk::Box,
@@ -682,7 +684,7 @@ impl AppWindow {
             .map(|request| ProviderUri::local(request.options.start_folder()))
             .unwrap_or_else(|| home_uri().unwrap_or_else(|| provider.root()));
         let state = AppState::load(&config);
-        let topbar = TopBar::new(state.layout, state.show_hidden);
+        let topbar = TopBar::new(state.layout, state.show_hidden, state.sort);
         let bookmarks = bookmarks::load();
         let sidebar = Sidebar::new(config.sidebar_width, &bookmarks);
         let computer_page = ComputerPage::new();
@@ -692,6 +694,7 @@ impl AppWindow {
             state.layout,
             state.show_hidden,
             state.icon_size,
+            state.sort,
             &theme_settings,
             theme_css_path.as_deref(),
             &config.actions,
@@ -895,6 +898,7 @@ impl AppWindow {
             view_mode: Cell::new(state.layout),
             show_hidden: Cell::new(state.show_hidden),
             icon_size: Cell::new(state.icon_size),
+            sort_order: Cell::new(state.sort),
             custom_action_configs: RefCell::new(config.actions.clone()),
             config: RefCell::new(config),
             topbar,
@@ -1048,6 +1052,11 @@ impl AppWindow {
 
         let this = Rc::clone(self);
         self.topbar
+            .sort_menu
+            .connect_changed(move |order| this.set_sort_order(order));
+
+        let this = Rc::clone(self);
+        self.topbar
             .details_button
             .connect_toggled(move |button| this.set_details_panel_visible(button.is_active()));
 
@@ -1083,6 +1092,23 @@ impl AppWindow {
                     this.apply_view_mode(ViewMode::Icon);
                 }
             });
+
+        // Each of the three sort controls reports the whole order the settings
+        // page now describes, so they do not have to agree on who owns what.
+        let this = Rc::clone(self);
+        self.settings_page
+            .sort_key_dropdown
+            .connect_selected_notify(move |_| this.set_sort_order(this.settings_page.sort_order()));
+
+        let this = Rc::clone(self);
+        self.settings_page
+            .sort_descending_button
+            .connect_toggled(move |_| this.set_sort_order(this.settings_page.sort_order()));
+
+        let this = Rc::clone(self);
+        self.settings_page
+            .folders_first_check
+            .connect_toggled(move |_| this.set_sort_order(this.settings_page.sort_order()));
 
         let this = Rc::clone(self);
         self.settings_page
@@ -2127,6 +2153,7 @@ impl AppWindow {
         if !self.show_hidden.get() {
             items.retain(|item| !item.hidden);
         }
+        sorting::sort_items(&mut items, self.sort_order.get());
         Ok(items)
     }
 
@@ -2396,11 +2423,39 @@ impl AppWindow {
         }
     }
 
+    /// Re-orders the current listing.
+    ///
+    /// The folder is not re-read: the entries in hand are the same ones, so
+    /// this sorts what is already loaded and re-renders. Selection is dropped
+    /// by the render, which is the honest outcome — the rows a selection
+    /// pointed at have moved.
+    fn set_sort_order(self: &Rc<Self>, order: SortOrder) {
+        if self.sort_order.get() == order {
+            return;
+        }
+
+        self.sort_order.set(order);
+        self.topbar.sort_menu.set_order(order);
+        self.settings_page.set_sort_order(order);
+        self.save_ui_state();
+
+        if self.active_page.get() != AppPage::Files {
+            return;
+        }
+
+        sorting::sort_items(&mut self.all_entries.borrow_mut(), order);
+        self.apply_filter_to_entries();
+        if !self.is_filtering() {
+            self.status_label.set_text(&order.summary());
+        }
+    }
+
     fn save_ui_state(&self) {
         let state = AppState {
             layout: self.view_mode.get(),
             show_hidden: self.show_hidden.get(),
             icon_size: self.icon_size.get(),
+            sort: self.sort_order.get(),
         };
         if let Err(error) = state.save() {
             tracing::warn!(%error, "failed to save UI state");
@@ -6024,6 +6079,7 @@ mod tests {
             kind: FileKind::File,
             size: Some(100),
             modified: None,
+            created: None,
             hidden: false,
         };
 

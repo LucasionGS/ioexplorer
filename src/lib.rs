@@ -11,6 +11,7 @@ mod launcher;
 mod live_config;
 mod providers;
 mod selector;
+mod sorting;
 mod state;
 mod theme;
 mod ui;

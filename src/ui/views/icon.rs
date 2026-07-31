@@ -749,6 +749,7 @@ mod tests {
             kind: FileKind::File,
             size: Some(123),
             modified: Some(modified),
+            created: Some(modified),
             hidden: false,
         };
 

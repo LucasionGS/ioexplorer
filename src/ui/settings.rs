@@ -4,6 +4,7 @@ use gtk::prelude::*;
 
 use crate::{
     config::{CustomActionConfig, MAX_ICON_SIZE, MIN_ICON_SIZE, ViewMode},
+    sorting::{SortKey, SortOrder},
     theme::ThemeSettings,
 };
 
@@ -24,6 +25,10 @@ pub struct SettingsPage {
     pub icon_size_up_button: gtk::Button,
     pub icon_size_scale: gtk::Scale,
     pub icon_size_value_label: gtk::Label,
+    pub sort_key_dropdown: gtk::DropDown,
+    pub sort_ascending_button: gtk::ToggleButton,
+    pub sort_descending_button: gtk::ToggleButton,
+    pub folders_first_check: gtk::CheckButton,
     pub theme_window_background_button: ThemeColorControl,
     pub theme_panel_background_button: ThemeColorControl,
     pub theme_muted_background_button: ThemeColorControl,
@@ -79,6 +84,7 @@ impl SettingsPage {
         layout: ViewMode,
         show_hidden: bool,
         icon_size: i32,
+        sort: SortOrder,
         theme_settings: &ThemeSettings,
         theme_css_path: Option<&Path>,
         actions: &[CustomActionConfig],
@@ -147,6 +153,36 @@ impl SettingsPage {
         icon_size_controls.append(&icon_size_up_button);
         icon_size_controls.append(&icon_size_value_label);
 
+        let sort_key_labels = SortKey::ALL.map(SortKey::label);
+        let sort_key_dropdown = gtk::DropDown::builder()
+            .model(&gtk::StringList::new(&sort_key_labels))
+            .tooltip_text("Field files are ordered by")
+            .build();
+        sort_key_dropdown.set_focusable(false);
+        let sort_ascending_button =
+            sort_direction_button("view-sort-ascending-symbolic", "Ascending");
+        let sort_descending_button =
+            sort_direction_button("view-sort-descending-symbolic", "Descending");
+        let sort_direction_group = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(0)
+            .css_classes(["toolbar-group"])
+            .build();
+        sort_direction_group.append(&sort_ascending_button);
+        sort_direction_group.append(&sort_descending_button);
+        sort_descending_button.set_group(Some(&sort_ascending_button));
+        let sort_controls = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(8)
+            .build();
+        sort_controls.append(&sort_key_dropdown);
+        sort_controls.append(&sort_direction_group);
+
+        let folders_first_check = gtk::CheckButton::builder()
+            .label("Folders before files")
+            .active(sort.folders_first)
+            .build();
+
         let view = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(12)
@@ -154,6 +190,8 @@ impl SettingsPage {
             .build();
         view.append(&settings_row("Layout", &layout_group));
         view.append(&settings_row("Icon size", &icon_size_controls));
+        view.append(&settings_row("Sort by", &sort_controls));
+        view.append(&settings_row("Grouping", &folders_first_check));
 
         let theme_window_background_button = color_button(
             &theme_settings.window_background,
@@ -339,6 +377,10 @@ impl SettingsPage {
             icon_size_up_button,
             icon_size_scale,
             icon_size_value_label,
+            sort_key_dropdown,
+            sort_ascending_button,
+            sort_descending_button,
+            folders_first_check,
             theme_window_background_button,
             theme_panel_background_button,
             theme_muted_background_button,
@@ -354,12 +396,41 @@ impl SettingsPage {
             actions_list,
         };
         page.set_view_mode(layout);
+        page.set_sort_order(sort);
         page.set_actions(actions);
         page
     }
 
     pub fn set_show_hidden(&self, show_hidden: bool) {
         self.show_hidden_check.set_active(show_hidden);
+    }
+
+    /// The order the controls currently describe.
+    ///
+    /// Read back rather than tracked, so a handler on any one control sees the
+    /// other two as they stand instead of having to carry them along.
+    pub fn sort_order(&self) -> SortOrder {
+        let key = SortKey::ALL
+            .get(self.sort_key_dropdown.selected() as usize)
+            .copied()
+            .unwrap_or_default();
+
+        SortOrder {
+            key,
+            descending: self.sort_descending_button.is_active(),
+            folders_first: self.folders_first_check.is_active(),
+        }
+    }
+
+    pub fn set_sort_order(&self, order: SortOrder) {
+        let selected = SortKey::ALL
+            .iter()
+            .position(|key| *key == order.key)
+            .unwrap_or(0) as u32;
+        self.sort_key_dropdown.set_selected(selected);
+        self.sort_ascending_button.set_active(!order.descending);
+        self.sort_descending_button.set_active(order.descending);
+        self.folders_first_check.set_active(order.folders_first);
     }
 
     pub fn set_view_mode(&self, layout: ViewMode) {
@@ -463,6 +534,15 @@ fn settings_row(label: &str, control: &impl IsA<gtk::Widget>) -> gtk::Box {
     row.append(&label);
     row.append(control);
     row
+}
+
+fn sort_direction_button(icon_name: &str, tooltip: &str) -> gtk::ToggleButton {
+    let button = gtk::ToggleButton::builder()
+        .icon_name(icon_name)
+        .tooltip_text(tooltip)
+        .build();
+    button.set_focusable(false);
+    button
 }
 
 fn icon_button_control(icon_name: &str, tooltip: &str) -> gtk::Button {

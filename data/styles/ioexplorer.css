@@ -173,6 +173,26 @@ window {
   color: rgb(255, 128, 128);
 }
 
+.sort-menu-item {
+  min-width: 170px;
+  padding: 6px 8px;
+  border-radius: 5px;
+}
+
+.sort-menu-item:hover {
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.sort-menu-heading {
+  padding: 4px 8px 2px 8px;
+  font-size: 0.86em;
+  font-weight: 700;
+}
+
+.sort-menu-separator {
+  margin: 4px 6px;
+}
+
 .content-scroll,
 .content-scroll > viewport {
   background: rgba(10, 12, 16, 0.54);

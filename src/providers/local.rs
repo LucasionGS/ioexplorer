@@ -9,6 +9,7 @@ use std::{
 };
 
 use super::{FileIcon, FileItem, FileKind, Provider, ProviderError, ProviderResult, ProviderUri};
+use crate::sorting::{self, SortOrder};
 
 const SQUASHFS_MAGIC: &[u8; 4] = b"hsqs";
 const APPIMAGE_ICON_EXTENSIONS: [&str; 4] = ["png", "svg", "xpm", "ico"];
@@ -49,17 +50,9 @@ impl Provider for LocalProvider {
             items.push(item);
         }
 
-        items.sort_by(|left, right| {
-            right
-                .kind
-                .eq(&FileKind::Directory)
-                .cmp(&left.kind.eq(&FileKind::Directory))
-                .then_with(|| {
-                    left.display_name()
-                        .to_lowercase()
-                        .cmp(&right.display_name().to_lowercase())
-                })
-        });
+        // The default order, so a listing read straight from a provider is
+        // already sensible. A window re-sorts to whatever the user picked.
+        sorting::sort_items(&mut items, SortOrder::default());
 
         Ok(items)
     }
@@ -101,6 +94,7 @@ fn item_from_path(parent: &ProviderUri, path: PathBuf) -> ProviderResult<FileIte
         kind,
         size: (kind == FileKind::File).then_some(metadata.len()),
         modified: metadata.modified().ok(),
+        created: metadata.created().ok(),
     })
 }
 

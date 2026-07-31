@@ -6,6 +6,8 @@ use std::{
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
+use crate::sorting::SortOrder;
+
 pub const MIN_ICON_SIZE: i32 = 48;
 pub const MAX_ICON_SIZE: i32 = 256;
 
@@ -543,6 +545,10 @@ pub struct AppConfig {
     pub sidebar_width: i32,
     pub custom_css: Option<PathBuf>,
     pub list_columns: ListColumns,
+    /// The order a freshly opened window starts in. The window then owns its
+    /// sort the way it owns its view mode, persisted in [`crate::state`].
+    #[serde(default)]
+    pub sort: SortOrder,
     #[serde(default)]
     pub actions: Vec<CustomActionConfig>,
     #[serde(default)]
@@ -562,6 +568,7 @@ impl Default for AppConfig {
                 kind: true,
                 modified: true,
             },
+            sort: SortOrder::default(),
             actions: Vec::new(),
             spotlight: SpotlightConfig::default(),
         }
@@ -822,6 +829,59 @@ filters = ["*.txt", "*.md"]
         assert_eq!(parsed.actions.len(), 1);
         assert_eq!(parsed.actions[0].label, "Open in Editor");
         assert!(parsed.actions[0].run_on_each);
+    }
+
+    /// A config written before sorting existed still loads, on the default order.
+    #[test]
+    fn a_missing_sort_section_uses_the_default_order() {
+        let parsed: AppConfig = toml::from_str(
+            r#"
+default_view = "icon"
+show_hidden = false
+icon_size = 128
+sidebar_width = 220
+
+[list_columns]
+size = true
+kind = true
+modified = true
+"#,
+        )
+        .expect("valid config");
+
+        assert_eq!(parsed.sort, SortOrder::default());
+    }
+
+    #[test]
+    fn parses_a_configured_sort_order() {
+        let parsed: AppConfig = toml::from_str(
+            r#"
+default_view = "icon"
+show_hidden = false
+icon_size = 128
+sidebar_width = 220
+
+[list_columns]
+size = true
+kind = true
+modified = true
+
+[sort]
+key = "created"
+descending = true
+folders_first = false
+"#,
+        )
+        .expect("valid config");
+
+        assert_eq!(
+            parsed.sort,
+            SortOrder {
+                key: crate::sorting::SortKey::Created,
+                descending: true,
+                folders_first: false,
+            }
+        );
     }
 
     #[test]

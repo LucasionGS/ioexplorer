@@ -196,6 +196,8 @@ pub struct FileItem {
     pub kind: FileKind,
     pub size: Option<u64>,
     pub modified: Option<SystemTime>,
+    /// `None` where the filesystem does not record a birth time.
+    pub created: Option<SystemTime>,
     pub hidden: bool,
 }
 
