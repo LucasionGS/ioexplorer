@@ -11,6 +11,7 @@ use crate::{
         views::{
             EntryContextMenuHandler, EntrySelectionHandler, FileDragHandler, FolderDropHandler,
             format_size, format_timestamp, image_for_item,
+            thumbnail::{self, ThumbnailCache, ThumbnailSpec, ThumbnailTarget},
         },
     },
 };
@@ -19,8 +20,15 @@ use crate::{
 pub type ColumnSortHandler = Rc<dyn Fn(SortKey)>;
 
 /// The row's leading icon, which the header has to skip past to line its first
-/// title up with the names below it.
-const ICON_SIZE: i32 = 24;
+/// title up with the names below it, and the size a row's preview is rendered
+/// at.
+pub const ICON_SIZE: i32 = 24;
+
+/// A row's preview is square, unlike a tile's: the rows have to stay a uniform
+/// height, and a wide thumbnail would push every name in the column across.
+fn thumbnail_spec() -> ThumbnailSpec {
+    ThumbnailSpec::square(ICON_SIZE)
+}
 const COLUMN_SPACING: i32 = 12;
 /// The row container's own start margin plus the margin `.content-list row`
 /// gives every row. The header sits outside the list — above the scrolled
@@ -202,10 +210,21 @@ fn header_button(
     button
 }
 
+pub struct ListViewOptions {
+    pub columns: ListColumns,
+    pub thumbnail_cache: ThumbnailCache,
+}
+
+/// What every row in one pass shares, resolved once rather than per row.
+struct RowContext<'a> {
+    columns: &'a [MetaColumn],
+    thumbnail_cache: &'a ThumbnailCache,
+}
+
 pub fn populate(
     list: &gtk::ListBox,
     items: &[FileItem],
-    columns: &ListColumns,
+    options: &ListViewOptions,
     folder_drop_handler: FolderDropHandler,
     file_drag_handler: FileDragHandler,
     selection_handler: EntrySelectionHandler,
@@ -215,12 +234,16 @@ pub fn populate(
         list.remove(&row);
     }
 
-    let columns = meta_columns(columns);
+    let columns = meta_columns(&options.columns);
+    let context = RowContext {
+        columns: &columns,
+        thumbnail_cache: &options.thumbnail_cache,
+    };
     for (index, item) in items.iter().enumerate() {
         list.append(&row_for(
             index,
             item,
-            &columns,
+            &context,
             folder_drop_handler.clone(),
             file_drag_handler.clone(),
             selection_handler.clone(),
@@ -229,10 +252,59 @@ pub fn populate(
     }
 }
 
+/// Queues previews for the rows on screen.
+///
+/// The same treatment the grid gets: a folder of ten thousand photos should
+/// only decode the two dozen the user can actually see.
+pub fn load_visible_thumbnails(
+    list: &gtk::ListBox,
+    scroll: &gtk::ScrolledWindow,
+    items: &[FileItem],
+    thumbnail_cache: &ThumbnailCache,
+) {
+    let adjustment = scroll.vadjustment();
+    let page_size = adjustment.page_size();
+    let overscan = page_size.max(f64::from(ICON_SIZE) * 8.0);
+    let visible_top = (adjustment.value() - overscan).max(0.0) as f32;
+    let visible_bottom = (adjustment.value() + page_size + overscan) as f32;
+    let spec = thumbnail_spec();
+
+    let mut index = 0;
+    while let Some(row) = list.row_at_index(index) {
+        if row_intersects_y(&row, list, visible_top, visible_bottom)
+            && let Some(item) = items.get(index as usize)
+            && let Some(icon) = row_icon(&row)
+        {
+            thumbnail::request(item, &ThumbnailTarget::icon(&icon), spec, thumbnail_cache);
+        }
+        index += 1;
+    }
+}
+
+fn row_intersects_y(
+    row: &gtk::ListBoxRow,
+    list: &gtk::ListBox,
+    visible_top: f32,
+    visible_bottom: f32,
+) -> bool {
+    row.compute_bounds(list).is_some_and(|bounds| {
+        bounds.y() <= visible_bottom && bounds.y() + bounds.height() >= visible_top
+    })
+}
+
+fn row_icon(row: &gtk::ListBoxRow) -> Option<gtk::Image> {
+    row.child()?
+        .downcast::<gtk::Box>()
+        .ok()?
+        .first_child()?
+        .downcast::<gtk::Image>()
+        .ok()
+}
+
 fn row_for(
     index: usize,
     item: &FileItem,
-    columns: &[MetaColumn],
+    context: &RowContext<'_>,
     folder_drop_handler: FolderDropHandler,
     file_drag_handler: FileDragHandler,
     selection_handler: EntrySelectionHandler,
@@ -254,6 +326,13 @@ fn row_for(
         .build();
 
     let icon = image_for_item(item, ICON_SIZE);
+    icon.add_css_class("file-row-icon");
+    thumbnail::apply_cached(
+        item,
+        &ThumbnailTarget::icon(&icon),
+        thumbnail_spec(),
+        context.thumbnail_cache,
+    );
     let name = gtk::Label::builder()
         .label(item.display_name())
         .xalign(0.0)
@@ -264,7 +343,7 @@ fn row_for(
     container.append(&icon);
     container.append(&name);
 
-    for column in columns {
+    for column in context.columns {
         container.append(&meta_label(&(column.value)(item), column.width));
     }
 

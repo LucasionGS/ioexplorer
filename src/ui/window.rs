@@ -81,17 +81,28 @@ struct ChooserState {
     accept_button: gtk::Button,
 }
 
+/// How large the details panel renders a preview. Bounded by the panel's own
+/// width once its margins are taken off, so a landscape photo fills the panel
+/// without forcing it wider.
+const DETAILS_PREVIEW_SPEC: views::thumbnail::ThumbnailSpec = views::thumbnail::ThumbnailSpec {
+    icon_size: 220,
+    thumbnail_width: 258,
+};
+
 #[derive(Clone)]
 struct DetailsPanel {
     root: gtk::Box,
     icon: gtk::Image,
+    preview: gtk::Picture,
+    preview_frame: gtk::Box,
     title_label: gtk::Label,
     subtitle_label: gtk::Label,
     rows: gtk::Box,
+    thumbnail_cache: views::thumbnail::ThumbnailCache,
 }
 
 impl DetailsPanel {
-    fn new() -> Self {
+    fn new(thumbnail_cache: views::thumbnail::ThumbnailCache) -> Self {
         let icon = gtk::Image::builder()
             .pixel_size(56)
             .halign(gtk::Align::Start)
@@ -127,6 +138,22 @@ impl DetailsPanel {
         header.append(&icon);
         header.append(&title_box);
 
+        // ScaleDown rather than a fixed size: the render already fits the
+        // panel, so the picture should take the shape of the image itself
+        // rather than sit letterboxed in a box of someone else's choosing.
+        let preview = gtk::Picture::builder()
+            .content_fit(gtk::ContentFit::ScaleDown)
+            .can_shrink(true)
+            .halign(gtk::Align::Center)
+            .css_classes(["details-preview"])
+            .build();
+        let preview_frame = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .visible(false)
+            .css_classes(["details-preview-frame"])
+            .build();
+        preview_frame.append(&preview);
+
         let rows = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(0)
@@ -143,6 +170,7 @@ impl DetailsPanel {
             .css_classes(["details-content"])
             .build();
         content.append(&header);
+        content.append(&preview_frame);
         content.append(&rows);
 
         let scroll = gtk::ScrolledWindow::builder()
@@ -165,10 +193,35 @@ impl DetailsPanel {
         Self {
             root,
             icon,
+            preview,
+            preview_frame,
             title_label,
             subtitle_label,
             rows,
+            thumbnail_cache,
         }
+    }
+
+    /// Shows the selected file's own picture, when it has one.
+    ///
+    /// Cleared before the request goes in: the render is asynchronous, and the
+    /// previous selection's photo sitting under the new selection's name for a
+    /// beat reads as the wrong file being described.
+    fn set_preview(&self, item: Option<&FileItem>) {
+        self.preview.set_paintable(None::<&gtk::gdk::Paintable>);
+
+        let Some(item) = item.filter(|item| views::thumbnail::has_preview(item)) else {
+            self.preview_frame.set_visible(false);
+            return;
+        };
+
+        self.preview_frame.set_visible(true);
+        views::thumbnail::request(
+            item,
+            &views::thumbnail::ThumbnailTarget::picture(&self.preview),
+            DETAILS_PREVIEW_SPEC,
+            &self.thumbnail_cache,
+        );
     }
 
     fn set_items(&self, items: &[FileItem], media_details_cache: &MediaDetailsCache) {
@@ -184,12 +237,14 @@ impl DetailsPanel {
         self.icon.set_pixel_size(56);
         self.title_label.set_text("No item selected");
         self.subtitle_label.set_text("");
+        self.set_preview(None);
         views::clear_box_children(&self.rows);
     }
 
     fn set_single_item(&self, item: &FileItem, media_details_cache: &MediaDetailsCache) {
         views::clear_box_children(&self.rows);
         views::set_image_for_item(&self.icon, item, 56);
+        self.set_preview(Some(item));
         let media = media_details_for_item(item, media_details_cache);
         let type_label = media
             .as_ref()
@@ -222,6 +277,7 @@ impl DetailsPanel {
         views::clear_box_children(&self.rows);
         self.icon.set_icon_name(Some("edit-select-all-symbolic"));
         self.icon.set_pixel_size(56);
+        self.set_preview(None);
         self.title_label
             .set_text(&format!("{} items selected", items.len()));
         self.subtitle_label.set_text(&selection_kind_summary(items));
@@ -461,11 +517,11 @@ fn media_details_for_item(
 }
 
 fn media_kind_for_name(name: &str) -> Option<MediaKind> {
-    if views::icon::is_previewable_image(name) {
+    if views::thumbnail::is_previewable_image(name) {
         Some(MediaKind::Image)
-    } else if views::icon::is_previewable_video(name) {
+    } else if views::thumbnail::is_previewable_video(name) {
         Some(MediaKind::Video)
-    } else if views::icon::is_previewable_audio(name) {
+    } else if views::thumbnail::is_previewable_audio(name) {
         Some(MediaKind::Audio)
     } else {
         None
@@ -657,7 +713,7 @@ pub struct AppWindow {
     tabs: RefCell<Vec<FileTab>>,
     active_tab: Cell<usize>,
     bookmarks: RefCell<Vec<PathBuf>>,
-    thumbnail_cache: views::icon::ThumbnailCache,
+    thumbnail_cache: views::thumbnail::ThumbnailCache,
     pending_visible_thumbnail_load: Cell<bool>,
     chooser: Option<ChooserState>,
 }
@@ -729,7 +785,10 @@ impl AppWindow {
             .child(&flow_box)
             .css_classes(["content-scroll"])
             .build();
-        let details_panel = DetailsPanel::new();
+        // One cache behind all three views, so a photo the grid has already
+        // decoded costs a list row or the details panel nothing but a resize.
+        let thumbnail_cache = views::thumbnail::new_cache();
+        let details_panel = DetailsPanel::new(Rc::clone(&thumbnail_cache));
         details_panel.clear();
         let selection_changed = selection_changed_handler(
             &selected_indices,
@@ -950,7 +1009,7 @@ impl AppWindow {
             tabs: RefCell::new(vec![FileTab::new(start_uri.clone())]),
             active_tab: Cell::new(0),
             bookmarks: RefCell::new(bookmarks),
-            thumbnail_cache: views::icon::new_thumbnail_cache(),
+            thumbnail_cache,
             pending_visible_thumbnail_load: Cell::new(false),
             chooser,
         });
@@ -1233,15 +1292,17 @@ impl AppWindow {
             this.transfer_dropped_payload(payload);
         });
 
-        let this = Rc::clone(self);
-        self.grid_scroll
-            .vadjustment()
-            .connect_value_changed(move |_| this.queue_visible_thumbnail_load());
+        for scroll in [&self.grid_scroll, &self.list_scroll] {
+            let this = Rc::clone(self);
+            scroll
+                .vadjustment()
+                .connect_value_changed(move |_| this.queue_visible_thumbnail_load());
 
-        let this = Rc::clone(self);
-        self.grid_scroll
-            .vadjustment()
-            .connect_page_size_notify(move |_| this.queue_visible_thumbnail_load());
+            let this = Rc::clone(self);
+            scroll
+                .vadjustment()
+                .connect_page_size_notify(move |_| this.queue_visible_thumbnail_load());
+        }
 
         self.install_icon_view_zoom_controls();
 
@@ -2296,7 +2357,10 @@ impl AppWindow {
         views::list::populate(
             &self.list_box,
             &entries,
-            &list_columns,
+            &views::list::ListViewOptions {
+                columns: list_columns,
+                thumbnail_cache: Rc::clone(&self.thumbnail_cache),
+            },
             folder_drop_handler.clone(),
             list_drag_handler,
             selection_handler.clone(),
@@ -2335,8 +2399,18 @@ impl AppWindow {
         });
     }
 
+    /// Queues previews for whichever view is on screen.
+    ///
+    /// Both are asked: a stack only allocates its visible child, so the hidden
+    /// one reports no bounds and quietly asks for nothing.
     fn load_visible_thumbnails(&self) {
         let entries = self.entries.borrow().clone();
+        views::list::load_visible_thumbnails(
+            &self.list_box,
+            &self.list_scroll,
+            &entries,
+            &self.thumbnail_cache,
+        );
         views::icon::load_visible_thumbnails(
             &self.flow_box,
             &self.grid_scroll,
@@ -2386,7 +2460,7 @@ impl AppWindow {
         self.topbar.breadcrumbs.append(&button);
     }
 
-    fn apply_view_mode(&self, mode: ViewMode) {
+    fn apply_view_mode(self: &Rc<Self>, mode: ViewMode) {
         self.view_mode.set(mode);
         match mode {
             ViewMode::List => {
@@ -2405,6 +2479,9 @@ impl AppWindow {
             }
         }
         self.settings_page.set_view_mode(mode);
+        // The view being switched to has had no allocation until now, so its
+        // rows or tiles could not say whether they were on screen.
+        self.queue_visible_thumbnail_load();
         self.save_ui_state();
     }
 
@@ -2553,7 +2630,12 @@ impl AppWindow {
         self.icon_size.set(next);
         self.settings_page.set_icon_size(next);
         self.save_ui_state();
-        views::icon::clear_thumbnail_cache(&self.thumbnail_cache);
+        // The grid's old renders are the wrong size now, but the list's and the
+        // details panel's are untouched by a grid zoom and worth keeping.
+        views::thumbnail::retain_sizes(
+            &self.thumbnail_cache,
+            &[next, views::list::ICON_SIZE, DETAILS_PREVIEW_SPEC.icon_size],
+        );
         if self.active_page.get() == AppPage::Files {
             self.render_entries();
             if !selected.is_empty() {
@@ -5476,7 +5558,7 @@ fn is_desktop_entry_file(item: &FileItem) -> bool {
 
 fn is_previewable_image_file(item: &FileItem) -> bool {
     item.kind == FileKind::File
-        && views::icon::is_previewable_image(&item.name)
+        && views::thumbnail::is_previewable_image(&item.name)
         && item.uri.local_path().is_ok()
 }
 

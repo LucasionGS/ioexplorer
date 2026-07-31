@@ -250,6 +250,17 @@ window {
   font-size: 0.94em;
 }
 
+.details-preview-frame {
+  padding: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.24);
+}
+
+.details-preview {
+  border-radius: 4px;
+}
+
 .details-rows {
   border-top: 1px solid rgba(255, 255, 255, 0.1);
 }
@@ -433,6 +444,11 @@ window {
 
 .file-tile-icon.image-thumbnail {
   border-radius: 6px;
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.file-row-icon.image-thumbnail {
+  border-radius: 3px;
   background: rgba(0, 0, 0, 0.2);
 }
 
