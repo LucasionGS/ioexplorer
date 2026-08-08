@@ -903,3 +903,56 @@ window {
   background: transparent;
   border-top: 0;
 }
+
+/* Desktop surface.
+ *
+ * The `window` rule at the top of this file paints an opaque dark wash, which
+ * over a wallpaper is exactly wrong. A layer surface always has an alpha
+ * channel and GTK4 takes the toplevel background entirely from CSS, so opting
+ * out is just `transparent` — no RGBA-visual ceremony. */
+.desktop-window,
+.desktop-window > *,
+.desktop-surface {
+  background: transparent;
+}
+
+.desktop-tile {
+  padding: 6px;
+  border-radius: 8px;
+}
+
+.desktop-tile:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+/* Legibility over an arbitrary wallpaper needs both of these. A shadow alone
+ * disappears against a light grey photo; an always-on pill looks heavy over a
+ * dark one, so the pill is configurable and the shadow is not. */
+.desktop-tile-label {
+  padding: 1px 6px;
+  border-radius: 6px;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.85);
+}
+
+.desktop-tile-label.label-backdrop {
+  background: rgba(0, 0, 0, 0.45);
+}
+
+/* The same selection colours as the icon view, so the desktop reads as part of
+ * ioexplorer rather than a separate program. */
+.desktop-tile.entry-selected {
+  background: rgba(67, 123, 214, 0.34);
+}
+
+.desktop-tile.entry-selected .desktop-tile-label {
+  background: rgba(82, 145, 238, 0.55);
+  text-shadow: none;
+}
+
+.desktop-toast {
+  margin-bottom: 28px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  background: rgba(18, 21, 28, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
