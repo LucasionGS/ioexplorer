@@ -564,6 +564,14 @@ pub struct DesktopConfig {
     /// Defaults to `XDG_DESKTOP_DIR`, then `~/Desktop`.
     #[serde(default)]
     pub folder: Option<PathBuf>,
+    /// Which output icons start on, by connector name (`DP-1`, `eDP-1`).
+    ///
+    /// Only a starting point: an icon dragged to another screen stays there,
+    /// recorded against that output. Unset — or naming a screen that is not
+    /// currently connected — falls back to the first output, so icons can never
+    /// end up with nowhere to be drawn.
+    #[serde(default)]
+    pub output: Option<String>,
     /// Inset the icons by whatever panels have reserved, so nothing lands
     /// underneath a bar where it can never be clicked.
     #[serde(default = "default_true")]
@@ -597,6 +605,7 @@ impl Default for DesktopConfig {
             grid_spacing: default_grid_spacing(),
             show_hidden: false,
             folder: None,
+            output: None,
             respect_panels: true,
             label_backdrop: true,
             sort: SortOrder::default(),
@@ -1543,6 +1552,7 @@ snap-to-grid = true     # the default for an output with no preference of its ow
 grid-spacing = 12       # clamped to 0..=64
 show-hidden = false
 folder = "/home/user/Desktop"   # defaults to XDG_DESKTOP_DIR, then ~/Desktop
+output = "DP-1"         # which screen icons start on; unset means the first one
 respect-panels = true   # inset the icons by whatever your bar reserved
 label-backdrop = true   # translucent pill behind each label, for busy wallpapers
 
@@ -1560,6 +1570,7 @@ folders_first = true
         assert_eq!(desktop.grid_spacing, 12);
         assert!(!desktop.show_hidden);
         assert_eq!(desktop.folder, Some(PathBuf::from("/home/user/Desktop")));
+        assert_eq!(desktop.output.as_deref(), Some("DP-1"));
         assert!(desktop.respect_panels);
         assert!(desktop.label_backdrop);
         assert_eq!(desktop.sort.key, crate::sorting::SortKey::Name);
@@ -1626,6 +1637,7 @@ folders_first = true
                 grid_spacing: 4,
                 show_hidden: true,
                 folder: Some(PathBuf::from("/home/u/Desk")),
+                output: Some("HDMI-A-1".to_string()),
                 respect_panels: false,
                 label_backdrop: false,
                 sort: SortOrder {

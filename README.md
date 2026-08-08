@@ -459,6 +459,11 @@ Right-click gives the same menu the file manager uses (Copy, Cut, Paste, Rename,
 Delete, Extract Here, New Folder, your custom actions), plus Arrange Icons, Sort By,
 Snap To Grid and Open In IoExplorer.
 
+Every screen is live, whether or not it holds icons: right-click works anywhere and any
+screen can be dropped onto. The surface keeps a tint of one part in 255 to make that
+true — a window that paints nothing gives the compositor no content to hit-test, and a
+screen with no icons on it would otherwise receive no pointer events at all.
+
 **Keyboard shortcuts are unavailable on some compositors.** The desktop sits on the
 `Bottom` layer so it stays under your windows, and Hyprland only grants keyboard focus
 to the upper layers — measured on 0.56.2, an identical surface receives key events on
@@ -479,10 +484,15 @@ resolution change or a new panel; the pixels record a freeform placement the cel
 cannot. Moving a display to a different port gives it a new key, so its icons re-flow
 once.
 
-A file exists once, so it appears on exactly one desktop: the first output in
-enumeration order claims anything unclaimed. Unplugging a monitor leaves its stored
-layout untouched on disk and shows its icons on the primary output on loan, so plugging
-it back in restores what you had.
+A file exists once, so it appears on exactly one desktop. Icons start on the output
+named by `output` — or the first one, if that is unset or names a screen that is not
+currently connected — and **you can drag an icon onto another screen to move it there**,
+after which it stays put and is recorded against that output. Each screen keeps its own
+grid, snap preference and layout.
+
+Unplugging a monitor leaves its stored layout untouched on disk and lends its icons to
+the default screen meanwhile, so plugging it back in restores exactly what you had.
+Moving them around while they are on loan does not steal them.
 
 ### Settings
 
@@ -493,6 +503,7 @@ snap-to-grid = true     # the default for an output with no preference of its ow
 grid-spacing = 12       # clamped to 0..=64
 show-hidden = false
 folder = "/home/user/Desktop"   # defaults to XDG_DESKTOP_DIR, then ~/Desktop
+output = "DP-1"         # which screen icons start on; unset means the first one
 respect-panels = true   # inset the icons by whatever your bar reserved
 label-backdrop = true   # translucent pill behind each label, for busy wallpapers
 

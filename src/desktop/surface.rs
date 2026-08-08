@@ -156,7 +156,11 @@ pub struct DesktopSurface {
     suppress_clear: CellFlag<bool>,
     /// Where inside a tile the current drag was grabbed, so the icon does not
     /// jump to put its top-left under the cursor.
-    grab_offset: CellFlag<(f64, f64)>,
+    ///
+    /// Shared between surfaces: a drag that crosses to another screen is
+    /// completed by *that* screen's surface, which never saw the press and
+    /// would otherwise place the icon with its corner under the cursor.
+    grab_offset: Rc<CellFlag<(f64, f64)>>,
 
     toast: gtk::Label,
     /// Shared with the timeout closure so it can forget itself as it fires.
@@ -174,6 +178,9 @@ pub struct DesktopSurface {
     monitor_order: Rc<RefCell<Vec<String>>>,
     /// Names shown on loan from an absent output — rendered, never saved.
     orphans: RefCell<BTreeSet<String>>,
+    /// Re-lists every surface. Set by the owning app once all of them exist,
+    /// since a surface has no other way to reach its siblings.
+    reload_all: RefCell<Option<Rc<dyn Fn()>>>,
 
     folder_monitor: RefCell<Option<gio::FileMonitor>>,
     pending_reload: CellFlag<bool>,
@@ -204,6 +211,7 @@ pub struct SurfaceContext {
     pub config: DesktopConfig,
     pub custom_action_configs: Vec<CustomActionConfig>,
     pub monitor_order: Rc<RefCell<Vec<String>>>,
+    pub grab_offset: Rc<CellFlag<(f64, f64)>>,
     pub positions: Rc<RefCell<PositionStore>>,
     pub thumbnails: ThumbnailCache,
     pub windowed: bool,
@@ -221,6 +229,7 @@ impl DesktopSurface {
             config,
             custom_action_configs,
             monitor_order,
+            grab_offset,
             positions,
             thumbnails,
             windowed,
@@ -237,12 +246,37 @@ impl DesktopSurface {
             window.set_default_size(900, 700);
         }
 
+        // Give the window a real size request of its own, from the output it
+        // is bound to.
+        //
+        // Without this a screen holding no icons asks for nothing: the Overlay's
+        // main child is a bare DrawingArea at 0x0, and the Fixed only has a
+        // natural size once it has tiles in it. The compositor then maps a
+        // surface with no substance, which never becomes visible and never
+        // receives a pointer — so an empty screen had no context menu and could
+        // not be dropped onto, while the one screen that happened to own the
+        // icons worked fine.
+        let geometry = monitor.geometry();
+        if geometry.width() > 0 && geometry.height() > 0 {
+            window.set_default_size(geometry.width(), geometry.height());
+        }
+
         // `gtk::Widget` has no resize signal, and a layer surface's size is only
         // known once the compositor configures it. A DrawingArea's `resize` is
         // the one reliable hook, so it exists purely to report the viewport.
-        let sizer = gtk::DrawingArea::builder().can_target(false).build();
+        let sizer = gtk::DrawingArea::builder()
+            .can_target(false)
+            .hexpand(true)
+            .vexpand(true)
+            .build();
+        // Fills the surface rather than shrinking to its tiles, so the drop
+        // target and hit-testing cover the whole screen even when it is empty.
         let fixed = gtk::Fixed::builder()
             .css_classes(["desktop-surface"])
+            .hexpand(true)
+            .vexpand(true)
+            .halign(gtk::Align::Fill)
+            .valign(gtk::Align::Fill)
             .build();
 
         let rubberband = gtk::Box::builder()
@@ -287,12 +321,13 @@ impl DesktopSurface {
             rubberband,
             rubberband_start: CellFlag::new(None),
             suppress_clear: CellFlag::new(false),
-            grab_offset: CellFlag::new((0.0, 0.0)),
+            grab_offset,
             toast,
             toast_timer: Rc::new(RefCell::new(None)),
             custom_action_configs: RefCell::new(custom_action_configs),
             monitor_order,
             orphans: RefCell::new(BTreeSet::new()),
+            reload_all: RefCell::new(None),
             folder_monitor: RefCell::new(None),
             pending_reload: CellFlag::new(false),
             save_timer: Rc::new(RefCell::new(None)),
@@ -346,6 +381,10 @@ impl DesktopSurface {
         self.window.add_controller(keys);
     }
 
+    pub fn set_reload_all(&self, reload_all: Rc<dyn Fn()>) {
+        *self.reload_all.borrow_mut() = Some(reload_all);
+    }
+
     pub fn present(&self) {
         self.window.present();
     }
@@ -370,9 +409,10 @@ impl DesktopSurface {
             };
         }
 
-        // Unclaimed by any *live* output. The first output takes it, so the
-        // choice is stable rather than whichever surface reloaded first.
-        if order.first().map(String::as_str) != Some(self.monitor_key.as_str()) {
+        // Unclaimed by any live output, so it goes to the default screen. Which
+        // screen that is has to be decided the same way by every surface, or
+        // whichever reloaded first would win the race.
+        if self.default_output(&order).as_deref() != Some(self.monitor_key.as_str()) {
             return Claim::NotOurs;
         }
 
@@ -382,6 +422,20 @@ impl DesktopSurface {
         } else {
             Claim::Owned
         }
+    }
+
+    /// The screen a file with no recorded home appears on.
+    ///
+    /// The configured output when it is actually connected, else the first one.
+    /// Falling back matters: naming a screen that is currently unplugged would
+    /// otherwise leave every unplaced icon with nowhere to be drawn at all.
+    fn default_output(&self, order: &[String]) -> Option<String> {
+        self.config
+            .borrow()
+            .output
+            .clone()
+            .filter(|name| order.contains(name))
+            .or_else(|| order.first().cloned())
     }
 
     /// Whether icons snap on this output: its own stored preference if it has
@@ -408,6 +462,8 @@ impl DesktopSurface {
             config.clamped_grid_spacing(),
         );
         drop(config);
+
+        tracing::debug!(monitor = %self.monitor_key, width, height, "surface configured");
 
         let first_layout = self.metrics.get().is_none();
         if self.metrics.get() == Some(metrics) {
@@ -684,6 +740,7 @@ impl DesktopSurface {
             let Some(surface) = surface.upgrade() else {
                 return Vec::new();
             };
+            tracing::debug!(monitor = %surface.monitor_key, %name, "drag started");
             surface.grab_offset.set((x, y));
 
             if !surface.selection.borrow().contains(&name) {
@@ -1122,6 +1179,7 @@ impl DesktopSurface {
     }
 
     fn handle_drop(self: &Rc<Self>, payload: crate::ui::dnd::DropPayload, x: f64, y: f64) {
+        tracing::debug!(monitor = %self.monitor_key, x, y, "received a drop");
         let crate::ui::dnd::DropPayload::LocalPaths { paths, .. } = &payload else {
             // Bytes, a texture or a URL: nothing the desktop imports itself yet.
             return;
@@ -1180,6 +1238,8 @@ impl DesktopSurface {
         let (delta_x, delta_y) = (target_x - origin.0, target_y - origin.1);
 
         let snap = self.snap_to_grid();
+        let mut arrived_from_elsewhere = false;
+
         for name in &names {
             let current = self
                 .tiles
@@ -1187,14 +1247,17 @@ impl DesktopSurface {
                 .get(name)
                 .and_then(|tile| tile.root.compute_bounds(&self.fixed))
                 .map(|bounds| (bounds.x() as i32, bounds.y() as i32));
-            let Some((current_x, current_y)) = current else {
-                continue;
-            };
 
-            let moved = if name == anchor {
-                (target_x, target_y)
-            } else {
-                (current_x + delta_x, current_y + delta_y)
+            // No tile here means the icon came from another screen's surface.
+            // Everything below is the same either way; only the bookkeeping at
+            // the end differs, because this output has to take it over.
+            let moved = match current {
+                Some(_) if name == anchor => (target_x, target_y),
+                Some((current_x, current_y)) => (current_x + delta_x, current_y + delta_y),
+                None => {
+                    arrived_from_elsewhere = true;
+                    (target_x, target_y)
+                }
             };
 
             let position = if snap {
@@ -1208,15 +1271,45 @@ impl DesktopSurface {
             if let Some(tile) = self.tiles.borrow().get(name) {
                 self.fixed.move_(&tile.root, f64::from(px), f64::from(py));
             }
-            if !self.orphans.borrow().contains(name) {
-                self.positions
+
+            match current {
+                // An orphan is only on loan from an unplugged output; moving it
+                // around here must not quietly transfer it to this one.
+                Some(_) if self.orphans.borrow().contains(name) => {}
+                Some(_) => self
+                    .positions
                     .borrow_mut()
-                    .set(&self.monitor_key, name, position);
+                    .set(&self.monitor_key, name, position),
+                // Dragged in from another screen: this output owns it now, and
+                // the one it came from must let go.
+                None => self
+                    .positions
+                    .borrow_mut()
+                    .claim_for(&self.monitor_key, name, position),
             }
         }
 
         self.refresh_occupied(metrics);
         self.schedule_save();
+
+        if arrived_from_elsewhere {
+            // Both surfaces are now out of date: this one is missing a tile it
+            // owns, and the other is still drawing one it does not.
+            self.reload_everything();
+        }
+    }
+
+    /// Re-lists every surface, not just this one.
+    ///
+    /// Needed whenever ownership moves between outputs, since a surface only
+    /// ever lists on its own behalf and has no idea another one just took a
+    /// file off it.
+    fn reload_everything(self: &Rc<Self>) {
+        if let Some(reload_all) = self.reload_all.borrow().clone() {
+            reload_all();
+        } else {
+            self.reload();
+        }
     }
 
     fn refresh_occupied(&self, metrics: GridMetrics) {

@@ -134,6 +134,9 @@ struct DesktopApp {
     /// Live outputs in enumeration order, shared with every surface so they
     /// agree on who owns an unclaimed file.
     monitor_order: Rc<RefCell<Vec<String>>>,
+    /// Where the in-flight drag was grabbed inside its tile. Shared, because a
+    /// drag that ends on another screen is completed by that screen's surface.
+    grab_offset: Rc<std::cell::Cell<(f64, f64)>>,
     windowed: bool,
 }
 
@@ -153,6 +156,7 @@ impl DesktopApp {
             thumbnails: thumbnail::new_cache(),
             surfaces: RefCell::new(BTreeMap::new()),
             monitor_order: Rc::new(RefCell::new(Vec::new())),
+            grab_offset: Rc::new(std::cell::Cell::new((0.0, 0.0))),
             windowed,
         })
     }
@@ -221,6 +225,7 @@ impl DesktopApp {
                     config: self.config.borrow().clone(),
                     custom_action_configs: self.custom_actions.borrow().clone(),
                     monitor_order: Rc::clone(&self.monitor_order),
+                    grab_offset: Rc::clone(&self.grab_offset),
                     positions: Rc::clone(&self.positions),
                     thumbnails: Rc::clone(&self.thumbnails),
                     windowed: self.windowed,
@@ -242,11 +247,25 @@ impl DesktopApp {
             self.surfaces.borrow_mut().insert(key, created);
         }
 
-        // Ownership just moved: a new output may take files the primary was
-        // showing on loan, and a departed one leaves orphans behind.
+        // Every surface can now reach the others, which it needs when an icon
+        // is dragged from one screen to another and ownership changes hands.
+        let reload_all: Rc<dyn Fn()> = {
+            let this = Rc::downgrade(self);
+            Rc::new(move || {
+                if let Some(this) = this.upgrade() {
+                    for surface in this.surfaces.borrow().values() {
+                        surface.reload();
+                    }
+                }
+            })
+        };
         for surface in self.surfaces.borrow().values() {
-            surface.reload();
+            surface.set_reload_all(Rc::clone(&reload_all));
         }
+
+        // Ownership just moved: a new output may take files the default screen
+        // was showing on loan, and a departed one leaves orphans behind.
+        reload_all();
 
         if let Err(error) = self.positions.borrow_mut().flush() {
             tracing::warn!(%error, "failed to save desktop positions");

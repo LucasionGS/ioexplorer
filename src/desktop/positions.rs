@@ -262,6 +262,21 @@ impl PositionStore {
             .cloned()
     }
 
+    /// Moves `name` to `monitor`, taking it off whichever output had it.
+    ///
+    /// This is what dragging an icon from one screen to another does. The
+    /// removal has to sweep every output, not just the one we think owned it:
+    /// an entry can linger under an unplugged monitor, and leaving it there
+    /// would make the icon reappear in two places the moment that came back.
+    pub fn claim_for(&mut self, monitor: &str, name: &str, position: StoredPosition) {
+        for (key, entry) in self.stored.monitors.iter_mut() {
+            if key != monitor && entry.icons.remove(name).is_some() {
+                self.dirty = true;
+            }
+        }
+        self.set(monitor, name, position);
+    }
+
     /// Whether any output at all — live or absent — has a position for `name`.
     ///
     /// Distinguishes "this file is new" from "this file belongs to a monitor
@@ -527,6 +542,42 @@ mod tests {
         store.dedupe(&["DP-1".to_string()]);
 
         assert!(store.get("UNPLUGGED-1", "shared.txt").is_some());
+    }
+
+    /// Dragging an icon from one screen to another.
+    #[test]
+    fn claiming_moves_an_icon_between_outputs() {
+        let mut store = store_with(
+            "DP-1",
+            &[("notes.txt", StoredPosition::snapped(Cell::new(0, 0)))],
+        );
+
+        let landed = StoredPosition::snapped(Cell::new(2, 3));
+        store.claim_for("HDMI-A-1", "notes.txt", landed);
+
+        assert_eq!(store.get("HDMI-A-1", "notes.txt"), Some(landed));
+        assert_eq!(store.get("DP-1", "notes.txt"), None);
+    }
+
+    /// An entry left under an unplugged output has to go too, or the icon comes
+    /// back in two places when that monitor is reconnected.
+    #[test]
+    fn claiming_clears_an_absent_outputs_copy_too() {
+        let mut store = PositionStore::default();
+        let position = StoredPosition::snapped(Cell::new(0, 0));
+        store.set("UNPLUGGED-1", "notes.txt", position);
+
+        store.claim_for("DP-1", "notes.txt", position);
+
+        assert_eq!(store.get("UNPLUGGED-1", "notes.txt"), None);
+        assert_eq!(store.get("DP-1", "notes.txt"), Some(position));
+        assert_eq!(
+            store.owner_of(
+                "notes.txt",
+                &["DP-1".to_string(), "UNPLUGGED-1".to_string()]
+            ),
+            Some("DP-1".to_string())
+        );
     }
 
     #[test]

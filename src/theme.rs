@@ -125,8 +125,19 @@ pub fn install_desktop_transparency() {
     };
 
     let provider = gtk::CssProvider::new();
+    // The window itself keeps the faintest possible tint rather than going
+    // fully transparent. A window that paints nothing produces no content for
+    // the compositor to hit-test, and a screen holding no icons then receives
+    // no pointer events at all — no context menu, and nothing to drop onto.
+    // One part in 255 forces a real full-surface paint and is not perceptible:
+    // measured against a wallpaper it moves mean brightness by under half a
+    // level out of 255. Everything inside stays genuinely transparent.
     provider.load_from_string(
-        ".desktop-window,\n\
+        ".desktop-window {\n\
+           background-color: rgba(0, 0, 0, 0.004);\n\
+           background-image: none;\n\
+           box-shadow: none;\n\
+         }\n\
          .desktop-window > *,\n\
          .desktop-window > * > *,\n\
          .desktop-surface {\n\
