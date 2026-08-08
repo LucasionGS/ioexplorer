@@ -107,6 +107,42 @@ pub fn install_bundled() {
     );
 }
 
+/// Forces the desktop surface transparent, above every other stylesheet.
+///
+/// Not themeable, deliberately. The bundled stylesheet paints `window` with an
+/// opaque wash and a user theme is free to replace it with its own — but a
+/// desktop that honoured either would hide the wallpaper it exists to sit on
+/// top of. Priority matters more than specificity here: a user theme loads at
+/// `PRIORITY_USER + 1`, so a `.desktop-window` rule sitting in the bundled CSS
+/// at `PRIORITY_APPLICATION` loses to that theme's plain `window` rule no
+/// matter how specific it is. This provider goes above both.
+///
+/// Scoped to `.desktop-window` and its own children, so it cannot leak into the
+/// file manager's windows.
+pub fn install_desktop_transparency() {
+    let Some(display) = gtk::gdk::Display::default() else {
+        return;
+    };
+
+    let provider = gtk::CssProvider::new();
+    provider.load_from_string(
+        ".desktop-window,\n\
+         .desktop-window > *,\n\
+         .desktop-window > * > *,\n\
+         .desktop-surface {\n\
+           background: none;\n\
+           background-color: transparent;\n\
+           background-image: none;\n\
+           box-shadow: none;\n\
+         }\n",
+    );
+    gtk::style_context_add_provider_for_display(
+        &display,
+        &provider,
+        gtk::STYLE_PROVIDER_PRIORITY_USER + 2,
+    );
+}
+
 pub fn default_custom_css_path() -> Option<PathBuf> {
     ProjectDirs::from("io.github", "ionix", "ioexplorer")
         .map(|dirs| dirs.config_dir().join("theme.css"))

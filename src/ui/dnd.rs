@@ -108,6 +108,20 @@ where
     W: IsA<gtk::Widget>,
     F: Fn(DropPayload) + 'static,
 {
+    install_drop_target_at(widget, move |payload, _, _| on_drop(payload));
+}
+
+/// Like [`install_drop_target`], but tells the handler *where* the drop landed.
+///
+/// The coordinates are captured before the payload is awaited, because they are
+/// only available synchronously in the signal — by the time the async read
+/// resolves there is no drop position left to ask for. A target that positions
+/// what it receives, rather than just filing it somewhere, needs them.
+pub fn install_drop_target_at<W, F>(widget: &W, on_drop: F)
+where
+    W: IsA<gtk::Widget>,
+    F: Fn(DropPayload, f64, f64) + 'static,
+{
     let on_drop = Rc::new(on_drop);
     let drop_target =
         gtk::DropTargetAsync::new(None, gdk::DragAction::COPY | gdk::DragAction::MOVE);
@@ -115,7 +129,7 @@ where
     drop_target.connect_accept(|_, drop| drop_has_supported_payload(drop));
     drop_target.connect_drag_enter(|_, drop, _, _| preferred_drop_action(drop));
     drop_target.connect_drag_motion(|_, drop, _, _| preferred_drop_action(drop));
-    drop_target.connect_drop(move |target, drop, _, _| {
+    drop_target.connect_drop(move |target, drop, x, y| {
         if !drop_has_supported_payload(drop) {
             target.reject_drop(drop);
             return false;
@@ -126,7 +140,7 @@ where
         glib::MainContext::default().spawn_local(async move {
             match read_drop_payload(&drop).await {
                 Some((payload, action)) => {
-                    on_drop(payload);
+                    on_drop(payload, x, y);
                     drop.finish(action);
                 }
                 None => drop.finish(gdk::DragAction::empty()),

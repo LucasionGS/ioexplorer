@@ -262,6 +262,18 @@ impl PositionStore {
             .cloned()
     }
 
+    /// Whether any output at all — live or absent — has a position for `name`.
+    ///
+    /// Distinguishes "this file is new" from "this file belongs to a monitor
+    /// that is currently unplugged", which want different treatment: the first
+    /// gets a cell of its own, the second is only shown on loan.
+    pub fn is_stored_anywhere(&self, name: &str) -> bool {
+        self.stored
+            .monitors
+            .values()
+            .any(|entry| entry.icons.contains_key(name))
+    }
+
     /// Drops duplicate entries so every name is claimed by exactly one live
     /// output. Run at startup and whenever the monitor set changes.
     ///

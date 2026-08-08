@@ -83,6 +83,26 @@ impl ContextMenuAction {
             activate,
         }
     }
+
+    // Readers, so a caller composing menus (the desktop wraps these contexts to
+    // add its own items) can rebuild an action rather than needing `Clone` on a
+    // type that holds a boxed closure.
+
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    pub fn icon_name(&self) -> Option<&'static str> {
+        self.icon_name
+    }
+
+    pub fn is_destructive(&self) -> bool {
+        self.destructive
+    }
+
+    pub fn activation(&self) -> Rc<dyn Fn()> {
+        Rc::clone(&self.activate)
+    }
 }
 
 pub struct ContextMenu;

@@ -3,7 +3,9 @@
 
 pub mod entries;
 pub mod layout;
+mod menu;
 pub mod positions;
+mod prompt;
 mod surface;
 mod tiles;
 
@@ -12,13 +14,13 @@ use std::{cell::RefCell, collections::BTreeMap, path::PathBuf, rc::Rc};
 use gtk::{gdk, gio::prelude::*, glib, prelude::*};
 
 use crate::{
-    config::{AppConfig, DesktopConfig},
+    config::{AppConfig, CustomActionConfig, DesktopConfig},
     selector,
     ui::views::thumbnail::{self, ThumbnailCache},
 };
 
 use positions::PositionStore;
-use surface::DesktopSurface;
+use surface::{DesktopSurface, SurfaceContext};
 
 const APP_ID: &str = "io.github.ionix.IoExplorer.Desktop";
 
@@ -77,7 +79,15 @@ pub fn run() -> glib::ExitCode {
                 }
             };
 
-            let this = DesktopApp::new(config.desktop.clone(), args.windowed);
+            // After the theme, and above it: the desktop must not be tinted by
+            // whatever `window` background the active theme happens to set.
+            crate::theme::install_desktop_transparency();
+
+            let this = DesktopApp::new(
+                config.desktop.clone(),
+                config.actions.clone(),
+                args.windowed,
+            );
             this.start(app);
             *desktop.borrow_mut() = Some(Rc::clone(&this));
 
@@ -116,23 +126,33 @@ pub fn run() -> glib::ExitCode {
 /// cache, and the config.
 struct DesktopApp {
     config: RefCell<DesktopConfig>,
+    custom_actions: RefCell<Vec<CustomActionConfig>>,
     folder: PathBuf,
     positions: Rc<RefCell<PositionStore>>,
     thumbnails: ThumbnailCache,
     surfaces: RefCell<BTreeMap<String, Rc<DesktopSurface>>>,
+    /// Live outputs in enumeration order, shared with every surface so they
+    /// agree on who owns an unclaimed file.
+    monitor_order: Rc<RefCell<Vec<String>>>,
     windowed: bool,
 }
 
 impl DesktopApp {
-    fn new(config: DesktopConfig, windowed: bool) -> Rc<Self> {
+    fn new(
+        config: DesktopConfig,
+        custom_actions: Vec<CustomActionConfig>,
+        windowed: bool,
+    ) -> Rc<Self> {
         let folder = config.folder_path().unwrap_or_else(|| PathBuf::from("."));
 
         Rc::new(Self {
             config: RefCell::new(config),
+            custom_actions: RefCell::new(custom_actions),
             folder,
             positions: Rc::new(RefCell::new(PositionStore::load())),
             thumbnails: thumbnail::new_cache(),
             surfaces: RefCell::new(BTreeMap::new()),
+            monitor_order: Rc::new(RefCell::new(Vec::new())),
             windowed,
         })
     }
@@ -183,6 +203,7 @@ impl DesktopApp {
 
         // One claim per file name, so a name stored under two outputs renders
         // once. Order is enumeration order, so the result is stable.
+        *self.monitor_order.borrow_mut() = live_keys.clone();
         self.positions.borrow_mut().dedupe(&live_keys);
 
         for (key, monitor) in live {
@@ -195,11 +216,15 @@ impl DesktopApp {
                 app,
                 &monitor,
                 key.clone(),
-                self.folder.clone(),
-                self.config.borrow().clone(),
-                Rc::clone(&self.positions),
-                Rc::clone(&self.thumbnails),
-                self.windowed,
+                SurfaceContext {
+                    folder: self.folder.clone(),
+                    config: self.config.borrow().clone(),
+                    custom_action_configs: self.custom_actions.borrow().clone(),
+                    monitor_order: Rc::clone(&self.monitor_order),
+                    positions: Rc::clone(&self.positions),
+                    thumbnails: Rc::clone(&self.thumbnails),
+                    windowed: self.windowed,
+                },
             );
             created.prune_stale_positions();
             created.present();
@@ -215,6 +240,12 @@ impl DesktopApp {
             });
 
             self.surfaces.borrow_mut().insert(key, created);
+        }
+
+        // Ownership just moved: a new output may take files the primary was
+        // showing on loan, and a departed one leaves orphans behind.
+        for surface in self.surfaces.borrow().values() {
+            surface.reload();
         }
 
         if let Err(error) = self.positions.borrow_mut().flush() {
