@@ -178,9 +178,10 @@ pub struct DesktopSurface {
     monitor_order: Rc<RefCell<Vec<String>>>,
     /// Names shown on loan from an absent output — rendered, never saved.
     orphans: RefCell<BTreeSet<String>>,
-    /// Re-lists every surface. Set by the owning app once all of them exist,
-    /// since a surface has no other way to reach its siblings.
-    reload_all: RefCell<Option<Rc<dyn Fn()>>>,
+    /// Brings every surface back in line with the shared state — the position
+    /// table and the global hidden flag. Set by the owning app once all of them
+    /// exist, since a surface has no other way to reach its siblings.
+    broadcast: RefCell<Option<Rc<dyn Fn()>>>,
 
     folder_monitor: RefCell<Option<gio::FileMonitor>>,
     pending_reload: CellFlag<bool>,
@@ -327,7 +328,7 @@ impl DesktopSurface {
             custom_action_configs: RefCell::new(custom_action_configs),
             monitor_order,
             orphans: RefCell::new(BTreeSet::new()),
-            reload_all: RefCell::new(None),
+            broadcast: RefCell::new(None),
             folder_monitor: RefCell::new(None),
             pending_reload: CellFlag::new(false),
             save_timer: Rc::new(RefCell::new(None)),
@@ -381,8 +382,8 @@ impl DesktopSurface {
         self.window.add_controller(keys);
     }
 
-    pub fn set_reload_all(&self, reload_all: Rc<dyn Fn()>) {
-        *self.reload_all.borrow_mut() = Some(reload_all);
+    pub fn set_broadcast(&self, broadcast: Rc<dyn Fn()>) {
+        *self.broadcast.borrow_mut() = Some(broadcast);
     }
 
     pub fn present(&self) {
@@ -589,6 +590,8 @@ impl DesktopSurface {
         if self.positions.borrow().is_dirty() {
             self.schedule_save();
         }
+
+        self.apply_icon_visibility();
 
         // A file that vanished takes its selection with it.
         let present: BTreeSet<String> = self.tiles.borrow().keys().cloned().collect();
@@ -1295,20 +1298,21 @@ impl DesktopSurface {
         if arrived_from_elsewhere {
             // Both surfaces are now out of date: this one is missing a tile it
             // owns, and the other is still drawing one it does not.
-            self.reload_everything();
+            self.broadcast();
         }
     }
 
-    /// Re-lists every surface, not just this one.
+    /// Re-syncs every surface, not just this one.
     ///
-    /// Needed whenever ownership moves between outputs, since a surface only
-    /// ever lists on its own behalf and has no idea another one just took a
-    /// file off it.
-    fn reload_everything(self: &Rc<Self>) {
-        if let Some(reload_all) = self.reload_all.borrow().clone() {
-            reload_all();
+    /// Needed whenever shared state changes: ownership moving between outputs
+    /// (a surface only ever lists on its own behalf and has no idea another one
+    /// just took a file off it), or the global hidden flag being toggled.
+    fn broadcast(self: &Rc<Self>) {
+        if let Some(broadcast) = self.broadcast.borrow().clone() {
+            broadcast();
         } else {
             self.reload();
+            self.apply_icon_visibility();
         }
     }
 
@@ -1345,6 +1349,29 @@ impl DesktopSurface {
         self.refresh_occupied(metrics);
         self.schedule_save();
         self.show_toast("Arranged icons");
+    }
+
+    /// Hides or shows every icon, on every screen.
+    ///
+    /// Deliberately hides the `Fixed` rather than the window: the surface has to
+    /// stay live and clickable while hidden, or there would be no way to get the
+    /// context menu back to unhide them.
+    fn set_icons_hidden(self: &Rc<Self>, hidden: bool) {
+        self.positions.borrow_mut().set_icons_hidden(hidden);
+        self.schedule_save();
+        // Every other screen has to follow, whichever one the menu was used on.
+        self.broadcast();
+        self.show_toast(if hidden {
+            "Desktop icons hidden"
+        } else {
+            "Desktop icons shown"
+        });
+    }
+
+    /// Matches this surface to the shared hidden state.
+    pub fn apply_icon_visibility(&self) {
+        let hidden = self.positions.borrow().icons_hidden();
+        self.fixed.set_visible(!hidden);
     }
 
     fn set_snap_to_grid(self: &Rc<Self>, snap: bool) {
@@ -1415,6 +1442,7 @@ impl DesktopSurface {
 
         let inner = context_menu::EmptySpaceContext::new(paste, new_folder, bookmark, custom);
         let snap = self.snap_to_grid();
+        let hidden = self.positions.borrow().icons_hidden();
 
         let context = DesktopContext::new(inner)
             .before("Open In IoExplorer", Some("folder-open-symbolic"), {
@@ -1435,6 +1463,18 @@ impl DesktopSurface {
                 {
                     let surface = Rc::clone(self);
                     Rc::new(move || surface.set_snap_to_grid(!snap))
+                },
+            )
+            .after(
+                if hidden { "Show Icons" } else { "Hide Icons" },
+                Some(if hidden {
+                    "view-reveal-symbolic"
+                } else {
+                    "view-conceal-symbolic"
+                }),
+                {
+                    let surface = Rc::clone(self);
+                    Rc::new(move || surface.set_icons_hidden(!hidden))
                 },
             )
             .after("Refresh", Some("view-refresh-symbolic"), {

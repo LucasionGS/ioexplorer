@@ -23,6 +23,14 @@ const SCHEMA_VERSION: u32 = 1;
 pub struct StoredPositions {
     #[serde(default)]
     pub version: u32,
+    /// Hides every icon on every screen.
+    ///
+    /// Global rather than per-output, unlike snapping: "get the icons out of
+    /// the way" is a thing you want for the whole desktop at once, and it would
+    /// be a trap to hide them on one screen and leave the toggle showing the
+    /// wrong state on another.
+    #[serde(default)]
+    pub icons_hidden: bool,
     // A table, so it has to be written after every scalar above it.
     #[serde(default)]
     pub monitors: BTreeMap<String, MonitorPositions>,
@@ -183,6 +191,18 @@ impl PositionStore {
         self.dirty = true;
     }
 
+    pub fn icons_hidden(&self) -> bool {
+        self.stored.icons_hidden
+    }
+
+    pub fn set_icons_hidden(&mut self, hidden: bool) {
+        if self.stored.icons_hidden == hidden {
+            return;
+        }
+        self.stored.icons_hidden = hidden;
+        self.dirty = true;
+    }
+
     pub fn snap_to_grid(&self, monitor: &str) -> Option<bool> {
         self.stored.monitors.get(monitor)?.snap_to_grid
     }
@@ -338,6 +358,7 @@ mod tests {
     fn a_saved_layout_round_trips() {
         let mut stored = StoredPositions {
             version: SCHEMA_VERSION,
+            icons_hidden: false,
             monitors: BTreeMap::new(),
         };
         stored.monitors.insert(
@@ -578,6 +599,62 @@ mod tests {
             ),
             Some("DP-1".to_string())
         );
+    }
+
+    #[test]
+    fn hiding_icons_is_global_and_persists() {
+        let mut store = PositionStore::default();
+        assert!(!store.icons_hidden());
+
+        store.set_icons_hidden(true);
+
+        assert!(store.icons_hidden());
+        assert!(store.is_dirty());
+    }
+
+    /// Re-hiding an already-hidden desktop must not schedule a write.
+    #[test]
+    fn setting_the_hidden_flag_to_its_current_value_is_not_a_write() {
+        let mut store = PositionStore::default();
+        store.set_icons_hidden(false);
+
+        assert!(!store.is_dirty());
+    }
+
+    /// `icons_hidden` is a scalar and `monitors` is a table, so it has to
+    /// serialize before the table or the write fails outright.
+    #[test]
+    fn the_hidden_flag_round_trips_alongside_the_monitor_tables() {
+        let stored = StoredPositions {
+            version: SCHEMA_VERSION,
+            icons_hidden: true,
+            monitors: BTreeMap::from([(
+                "DP-1".to_string(),
+                MonitorPositions {
+                    geometry: None,
+                    snap_to_grid: None,
+                    icons: BTreeMap::from([(
+                        "notes.txt".to_string(),
+                        StoredPosition::snapped(Cell::new(1, 2)),
+                    )]),
+                },
+            )]),
+        };
+
+        let contents = toml::to_string_pretty(&stored).expect("serialize");
+        let parsed: StoredPositions = toml::from_str(&contents).expect("parse");
+
+        assert_eq!(parsed, stored);
+        assert!(parsed.icons_hidden);
+    }
+
+    /// A layout file predating the toggle must load with icons visible.
+    #[test]
+    fn a_file_without_the_hidden_flag_shows_icons() {
+        let parsed: StoredPositions =
+            toml::from_str("version = 1\n\n[monitors.\"DP-1\".icons]\n").expect("parse");
+
+        assert!(!parsed.icons_hidden);
     }
 
     #[test]

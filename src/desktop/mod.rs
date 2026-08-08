@@ -249,23 +249,24 @@ impl DesktopApp {
 
         // Every surface can now reach the others, which it needs when an icon
         // is dragged from one screen to another and ownership changes hands.
-        let reload_all: Rc<dyn Fn()> = {
+        let broadcast: Rc<dyn Fn()> = {
             let this = Rc::downgrade(self);
             Rc::new(move || {
                 if let Some(this) = this.upgrade() {
                     for surface in this.surfaces.borrow().values() {
                         surface.reload();
+                        surface.apply_icon_visibility();
                     }
                 }
             })
         };
         for surface in self.surfaces.borrow().values() {
-            surface.set_reload_all(Rc::clone(&reload_all));
+            surface.set_broadcast(Rc::clone(&broadcast));
         }
 
         // Ownership just moved: a new output may take files the default screen
         // was showing on loan, and a departed one leaves orphans behind.
-        reload_all();
+        broadcast();
 
         if let Err(error) = self.positions.borrow_mut().flush() {
             tracing::warn!(%error, "failed to save desktop positions");

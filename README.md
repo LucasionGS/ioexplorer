@@ -457,7 +457,12 @@ anything else goes to its default application. Drag an icon to move it — it sn
 the grid unless you turn snapping off — and drag onto a folder tile to move it in.
 Right-click gives the same menu the file manager uses (Copy, Cut, Paste, Rename,
 Delete, Extract Here, New Folder, your custom actions), plus Arrange Icons, Sort By,
-Snap To Grid and Open In IoExplorer.
+Snap To Grid, Hide Icons and Open In IoExplorer.
+
+**Hide Icons** clears every screen at once, whichever one you use the menu on, and the
+choice survives a restart. The desktop stays live while hidden — right-click still
+works, so Show Icons is always reachable — and positions are untouched, so unhiding
+puts everything back exactly where it was.
 
 Every screen is live, whether or not it holds icons: right-click works anywhere and any
 screen can be dropped onto. The surface keeps a tint of one part in 255 to make that
