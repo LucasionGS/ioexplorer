@@ -18,6 +18,11 @@ use crate::{
     bookmarks,
     config::{AppConfig, CustomActionConfig, ViewMode, clamp_icon_size},
     custom_actions::{self, ActionTarget},
+    file_ops::{
+        self, ArchivePath, FileClipboardOperation, archive_paths, file_uri_for_path,
+        folder_monitor_event_affects_listing, is_desktop_entry_file, next_available_path,
+        same_paths,
+    },
     live_config::{ConfigChange, LiveConfig},
     providers::{FileItem, FileKind, Provider, ProviderError, ProviderUri, local::LocalProvider},
     selector::{SelectorMode, SelectorOptions},
@@ -2863,25 +2868,13 @@ impl AppWindow {
     }
 
     fn copy_paths_to_clipboard(&self, paths: Vec<PathBuf>, operation: FileClipboardOperation) {
-        if paths.is_empty() {
-            self.status_label.set_text("No item selected");
-            return;
-        }
-
-        let provider = file_clipboard_provider(&paths, operation);
-        match self.window.clipboard().set_content(Some(&provider)) {
-            Ok(()) => {
-                *self.clipboard_paths.borrow_mut() = paths.clone();
+        match file_ops::copy_paths_to_clipboard(&self.window.clipboard(), &paths, operation) {
+            Ok(message) => {
+                *self.clipboard_paths.borrow_mut() = paths;
                 self.clipboard_operation.set(Some(operation));
-                self.status_label.set_text(&format!(
-                    "{} {} item(s) to clipboard",
-                    operation.past_tense(),
-                    paths.len()
-                ));
+                self.status_label.set_text(&message);
             }
-            Err(error) => self
-                .status_label
-                .set_text(&format!("Failed to copy to clipboard: {error}")),
+            Err(message) => self.status_label.set_text(&message),
         }
     }
 
@@ -3668,70 +3661,9 @@ impl AppWindow {
     }
 
     fn run_custom_action(&self, action: CustomActionConfig, targets: Vec<ActionTarget>) {
-        if targets.is_empty() {
-            self.status_label.set_text("No item selected");
-            return;
-        }
-
         let current_dir = self.current_uri.borrow().local_path().ok();
-        let command = action.command.trim();
-        let invocations = if action.run_on_each {
-            targets
-                .iter()
-                .cloned()
-                .map(|target| vec![target])
-                .collect::<Vec<_>>()
-        } else {
-            vec![targets]
-        };
-        let target_count = invocations.iter().map(Vec::len).sum::<usize>();
-        let mut launched = 0;
-        let mut last_error = None;
-
-        for invocation_targets in &invocations {
-            let command_line = custom_actions::action_command_line(command, invocation_targets);
-            let mut command = Command::new("sh");
-            command
-                .arg("-c")
-                .arg(&command_line)
-                .arg("ioexplorer-action");
-            if let Some(current_dir) = &current_dir {
-                command.current_dir(current_dir);
-            }
-
-            match command.spawn() {
-                Ok(mut child) => {
-                    launched += 1;
-                    let label = action.label.clone();
-                    std::thread::spawn(move || {
-                        if let Err(error) = child.wait() {
-                            tracing::warn!(%error, action = %label, "custom action process failed");
-                        }
-                    });
-                }
-                Err(error) => last_error = Some(error),
-            }
-        }
-
-        if launched == invocations.len() {
-            self.status_label.set_text(&format!(
-                "Running {} for {} item(s)",
-                action.label, target_count
-            ));
-        } else if launched > 0 {
-            self.status_label.set_text(&format!(
-                "Running {} for {} command(s); {} failed",
-                action.label,
-                launched,
-                invocations.len() - launched
-            ));
-        } else if let Some(error) = last_error {
-            self.status_label
-                .set_text(&format!("Failed to run {}: {error}", action.label));
-        } else {
-            self.status_label
-                .set_text(&format!("Failed to run {}", action.label));
-        }
+        let outcome = file_ops::run_custom_action(&action, &targets, current_dir.as_deref());
+        self.status_label.set_text(&outcome.message);
     }
 
     fn show_sidebar_bookmark_context_menu(
@@ -3930,41 +3862,7 @@ impl AppWindow {
     }
 
     fn rename_path(self: &Rc<Self>, source: PathBuf, new_name: String) {
-        if new_name.is_empty() {
-            self.status_label.set_text("Name cannot be empty");
-            return;
-        }
-        if new_name == "." || new_name == ".." || new_name.contains('/') {
-            self.status_label
-                .set_text("Name cannot contain path separators");
-            return;
-        }
-
-        let Some(parent) = source.parent() else {
-            self.status_label.set_text("Cannot rename this item");
-            return;
-        };
-        let target = parent.join(&new_name);
-        if target == source {
-            self.status_label.set_text("Name unchanged");
-            return;
-        }
-        if target.exists() {
-            self.status_label
-                .set_text(&format!("{} already exists", target.display()));
-            return;
-        }
-
-        match fs::rename(&source, &target) {
-            Ok(()) => {
-                self.status_label
-                    .set_text(&format!("Renamed to {new_name}"));
-                self.refresh();
-            }
-            Err(error) => self
-                .status_label
-                .set_text(&format!("Failed to rename {}: {error}", source.display())),
-        }
+        self.apply_outcome(file_ops::rename_path(&source, &new_name));
     }
 
     /// Unpacks each archive into a new folder beside it.
@@ -4017,30 +3915,20 @@ impl AppWindow {
     }
 
     fn delete_paths(self: &Rc<Self>, paths: Vec<PathBuf>) {
-        if paths.is_empty() {
+        self.apply_outcome(file_ops::delete_paths(&paths));
+    }
+
+    /// Renders a `file_ops` result: show its message, refresh if it changed the
+    /// filesystem. A silent outcome does neither.
+    fn apply_outcome(self: &Rc<Self>, outcome: file_ops::Outcome) {
+        if outcome.is_silent() {
             return;
         }
-
-        let total = paths.len();
-        let mut deleted = 0;
-        let mut last_error = None;
-        for path in paths {
-            match remove_path(&path) {
-                Ok(()) => deleted += 1,
-                Err(error) => {
-                    last_error = Some(format!("Failed to delete {}: {error}", path.display()))
-                }
-            }
+        if !outcome.message.is_empty() {
+            self.status_label.set_text(&outcome.message);
         }
-
-        if deleted > 0 {
-            self.status_label
-                .set_text(&format!("Deleted {deleted} of {total} item(s)"));
+        if outcome.changed {
             self.refresh();
-        }
-
-        if let Some(error) = last_error {
-            self.status_label.set_text(&error);
         }
     }
 
@@ -4188,38 +4076,11 @@ impl AppWindow {
         paths: Vec<PathBuf>,
         target_dir: PathBuf,
     ) {
-        if drop_target_is_selected(&target_dir, &paths) {
-            self.status_label
-                .set_text("Cannot drop onto a selected item");
-            return;
-        }
-
-        let mut transferred = 0;
-        let mut skipped = 0;
-        for path in paths {
-            let result = match operation {
-                dnd::DropOperation::Copy => copy_path_into(&path, &target_dir),
-                dnd::DropOperation::Move => move_path_into(&path, &target_dir),
-            };
-
-            match result {
-                Ok(true) => transferred += 1,
-                Ok(false) => skipped += 1,
-                Err(error) => self.status_label.set_text(&format!(
-                    "Failed to {} {}: {error}",
-                    operation.verb(),
-                    path.display()
-                )),
-            }
-        }
-
-        if transferred > 0 {
-            self.status_label
-                .set_text(&format!("{} {transferred} item(s)", operation.past_tense()));
-            self.refresh();
-        } else if skipped > 0 {
-            self.status_label.set_text("Already in that folder");
-        }
+        self.apply_outcome(file_ops::transfer_paths_into_target(
+            operation,
+            &paths,
+            &target_dir,
+        ));
     }
 
     fn create_folder(self: &Rc<Self>) {
@@ -4321,24 +4182,15 @@ impl AppWindow {
     }
 
     fn create_folder_named(self: &Rc<Self>, target_dir: &Path, name: &str) -> bool {
-        let target = match new_folder_target(target_dir, name) {
-            Ok(target) => target,
-            Err(message) => {
-                self.status_label.set_text(message);
-                return false;
-            }
-        };
-
-        match fs::create_dir(&target) {
-            Ok(()) => {
+        match file_ops::create_folder_named(target_dir, name) {
+            Ok(target) => {
                 self.status_label
                     .set_text(&format!("Created {}", target.display()));
                 self.refresh();
                 true
             }
-            Err(error) => {
-                self.status_label
-                    .set_text(&format!("Failed to create folder: {error}"));
+            Err(message) => {
+                self.status_label.set_text(&message);
                 false
             }
         }
@@ -5523,142 +5375,6 @@ fn widget_intersects_rect(
         .is_some()
 }
 
-#[derive(Clone, Copy)]
-enum FileClipboardOperation {
-    Copy,
-    Cut,
-}
-
-impl FileClipboardOperation {
-    fn gnome_action(self) -> &'static str {
-        match self {
-            Self::Copy => "copy",
-            Self::Cut => "cut",
-        }
-    }
-
-    fn past_tense(self) -> &'static str {
-        match self {
-            Self::Copy => "Copied",
-            Self::Cut => "Cut",
-        }
-    }
-
-    fn drop_operation(self) -> dnd::DropOperation {
-        match self {
-            Self::Copy => dnd::DropOperation::Copy,
-            Self::Cut => dnd::DropOperation::Move,
-        }
-    }
-}
-
-fn file_clipboard_provider(
-    paths: &[PathBuf],
-    operation: FileClipboardOperation,
-) -> gtk::gdk::ContentProvider {
-    let files = paths.iter().map(gio::File::for_path).collect::<Vec<_>>();
-    let file_list = gtk::gdk::FileList::from_array(&files);
-    let file_list_provider = gtk::gdk::ContentProvider::for_value(&file_list.to_value());
-
-    let gnome_payload = file_clipboard_payload(paths, operation);
-    let gnome_bytes = glib::Bytes::from_owned(gnome_payload.into_bytes());
-    let gnome_provider =
-        gtk::gdk::ContentProvider::for_bytes("x-special/gnome-copied-files", &gnome_bytes);
-
-    let uri_payload = file_uri_list_payload(paths);
-    let uri_bytes = glib::Bytes::from_owned(uri_payload.into_bytes());
-    let uri_provider = gtk::gdk::ContentProvider::for_bytes("text/uri-list", &uri_bytes);
-
-    gtk::gdk::ContentProvider::new_union(&[file_list_provider, gnome_provider, uri_provider])
-}
-
-fn file_clipboard_payload(paths: &[PathBuf], operation: FileClipboardOperation) -> String {
-    let mut payload = operation.gnome_action().to_string();
-    for path in paths {
-        payload.push('\n');
-        payload.push_str(&file_uri_for_path(path));
-    }
-    payload.push('\n');
-    payload
-}
-
-fn file_uri_list_payload(paths: &[PathBuf]) -> String {
-    let mut payload = String::new();
-    for path in paths {
-        payload.push_str(&file_uri_for_path(path));
-        payload.push_str("\r\n");
-    }
-    payload
-}
-
-fn file_uri_for_path(path: &Path) -> String {
-    gio::File::for_path(path).uri().to_string()
-}
-
-fn same_paths(left: &[PathBuf], right: &[PathBuf]) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
-
-    let mut left = left.to_vec();
-    let mut right = right.to_vec();
-    left.sort();
-    right.sort();
-    left == right
-}
-
-fn is_desktop_entry_file(item: &FileItem) -> bool {
-    item.kind == FileKind::File && item.name.to_ascii_lowercase().ends_with(".desktop")
-}
-
-/// An archive picked out of a selection, with the folder it should unpack into
-/// already worked out from its name.
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ArchivePath {
-    path: PathBuf,
-    destination: PathBuf,
-    format: crate::archive::ArchiveFormat,
-}
-
-impl ArchivePath {
-    fn for_item(item: &FileItem) -> Option<Self> {
-        if item.kind != FileKind::File {
-            return None;
-        }
-
-        let recognized = crate::archive::recognize(&item.name)?;
-        let path = item.uri.local_path().ok()?;
-        let destination = path.parent()?.join(recognized.stem);
-
-        Some(Self {
-            path,
-            destination,
-            format: recognized.format,
-        })
-    }
-
-    fn display_name(&self) -> String {
-        self.path
-            .file_name()
-            .unwrap_or(self.path.as_os_str())
-            .to_string_lossy()
-            .into_owned()
-    }
-}
-
-/// The selection as archives, or `None` if any of it is something else.
-///
-/// All or nothing: offering "Extract 3 Archives" over a selection of five
-/// would quietly skip the two that are not, which is worse than not offering
-/// it at all.
-fn archive_paths(items: &[FileItem]) -> Option<Vec<ArchivePath>> {
-    if items.is_empty() {
-        return None;
-    }
-
-    items.iter().map(ArchivePath::for_item).collect()
-}
-
 fn is_previewable_image_file(item: &FileItem) -> bool {
     item.kind == FileKind::File
         && views::thumbnail::is_previewable_image(&item.name)
@@ -6087,38 +5803,6 @@ fn wrapped_image_index(len: usize, current_index: usize, delta: isize) -> usize 
     (current_index as isize + delta).rem_euclid(len) as usize
 }
 
-fn folder_monitor_event_affects_listing(event: gio::FileMonitorEvent) -> bool {
-    matches!(
-        event,
-        gio::FileMonitorEvent::Changed
-            | gio::FileMonitorEvent::ChangesDoneHint
-            | gio::FileMonitorEvent::Deleted
-            | gio::FileMonitorEvent::Created
-            | gio::FileMonitorEvent::AttributeChanged
-            | gio::FileMonitorEvent::Unmounted
-            | gio::FileMonitorEvent::Moved
-            | gio::FileMonitorEvent::Renamed
-            | gio::FileMonitorEvent::MovedIn
-            | gio::FileMonitorEvent::MovedOut
-    )
-}
-
-impl dnd::DropOperation {
-    fn verb(self) -> &'static str {
-        match self {
-            Self::Copy => "copy",
-            Self::Move => "move",
-        }
-    }
-
-    fn past_tense(self) -> &'static str {
-        match self {
-            Self::Copy => "Copied",
-            Self::Move => "Moved",
-        }
-    }
-}
-
 fn breadcrumb_content(label: &str) -> gtk::Box {
     if label == "/" {
         return breadcrumb_content_with_icon("", "drive-harddisk-symbolic");
@@ -6158,210 +5842,17 @@ fn breadcrumb_content_with_icon(label: &str, icon_name: &str) -> gtk::Box {
     content
 }
 
-fn copy_path_into(source: &Path, target_dir: &Path) -> std::io::Result<bool> {
-    let Some(name) = source.file_name() else {
-        return Ok(false);
-    };
-
-    if source.is_dir() && target_dir.starts_with(source) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "cannot copy a folder into itself",
-        ));
-    }
-
-    let target = next_available_path(&target_dir.join(name));
-    copy_path_to(source, &target).map(|()| true)
-}
-
-fn drop_target_is_selected(target_dir: &Path, paths: &[PathBuf]) -> bool {
-    paths.iter().any(|path| path == target_dir)
-}
-
-fn move_path_into(source: &Path, target_dir: &Path) -> std::io::Result<bool> {
-    let Some(name) = source.file_name() else {
-        return Ok(false);
-    };
-
-    if source.parent() == Some(target_dir) {
-        return Ok(false);
-    }
-
-    if source.is_dir() && target_dir.starts_with(source) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "cannot move a folder into itself",
-        ));
-    }
-
-    let target = next_available_path(&target_dir.join(name));
-    match fs::rename(source, &target) {
-        Ok(()) => Ok(true),
-        Err(error) if is_cross_device_move(&error) => {
-            copy_path_to(source, &target)?;
-            remove_path(source)?;
-            Ok(true)
-        }
-        Err(error) => Err(error),
-    }
-}
-
-fn copy_path_to(source: &Path, target: &Path) -> std::io::Result<()> {
-    if source.is_dir() {
-        copy_dir_recursive(source, target)
-    } else {
-        fs::copy(source, target).map(|_| ())
-    }
-}
-
-fn remove_path(path: &Path) -> std::io::Result<()> {
-    if path.is_dir() {
-        fs::remove_dir_all(path)
-    } else {
-        fs::remove_file(path)
-    }
-}
-
-fn is_cross_device_move(error: &std::io::Error) -> bool {
-    error.raw_os_error() == Some(18)
-}
-
-fn copy_dir_recursive(source: &Path, target: &Path) -> std::io::Result<()> {
-    fs::create_dir_all(target)?;
-    for entry in fs::read_dir(source)? {
-        let entry = entry?;
-        let path = entry.path();
-        let child_target = target.join(entry.file_name());
-        if path.is_dir() {
-            copy_dir_recursive(&path, &child_target)?;
-        } else {
-            fs::copy(&path, &child_target)?;
-        }
-    }
-    Ok(())
-}
-
-fn new_folder_target(target_dir: &Path, name: &str) -> Result<PathBuf, &'static str> {
-    if name.is_empty() {
-        return Err("Name cannot be empty");
-    }
-    if name == "." || name == ".." || name.contains('/') {
-        return Err("Name cannot contain path separators");
-    }
-
-    let target = target_dir.join(name);
-    if target.exists() {
-        return Err("A folder or file with that name already exists");
-    }
-
-    Ok(target)
-}
-
-fn next_available_path(path: &Path) -> PathBuf {
-    if !path.exists() {
-        return path.to_path_buf();
-    }
-
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let stem = path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("copy");
-    let extension = path.extension().and_then(|extension| extension.to_str());
-
-    for index in 2.. {
-        let name = match extension {
-            Some(extension) => format!("{stem} {index}.{extension}"),
-            None => format!("{stem} {index}"),
-        };
-        let candidate = parent.join(name);
-        if !candidate.exists() {
-            return candidate;
-        }
-    }
-
-    unreachable!()
-}
-
 #[cfg(test)]
 mod tests {
-    use std::{
-        fs,
-        io::ErrorKind,
-        path::{Path, PathBuf},
-    };
+    use std::path::{Path, PathBuf};
 
-    use crate::providers::{FileItem, FileKind, ProviderUri};
-    use tempfile::tempdir;
+    use crate::providers::ProviderUri;
 
     use super::{
-        FileClipboardOperation, archive_paths, copy_path_into, drop_target_is_selected,
-        dropped_file_name_for_bytes, dropped_file_name_for_uri, file_clipboard_payload,
-        file_uri_list_payload, folder_monitor_event_affects_listing, format_media_duration,
-        is_desktop_entry_file, is_gif_image_path, move_path_into, new_folder_target,
-        next_tab_index_after_close, parse_ffprobe_output, partition_drop_uris, tab_title,
+        dropped_file_name_for_bytes, dropped_file_name_for_uri, format_media_duration,
+        is_gif_image_path, next_tab_index_after_close, parse_ffprobe_output, partition_drop_uris,
+        tab_title,
     };
-
-    fn entry(name: &str, kind: FileKind) -> FileItem {
-        FileItem {
-            uri: ProviderUri::local(format!("/tmp/{name}")),
-            name: name.to_string(),
-            display_name: None,
-            icon: None,
-            kind,
-            size: Some(1),
-            modified: None,
-            created: None,
-            hidden: false,
-        }
-    }
-
-    #[test]
-    fn an_archive_selection_carries_the_folder_it_unpacks_into() {
-        let archives =
-            archive_paths(&[entry("photos.tar.gz", FileKind::File)]).expect("an archive");
-
-        assert_eq!(archives.len(), 1);
-        assert_eq!(archives[0].path, PathBuf::from("/tmp/photos.tar.gz"));
-        assert_eq!(archives[0].destination, PathBuf::from("/tmp/photos"));
-    }
-
-    #[test]
-    fn a_mixed_selection_is_not_offered_extraction() {
-        let mixed = archive_paths(&[
-            entry("photos.zip", FileKind::File),
-            entry("notes.txt", FileKind::File),
-        ]);
-
-        assert!(mixed.is_none());
-    }
-
-    #[test]
-    fn a_folder_named_like_an_archive_is_not_extractable() {
-        assert!(archive_paths(&[entry("backup.tar", FileKind::Directory)]).is_none());
-    }
-
-    #[test]
-    fn an_empty_selection_is_not_offered_extraction() {
-        assert!(archive_paths(&[]).is_none());
-    }
-
-    #[test]
-    fn detects_desktop_entry_files_for_launching() {
-        let item = FileItem {
-            uri: ProviderUri::local("/tmp/example.desktop"),
-            name: "example.desktop".to_string(),
-            display_name: Some("Example".to_string()),
-            icon: None,
-            kind: FileKind::File,
-            size: Some(100),
-            modified: None,
-            created: None,
-            hidden: false,
-        };
-
-        assert!(is_desktop_entry_file(&item));
-    }
 
     #[test]
     fn detects_gif_paths_for_animation_viewer() {
@@ -6407,26 +5898,6 @@ mod tests {
         assert_eq!(next_tab_index_after_close(2, 2, 3), 1);
         assert_eq!(next_tab_index_after_close(1, 0, 3), 0);
         assert_eq!(next_tab_index_after_close(0, 2, 3), 0);
-    }
-
-    #[test]
-    fn file_clipboard_payload_marks_cut_operation() {
-        let paths = [PathBuf::from("/tmp/a.txt"), PathBuf::from("/tmp/b.txt")];
-
-        assert_eq!(
-            file_clipboard_payload(&paths, FileClipboardOperation::Cut),
-            "cut\nfile:///tmp/a.txt\nfile:///tmp/b.txt\n"
-        );
-    }
-
-    #[test]
-    fn uri_list_payload_uses_crlf_separators() {
-        let paths = [PathBuf::from("/tmp/a.txt"), PathBuf::from("/tmp/b.txt")];
-
-        assert_eq!(
-            file_uri_list_payload(&paths),
-            "file:///tmp/a.txt\r\nfile:///tmp/b.txt\r\n"
-        );
     }
 
     #[test]
@@ -6500,94 +5971,5 @@ mod tests {
             dropped_file_name_for_bytes(Some("../../etc/passwd"), "application/octet-stream", JPEG),
             ".._.._etc_passwd"
         );
-    }
-
-    #[test]
-    fn builds_new_folder_target_from_requested_name() {
-        let temp_dir = tempdir().expect("temp dir");
-
-        assert_eq!(
-            new_folder_target(temp_dir.path(), "Projects").expect("valid folder name"),
-            temp_dir.path().join("Projects")
-        );
-    }
-
-    #[test]
-    fn rejects_invalid_new_folder_names() {
-        let temp_dir = tempdir().expect("temp dir");
-        fs::write(temp_dir.path().join("exists"), "already here").expect("existing file");
-
-        assert!(new_folder_target(temp_dir.path(), "").is_err());
-        assert!(new_folder_target(temp_dir.path(), ".").is_err());
-        assert!(new_folder_target(temp_dir.path(), "..").is_err());
-        assert!(new_folder_target(temp_dir.path(), "parent/child").is_err());
-        assert!(new_folder_target(temp_dir.path(), "exists").is_err());
-    }
-
-    #[test]
-    fn folder_monitor_events_trigger_listing_updates() {
-        assert!(folder_monitor_event_affects_listing(
-            gio::FileMonitorEvent::Created
-        ));
-        assert!(folder_monitor_event_affects_listing(
-            gio::FileMonitorEvent::Deleted
-        ));
-        assert!(folder_monitor_event_affects_listing(
-            gio::FileMonitorEvent::Renamed
-        ));
-        assert!(folder_monitor_event_affects_listing(
-            gio::FileMonitorEvent::AttributeChanged
-        ));
-        assert!(!folder_monitor_event_affects_listing(
-            gio::FileMonitorEvent::PreUnmount
-        ));
-    }
-
-    #[test]
-    fn rejects_copying_folder_into_itself() {
-        let temp_dir = tempdir().expect("temp dir");
-        let source = temp_dir.path().join("folder");
-        fs::create_dir(&source).expect("source folder");
-
-        let error = copy_path_into(&source, &source).expect_err("self-copy should fail");
-        assert_eq!(error.kind(), ErrorKind::InvalidInput);
-    }
-
-    #[test]
-    fn moves_file_into_target_directory() {
-        let temp_dir = tempdir().expect("temp dir");
-        let source = temp_dir.path().join("note.txt");
-        let target_dir = temp_dir.path().join("target");
-        fs::write(&source, "hello").expect("source file");
-        fs::create_dir(&target_dir).expect("target dir");
-
-        assert!(move_path_into(&source, &target_dir).expect("move file"));
-        assert!(!source.exists());
-        assert_eq!(
-            fs::read_to_string(target_dir.join("note.txt")).unwrap(),
-            "hello"
-        );
-    }
-
-    #[test]
-    fn moving_to_same_parent_is_noop() {
-        let temp_dir = tempdir().expect("temp dir");
-        let source = temp_dir.path().join("note.txt");
-        fs::write(&source, "hello").expect("source file");
-
-        assert!(!move_path_into(&source, temp_dir.path()).expect("same-parent move"));
-        assert_eq!(fs::read_to_string(source).unwrap(), "hello");
-    }
-
-    #[test]
-    fn detects_selected_drop_target() {
-        let target_dir = PathBuf::from("/tmp/selected-folder");
-        let dragged_paths = vec![PathBuf::from("/tmp/other-file.txt"), target_dir.clone()];
-
-        assert!(drop_target_is_selected(&target_dir, &dragged_paths));
-        assert!(!drop_target_is_selected(
-            Path::new("/tmp/unselected-folder"),
-            &dragged_paths
-        ));
     }
 }

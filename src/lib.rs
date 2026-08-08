@@ -8,6 +8,7 @@ mod archive;
 mod bookmarks;
 mod config;
 mod custom_actions;
+mod file_ops;
 mod launcher;
 mod live_config;
 mod providers;
