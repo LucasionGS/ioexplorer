@@ -58,6 +58,16 @@ const URL_MIME_TYPES: &[&str] = &[
     "text/plain",
 ];
 
+/// The paths of the drag currently in flight, if it started in this process.
+///
+/// A drop target that has to tell "the user rearranged their own icons" from
+/// "something arrived from elsewhere" needs to know this *synchronously*, while
+/// deciding which action to advertise — reading the payload is async and lands
+/// far too late for that.
+pub fn internal_drag_paths() -> Option<Vec<PathBuf>> {
+    INTERNAL_DRAG_PATHS.with(|paths| paths.borrow().clone())
+}
+
 pub fn install_drag_source<W, F>(widget: &W, selected_paths: F)
 where
     W: IsA<gtk::Widget>,

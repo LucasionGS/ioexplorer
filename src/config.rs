@@ -542,6 +542,99 @@ impl SpotlightConfig {
     }
 }
 
+/// Settings for the `ioexplorer-desktop` surface.
+///
+/// Note what is *not* here: where each icon sits. Positions are per-machine,
+/// per-output state that a single drag rewrites, and this file is watched by
+/// every running ioexplorer process — they live in
+/// [`crate::state::desktop_positions_path`] instead.
+#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct DesktopConfig {
+    #[serde(default = "default_desktop_icon_size")]
+    pub icon_size: i32,
+    /// The starting value for an output with no stored preference of its own.
+    /// The context-menu toggle writes the effective one next to the positions.
+    #[serde(default = "default_true")]
+    pub snap_to_grid: bool,
+    #[serde(default = "default_grid_spacing")]
+    pub grid_spacing: i32,
+    #[serde(default)]
+    pub show_hidden: bool,
+    /// Defaults to `XDG_DESKTOP_DIR`, then `~/Desktop`.
+    #[serde(default)]
+    pub folder: Option<PathBuf>,
+    /// Inset the icons by whatever panels have reserved, so nothing lands
+    /// underneath a bar where it can never be clicked.
+    #[serde(default = "default_true")]
+    pub respect_panels: bool,
+    /// Draw a translucent pill behind each label. A text shadow alone loses
+    /// against a light wallpaper.
+    #[serde(default = "default_true")]
+    pub label_backdrop: bool,
+    // A table, so it has to be written after every scalar above it.
+    #[serde(default)]
+    pub sort: SortOrder,
+}
+
+fn default_desktop_icon_size() -> i32 {
+    72
+}
+
+fn default_grid_spacing() -> i32 {
+    12
+}
+
+// Deliberately hand-written, for the same reason as `SpotlightConfig`:
+// `#[serde(default)]` on `AppConfig::desktop` calls this for every user without
+// a `[desktop]` block, and a derived `Default` would give them a zero-pixel
+// grid of zero-pixel icons.
+impl Default for DesktopConfig {
+    fn default() -> Self {
+        Self {
+            icon_size: default_desktop_icon_size(),
+            snap_to_grid: true,
+            grid_spacing: default_grid_spacing(),
+            show_hidden: false,
+            folder: None,
+            respect_panels: true,
+            label_backdrop: true,
+            sort: SortOrder::default(),
+        }
+    }
+}
+
+impl DesktopConfig {
+    pub const MIN_GRID_SPACING: i32 = 0;
+    pub const MAX_GRID_SPACING: i32 = 64;
+
+    pub fn clamped_icon_size(&self) -> i32 {
+        clamp_icon_size(self.icon_size)
+    }
+
+    pub fn clamped_grid_spacing(&self) -> i32 {
+        self.grid_spacing
+            .clamp(Self::MIN_GRID_SPACING, Self::MAX_GRID_SPACING)
+    }
+
+    /// An explicit `folder`, else the XDG desktop directory, else `~/Desktop`.
+    ///
+    /// The `~/Desktop` fallback is not redundant: `UserDirs::desktop_dir`
+    /// returns `None` when `user-dirs.dirs` is absent or has the entry
+    /// commented out, which is common on minimal Wayland setups — exactly the
+    /// systems this surface exists for.
+    pub fn folder_path(&self) -> Option<PathBuf> {
+        if let Some(folder) = &self.folder {
+            return Some(folder.clone());
+        }
+
+        let dirs = directories::UserDirs::new()?;
+        dirs.desktop_dir()
+            .map(Path::to_path_buf)
+            .or_else(|| Some(dirs.home_dir().join("Desktop")))
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
 pub struct AppConfig {
     pub default_view: ViewMode,
@@ -558,6 +651,8 @@ pub struct AppConfig {
     pub actions: Vec<CustomActionConfig>,
     #[serde(default)]
     pub spotlight: SpotlightConfig,
+    #[serde(default)]
+    pub desktop: DesktopConfig,
 }
 
 impl Default for AppConfig {
@@ -577,6 +672,7 @@ impl Default for AppConfig {
             sort: SortOrder::default(),
             actions: Vec::new(),
             spotlight: SpotlightConfig::default(),
+            desktop: DesktopConfig::default(),
         }
     }
 }
@@ -1393,6 +1489,141 @@ filters = ["*.txt"]
         .expect("valid action config");
 
         assert!(!parsed.run_on_each);
+    }
+
+    /// A config with no `[desktop]` block must still describe a usable grid.
+    /// A derived `Default` here would give every existing user zero-pixel icons
+    /// in a zero-column grid.
+    #[test]
+    fn a_config_without_a_desktop_section_still_describes_a_grid() {
+        let parsed: AppConfig = toml::from_str(
+            r#"
+default_view = "icon"
+show_hidden = false
+icon_size = 128
+sidebar_width = 220
+
+[list_columns]
+size = true
+kind = true
+modified = true
+"#,
+        )
+        .expect("valid config");
+
+        assert_eq!(parsed.desktop.icon_size, 72);
+        assert_eq!(parsed.desktop.grid_spacing, 12);
+        assert!(parsed.desktop.snap_to_grid);
+        assert!(parsed.desktop.respect_panels);
+        assert!(parsed.desktop.label_backdrop);
+        assert!(!parsed.desktop.show_hidden);
+        assert_eq!(parsed.desktop.folder, None);
+    }
+
+    /// The `[desktop]` block as the README documents it.
+    #[test]
+    fn the_documented_desktop_section_parses() {
+        let parsed: AppConfig = toml::from_str(
+            r#"
+default_view = "icon"
+show_hidden = false
+icon_size = 128
+sidebar_width = 220
+
+[list_columns]
+size = true
+kind = true
+modified = true
+
+[desktop]
+icon-size = 96
+snap-to-grid = false
+grid-spacing = 20
+show-hidden = true
+folder = "/home/u/Desk"
+respect-panels = false
+label-backdrop = false
+
+[desktop.sort]
+key = "modified"
+descending = true
+folders_first = false
+"#,
+        )
+        .expect("valid config");
+
+        let desktop = &parsed.desktop;
+        assert_eq!(desktop.icon_size, 96);
+        assert!(!desktop.snap_to_grid);
+        assert_eq!(desktop.grid_spacing, 20);
+        assert!(desktop.show_hidden);
+        assert_eq!(desktop.folder, Some(PathBuf::from("/home/u/Desk")));
+        assert!(!desktop.respect_panels);
+        assert!(!desktop.label_backdrop);
+        assert_eq!(desktop.sort.key, crate::sorting::SortKey::Modified);
+        assert!(desktop.sort.descending);
+    }
+
+    #[test]
+    fn desktop_values_are_clamped_into_range() {
+        let huge = DesktopConfig {
+            icon_size: 9999,
+            grid_spacing: 9999,
+            ..Default::default()
+        };
+        assert_eq!(huge.clamped_icon_size(), MAX_ICON_SIZE);
+        assert_eq!(huge.clamped_grid_spacing(), DesktopConfig::MAX_GRID_SPACING);
+
+        let tiny = DesktopConfig {
+            icon_size: 1,
+            grid_spacing: -50,
+            ..Default::default()
+        };
+        assert_eq!(tiny.clamped_icon_size(), MIN_ICON_SIZE);
+        assert_eq!(tiny.clamped_grid_spacing(), DesktopConfig::MIN_GRID_SPACING);
+    }
+
+    /// An explicit folder wins outright — no XDG lookup, no `~/Desktop`.
+    #[test]
+    fn an_explicit_desktop_folder_is_used_verbatim() {
+        let config = DesktopConfig {
+            folder: Some(PathBuf::from("/srv/shared/desk")),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            config.folder_path(),
+            Some(PathBuf::from("/srv/shared/desk"))
+        );
+    }
+
+    /// `desktop` is a table, so it has to serialize after every scalar in
+    /// `AppConfig` or the write fails outright — and `sort` after every scalar
+    /// within it.
+    #[test]
+    fn a_config_with_desktop_settings_round_trips() {
+        let config = AppConfig {
+            desktop: DesktopConfig {
+                icon_size: 96,
+                snap_to_grid: false,
+                grid_spacing: 4,
+                show_hidden: true,
+                folder: Some(PathBuf::from("/home/u/Desk")),
+                respect_panels: false,
+                label_backdrop: false,
+                sort: SortOrder {
+                    key: crate::sorting::SortKey::Size,
+                    descending: true,
+                    folders_first: false,
+                },
+            },
+            ..Default::default()
+        };
+
+        let contents = toml::to_string_pretty(&config).expect("serializable config");
+        let parsed: AppConfig = toml::from_str(&contents).expect("valid config");
+
+        assert_eq!(parsed.desktop, config.desktop);
     }
 
     #[test]

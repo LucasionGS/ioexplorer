@@ -15,7 +15,7 @@ use crate::{
 /// How much wider than tall a tile's preview may be. A tile is already wider
 /// than its icon to leave room for the name, so a landscape photo can use that
 /// width instead of being letterboxed into a square.
-const TILE_EXTRA_WIDTH: i32 = 56;
+pub const TILE_EXTRA_WIDTH: i32 = 56;
 
 #[derive(Clone)]
 pub struct IconViewOptions {

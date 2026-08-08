@@ -75,6 +75,18 @@ pub fn storage_path() -> Option<PathBuf> {
     UserDirs::new().map(|dirs| dirs.home_dir().join(".local/state/ioexplorer/state"))
 }
 
+/// Where the desktop surface records which icon sits where.
+///
+/// State rather than config: a drag rewrites this file, and `config.toml` is
+/// watched by every running ioexplorer process — putting positions there would
+/// fire a full config reload in all of them on every icon the user moves.
+pub fn desktop_positions_path() -> Option<PathBuf> {
+    UserDirs::new().map(|dirs| {
+        dirs.home_dir()
+            .join(".local/state/ioexplorer/desktop-positions.toml")
+    })
+}
+
 fn parse_state(contents: &str, fallback: AppState) -> Result<AppState, toml::de::Error> {
     let stored: StoredState = toml::from_str(contents)?;
     Ok(AppState {

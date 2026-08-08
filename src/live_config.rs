@@ -61,6 +61,10 @@ impl ConfigChange {
     pub fn spotlight_changed(&self) -> bool {
         self.config.spotlight != self.previous.spotlight
     }
+
+    pub fn desktop_changed(&self) -> bool {
+        self.config.desktop != self.previous.desktop
+    }
 }
 
 type ConfigListener = Box<dyn Fn(&ConfigChange)>;
@@ -394,6 +398,7 @@ mod tests {
         assert!(!change.sidebar_width_changed());
         assert!(!change.custom_css_changed());
         assert!(!change.spotlight_changed());
+        assert!(!change.desktop_changed());
     }
 
     #[test]
@@ -421,6 +426,12 @@ mod tests {
         let spotlight = change(|config| config.spotlight.width = 900);
         assert!(spotlight.spotlight_changed());
         assert!(!spotlight.sidebar_width_changed());
+        assert!(!spotlight.desktop_changed());
+
+        let desktop = change(|config| config.desktop.icon_size = 96);
+        assert!(desktop.desktop_changed());
+        assert!(!desktop.spotlight_changed());
+        assert!(!desktop.sidebar_width_changed());
     }
 
     #[test]
