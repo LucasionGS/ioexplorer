@@ -1,4 +1,5 @@
 pub mod app;
+pub mod desktop;
 pub mod file_manager;
 pub mod portal;
 pub mod spotlight;
