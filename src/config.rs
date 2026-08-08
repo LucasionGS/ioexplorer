@@ -1520,7 +1520,9 @@ modified = true
         assert_eq!(parsed.desktop.folder, None);
     }
 
-    /// The `[desktop]` block as the README documents it.
+    /// The `[desktop]` block exactly as the README prints it. Copied verbatim,
+    /// so documentation that drifts from the parser fails here rather than in
+    /// someone's config.
     #[test]
     fn the_documented_desktop_section_parses() {
         let parsed: AppConfig = toml::from_str(
@@ -1536,32 +1538,47 @@ kind = true
 modified = true
 
 [desktop]
-icon-size = 96
-snap-to-grid = false
-grid-spacing = 20
-show-hidden = true
-folder = "/home/u/Desk"
-respect-panels = false
-label-backdrop = false
+icon-size = 72          # clamped to 48..=256
+snap-to-grid = true     # the default for an output with no preference of its own
+grid-spacing = 12       # clamped to 0..=64
+show-hidden = false
+folder = "/home/user/Desktop"   # defaults to XDG_DESKTOP_DIR, then ~/Desktop
+respect-panels = true   # inset the icons by whatever your bar reserved
+label-backdrop = true   # translucent pill behind each label, for busy wallpapers
 
 [desktop.sort]
-key = "modified"
-descending = true
-folders_first = false
+key = "name"            # name, modified, created, size, or extension
+descending = false
+folders_first = true
 "#,
         )
         .expect("valid config");
 
         let desktop = &parsed.desktop;
-        assert_eq!(desktop.icon_size, 96);
-        assert!(!desktop.snap_to_grid);
-        assert_eq!(desktop.grid_spacing, 20);
-        assert!(desktop.show_hidden);
-        assert_eq!(desktop.folder, Some(PathBuf::from("/home/u/Desk")));
-        assert!(!desktop.respect_panels);
-        assert!(!desktop.label_backdrop);
-        assert_eq!(desktop.sort.key, crate::sorting::SortKey::Modified);
-        assert!(desktop.sort.descending);
+        assert_eq!(desktop.icon_size, 72);
+        assert!(desktop.snap_to_grid);
+        assert_eq!(desktop.grid_spacing, 12);
+        assert!(!desktop.show_hidden);
+        assert_eq!(desktop.folder, Some(PathBuf::from("/home/user/Desktop")));
+        assert!(desktop.respect_panels);
+        assert!(desktop.label_backdrop);
+        assert_eq!(desktop.sort.key, crate::sorting::SortKey::Name);
+        assert!(!desktop.sort.descending);
+        assert!(desktop.sort.folders_first);
+    }
+
+    /// Every desktop field is optional, so a user can set just the one they
+    /// care about without the rest collapsing to zero.
+    #[test]
+    fn a_partial_desktop_section_keeps_the_other_defaults() {
+        let parsed: AppConfig =
+            toml::from_str("default_view = \"icon\"\nshow_hidden = false\nicon_size = 128\nsidebar_width = 220\n\n[list_columns]\nsize = true\nkind = true\nmodified = true\n\n[desktop]\nicon-size = 96\n")
+                .expect("valid config");
+
+        assert_eq!(parsed.desktop.icon_size, 96);
+        assert_eq!(parsed.desktop.grid_spacing, 12);
+        assert!(parsed.desktop.snap_to_grid);
+        assert!(parsed.desktop.respect_panels);
     }
 
     #[test]

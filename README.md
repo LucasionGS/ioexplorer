@@ -64,6 +64,13 @@ cargo run --bin ioexplorer-start -- --left --top
 
 In server mode, later `ioexplorer-start` calls send the requested placement to the running instance and exit immediately.
 
+The desktop runs as a long-lived process, one layer surface per output:
+
+```sh
+cargo run --bin ioexplorer-desktop
+cargo run --bin ioexplorer-desktop -- --windowed   # plain window, for nested or X11 development
+```
+
 ## Spotlight
 
 `ioexplorer-spotlight` is a keyboard-driven launcher. It opens centred and slightly above the middle of the screen, and grows downward as results appear.
@@ -427,6 +434,77 @@ provider = "mock"
 ```
 
 Ask it something containing `slow` to watch the stream token by token, or `error` to see how a failure renders.
+
+## Desktop
+
+`ioexplorer-desktop` renders `~/Desktop` as a grid of icons over your wallpaper, one
+layer surface per output. It paints no background of its own — wallpapers stay the
+job of `swaybg`, `hyprpaper`, `swww` or whatever else you run.
+
+```sh
+systemctl --user enable --now ioexplorer-desktop.service
+```
+
+Unlike the other binaries it is single-instance: a second invocation activates the
+running one and exits. Reload it in place after a config edit with
+`systemctl --user reload ioexplorer-desktop`.
+
+### Using it
+
+Click to select, Ctrl-click to add, Shift-click for a range, drag on empty space for a
+rubber band. Double-click opens: folders in IoExplorer, `.desktop` files launch, and
+anything else goes to its default application. Drag an icon to move it — it snaps to
+the grid unless you turn snapping off — and drag onto a folder tile to move it in.
+Right-click gives the same menu the file manager uses (Copy, Cut, Paste, Rename,
+Delete, Extract Here, New Folder, your custom actions), plus Arrange Icons, Sort By,
+Snap To Grid and Open In IoExplorer.
+
+**Keyboard shortcuts are unavailable on some compositors.** The desktop sits on the
+`Bottom` layer so it stays under your windows, and Hyprland only grants keyboard focus
+to the upper layers — measured on 0.56.2, an identical surface receives key events on
+`Top` and none on `Bottom`. Everything is therefore reachable by mouse and context
+menu, and Rename and New Folder open a small focused prompt rather than editing in
+place. Compositors that do honour on-demand focus get F5 to refresh as a bonus.
+
+### Icon positions
+
+Positions live in `~/.local/state/ioexplorer/desktop-positions.toml`, not in
+`config.toml`: a drag rewrites them constantly, and the config file is watched by every
+running IoExplorer process, so putting them there would fire a config reload in all of
+them every time you moved an icon.
+
+They are keyed by output connector (`DP-1`, `eDP-1`), and each records both a grid cell
+and — when snapping is off — an exact pixel position. The cell is what survives a
+resolution change or a new panel; the pixels record a freeform placement the cell
+cannot. Moving a display to a different port gives it a new key, so its icons re-flow
+once.
+
+A file exists once, so it appears on exactly one desktop: the first output in
+enumeration order claims anything unclaimed. Unplugging a monitor leaves its stored
+layout untouched on disk and shows its icons on the primary output on loan, so plugging
+it back in restores what you had.
+
+### Settings
+
+```toml
+[desktop]
+icon-size = 72          # clamped to 48..=256
+snap-to-grid = true     # the default for an output with no preference of its own
+grid-spacing = 12       # clamped to 0..=64
+show-hidden = false
+folder = "/home/user/Desktop"   # defaults to XDG_DESKTOP_DIR, then ~/Desktop
+respect-panels = true   # inset the icons by whatever your bar reserved
+label-backdrop = true   # translucent pill behind each label, for busy wallpapers
+
+[desktop.sort]
+key = "name"            # name, modified, created, size, or extension
+descending = false
+folders_first = true
+```
+
+The Snap To Grid item in the context menu is per-output and is stored beside the
+positions; `snap-to-grid` here is only the starting value for an output that has never
+been told otherwise.
 
 ## Desktop Portal File Chooser
 
