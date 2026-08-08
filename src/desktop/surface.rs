@@ -46,6 +46,18 @@ enum Claim {
     NotOurs,
 }
 
+/// Cancels a pending one-shot timer, if it has not already fired.
+///
+/// The slot is cleared by the timer's own closure as it runs, so anything still
+/// in here is genuinely pending. Removing an already-fired source raises a GLib
+/// error that `SourceId::remove` unwraps — inside a C callback, which cannot
+/// unwind, so it takes the whole process down rather than panicking.
+fn cancel(slot: &Rc<RefCell<Option<glib::SourceId>>>) {
+    if let Some(timer) = slot.borrow_mut().take() {
+        timer.remove();
+    }
+}
+
 /// Normalises a drag into a top-left origin plus a size, so a rubber band
 /// dragged up or left is the same rectangle as one dragged down or right.
 fn rect(start_x: f64, start_y: f64, offset_x: f64, offset_y: f64) -> (f64, f64, f64, f64) {
@@ -147,7 +159,10 @@ pub struct DesktopSurface {
     grab_offset: CellFlag<(f64, f64)>,
 
     toast: gtk::Label,
-    toast_timer: RefCell<Option<glib::SourceId>>,
+    /// Shared with the timeout closure so it can forget itself as it fires.
+    /// `SourceId::remove` aborts the process when the source has already run,
+    /// and these are one-shot timers, so a stale id must never be kept.
+    toast_timer: Rc<RefCell<Option<glib::SourceId>>>,
 
     /// User-defined actions, from `AppConfig::actions` rather than the desktop
     /// section — they are shared with the file manager's menus.
@@ -162,7 +177,8 @@ pub struct DesktopSurface {
 
     folder_monitor: RefCell<Option<gio::FileMonitor>>,
     pending_reload: CellFlag<bool>,
-    save_timer: RefCell<Option<glib::SourceId>>,
+    /// Shared with its closure for the same reason as `toast_timer`.
+    save_timer: Rc<RefCell<Option<glib::SourceId>>>,
 }
 
 /// How long the folder monitor coalesces events before re-listing. Matches the
@@ -273,13 +289,13 @@ impl DesktopSurface {
             suppress_clear: CellFlag::new(false),
             grab_offset: CellFlag::new((0.0, 0.0)),
             toast,
-            toast_timer: RefCell::new(None),
+            toast_timer: Rc::new(RefCell::new(None)),
             custom_action_configs: RefCell::new(custom_action_configs),
             monitor_order,
             orphans: RefCell::new(BTreeSet::new()),
             folder_monitor: RefCell::new(None),
             pending_reload: CellFlag::new(false),
-            save_timer: RefCell::new(None),
+            save_timer: Rc::new(RefCell::new(None)),
         });
 
         sizer.connect_resize({
@@ -813,13 +829,18 @@ impl DesktopSurface {
         self.toast.set_label(message);
         self.toast.set_visible(true);
 
-        if let Some(timer) = self.toast_timer.borrow_mut().take() {
-            timer.remove();
-        }
+        cancel(&self.toast_timer);
+
         let toast = self.toast.clone();
+        let slot = Rc::clone(&self.toast_timer);
         let timer = glib::timeout_add_local_once(
             std::time::Duration::from_millis(u64::from(TOAST_MS)),
-            move || toast.set_visible(false),
+            move || {
+                // Drop the id before doing anything: this source is finished
+                // the moment the closure returns, and removing it later aborts.
+                slot.borrow_mut().take();
+                toast.set_visible(false);
+            },
         );
         *self.toast_timer.borrow_mut() = Some(timer);
     }
@@ -1063,14 +1084,14 @@ impl DesktopSurface {
     /// Writes the layout out after things settle. Cancel-and-reschedule, so
     /// dragging several icons in a row costs one write rather than one each.
     fn schedule_save(&self) {
-        if let Some(timer) = self.save_timer.borrow_mut().take() {
-            timer.remove();
-        }
+        cancel(&self.save_timer);
 
         let positions = Rc::clone(&self.positions);
+        let slot = Rc::clone(&self.save_timer);
         let timer = glib::timeout_add_local_once(
             std::time::Duration::from_millis(u64::from(SAVE_DEBOUNCE_MS)),
             move || {
+                slot.borrow_mut().take();
                 if let Err(error) = positions.borrow_mut().flush() {
                     tracing::warn!(%error, "failed to save desktop positions");
                 }
