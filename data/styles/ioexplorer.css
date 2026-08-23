@@ -452,6 +452,25 @@ window {
   background: rgba(0, 0, 0, 0.2);
 }
 
+/* Bottom-left, where every desktop puts an emblem. The disc is drawn here
+ * rather than baked into the symbolic so the badge stays readable over a photo
+ * thumbnail as well as over a flat folder icon. */
+.link-emblem {
+  padding: 1px;
+  border-radius: 999px;
+  background: rgba(18, 21, 28, 0.9);
+  color: #ffffff;
+}
+
+.link-emblem-broken {
+  color: #f5a623;
+}
+
+/* Dimmed: a link to nothing is still listed, but nothing can be done with it. */
+.file-broken-link {
+  opacity: 0.55;
+}
+
 .dim-label,
 .status-label {
   color: alpha(currentColor, 0.68);

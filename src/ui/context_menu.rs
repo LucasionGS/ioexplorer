@@ -222,6 +222,8 @@ pub enum FileEntryContext {
 }
 
 pub struct FileEntryActions {
+    /// Present only for a single symlink that resolves to a folder.
+    pub enter_link: Option<MenuAction>,
     pub view: Option<ViewAction>,
     pub bookmark: Option<BookmarkAction>,
     /// Present only when every selected entry is an archive.
@@ -236,6 +238,7 @@ pub struct FileEntryActions {
 impl FileEntryContext {
     pub fn for_paths(paths: Vec<PathBuf>, actions: FileEntryActions) -> Option<Self> {
         let FileEntryActions {
+            enter_link,
             view,
             bookmark,
             extract,
@@ -250,6 +253,7 @@ impl FileEntryContext {
             0 => None,
             1 => Some(Self::Single(FileSingleSelectionContext {
                 path: paths[0].clone(),
+                enter_link,
                 view,
                 bookmark,
                 extract,
@@ -283,6 +287,7 @@ impl ContextMenuContext for FileEntryContext {
 
 pub struct FileSingleSelectionContext {
     path: PathBuf,
+    enter_link: Option<MenuAction>,
     view: Option<ViewAction>,
     bookmark: Option<BookmarkAction>,
     extract: Option<MenuAction>,
@@ -295,6 +300,15 @@ pub struct FileSingleSelectionContext {
 
 impl ContextMenuContext for FileSingleSelectionContext {
     fn actions(&self) -> Vec<ContextMenuAction> {
+        let enter_link = self.enter_link.as_ref().map(|enter| {
+            let enter = Rc::clone(enter);
+            ContextMenuAction::new(
+                "Enter linked folder",
+                Some("folder-symbolic"),
+                false,
+                Rc::new(move || enter()),
+            )
+        });
         let view = self.view.as_ref().map(|view| {
             let view = Rc::clone(view);
             ContextMenuAction::new(
@@ -324,6 +338,9 @@ impl ContextMenuContext for FileSingleSelectionContext {
         let delete = Rc::clone(&self.delete);
 
         let mut actions = Vec::new();
+        // First: it is the navigation item, and the desktop's own menu leads
+        // with "Open" for the same reason.
+        actions.extend(enter_link);
         actions.extend(view);
         actions.extend(bookmark);
         actions.extend(extract);
@@ -711,6 +728,7 @@ mod tests {
         custom_actions: Vec<CustomAction>,
     ) -> FileEntryActions {
         FileEntryActions {
+            enter_link: None,
             view,
             bookmark,
             extract: None,
@@ -720,5 +738,66 @@ mod tests {
             delete: noop_delete(),
             custom_actions,
         }
+    }
+
+    /// The one route to a link's target: double-click deliberately stays on the
+    /// link's own path, so without this item the target is unreachable.
+    #[test]
+    fn a_linked_folder_offers_entering_its_target() {
+        let context = FileEntryContext::for_paths(
+            vec![PathBuf::from("/tmp/linked")],
+            FileEntryActions {
+                enter_link: Some(noop_menu_action()),
+                ..file_entry_actions(None, None, Vec::new())
+            },
+        )
+        .expect("single context");
+
+        let labels = context
+            .actions()
+            .into_iter()
+            .map(|action| action.label)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            ["Enter linked folder", "Copy", "Cut", "Rename", "Delete"]
+        );
+    }
+
+    /// There is no one target to enter, so the slot is dropped exactly as
+    /// bookmark and rename are.
+    #[test]
+    fn a_multi_selection_does_not_offer_entering_a_link() {
+        let context = FileEntryContext::for_paths(
+            vec![PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b")],
+            FileEntryActions {
+                enter_link: Some(noop_menu_action()),
+                ..file_entry_actions(None, None, Vec::new())
+            },
+        )
+        .expect("multi context");
+
+        let labels = context
+            .actions()
+            .into_iter()
+            .map(|action| action.label)
+            .collect::<Vec<_>>();
+        assert!(!labels.contains(&"Enter linked folder".to_string()));
+    }
+
+    #[test]
+    fn a_plain_folder_offers_no_link_entry() {
+        let context = FileEntryContext::for_paths(
+            vec![PathBuf::from("/tmp/real")],
+            file_entry_actions(None, None, Vec::new()),
+        )
+        .expect("single context");
+
+        let labels = context
+            .actions()
+            .into_iter()
+            .map(|action| action.label)
+            .collect::<Vec<_>>();
+        assert!(!labels.contains(&"Enter linked folder".to_string()));
     }
 }

@@ -170,6 +170,7 @@ mod tests {
             modified: Some(time),
             created: Some(time),
             hidden: name.starts_with('.'),
+            link: None,
         }
     }
 
@@ -383,5 +384,20 @@ mod tests {
         );
 
         assert_eq!(names(&items), ["undated.txt", "dated.txt"]);
+    }
+
+    /// "Folders first" reads `kind`, so this is the check that a linked folder
+    /// really did become a folder rather than sinking in among the files.
+    #[test]
+    fn a_link_to_a_folder_is_pinned_with_the_folders() {
+        let mut items = vec![
+            item("apple.txt", FileKind::File, 1, 1),
+            item("linked", FileKind::Directory, 0, 1),
+            item("banana.txt", FileKind::File, 1, 1),
+            item("real", FileKind::Directory, 0, 1),
+        ];
+        sort_items(&mut items, SortOrder::default());
+
+        assert_eq!(names(&items), ["linked", "real", "apple.txt", "banana.txt"]);
     }
 }

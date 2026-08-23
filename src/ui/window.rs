@@ -19,9 +19,9 @@ use crate::{
     config::{AppConfig, CustomActionConfig, ViewMode, clamp_icon_size},
     custom_actions::{self, ActionTarget},
     file_ops::{
-        self, ArchivePath, FileClipboardOperation, archive_paths, file_uri_for_path,
-        folder_monitor_event_affects_listing, is_desktop_entry_file, next_available_path,
-        same_paths,
+        self, ArchivePath, FileClipboardOperation, archive_paths, broken_link_message,
+        file_uri_for_path, folder_monitor_event_affects_listing, is_desktop_entry_file,
+        next_available_path, same_paths,
     },
     live_config::{ConfigChange, LiveConfig},
     providers::{FileItem, FileKind, Provider, ProviderError, ProviderUri, local::LocalProvider},
@@ -254,7 +254,7 @@ impl DetailsPanel {
         let type_label = media
             .as_ref()
             .map(|details| details.kind.label())
-            .unwrap_or(item.kind.label());
+            .unwrap_or(item.kind_label());
         self.title_label.set_text(item.display_name());
         self.subtitle_label.set_text(type_label);
 
@@ -273,6 +273,17 @@ impl DetailsPanel {
             self.append_row("Created", &views::format_timestamp(Some(created)));
         }
         self.append_row("Location", &item_location(item));
+        if let Some(link) = &item.link {
+            // The resolved path when there is one, the raw link value when
+            // there is not — which is all a broken link has left to show.
+            let target = link
+                .resolved
+                .as_deref()
+                .unwrap_or(link.target.as_path())
+                .display()
+                .to_string();
+            self.append_row("Links to", &target);
+        }
         if item.hidden {
             self.append_row("Hidden", "Yes");
         }
@@ -290,8 +301,16 @@ impl DetailsPanel {
         self.append_row("Items", &items.len().to_string());
         append_count_row(self, "Files", count_kind(items, FileKind::File));
         append_count_row(self, "Folders", count_kind(items, FileKind::Directory));
-        append_count_row(self, "Links", count_kind(items, FileKind::Symlink));
+        append_count_row(
+            self,
+            "Broken links",
+            count_kind(items, FileKind::BrokenLink),
+        );
         append_count_row(self, "Other", count_kind(items, FileKind::Other));
+        // Deliberately after the four kind rows and deliberately overlapping
+        // them: a linked folder is counted as a folder above, and this says how
+        // many of the rows above are links.
+        append_count_row(self, "Of which links", count_links(items));
         if let Some(size) = selected_items_size(items) {
             self.append_row("Size", &views::format_bytes(size));
         }
@@ -367,6 +386,10 @@ fn append_count_row(panel: &DetailsPanel, label: &str, count: usize) {
     }
 }
 
+fn count_links(items: &[FileItem]) -> usize {
+    items.iter().filter(|item| item.link.is_some()).count()
+}
+
 fn count_kind(items: &[FileItem], kind: FileKind) -> usize {
     items.iter().filter(|item| item.kind == kind).count()
 }
@@ -432,9 +455,9 @@ fn selection_kind_summary(items: &[FileItem]) -> String {
     );
     push_count_summary(
         &mut parts,
-        count_kind(items, FileKind::Symlink),
-        "link",
-        "links",
+        count_kind(items, FileKind::BrokenLink),
+        "broken link",
+        "broken links",
     );
     push_count_summary(
         &mut parts,
@@ -1996,7 +2019,7 @@ impl AppWindow {
             .provider
             .metadata(&uri)
             .ok()
-            .map(|item| format!(" - {}", item.kind.label()))
+            .map(|item| format!(" - {}", item.kind_label()))
             .unwrap_or_default();
         let status = format!("{count} items - {}", uri.display_path()) + &current_kind;
         self.status_label.set_text(&status);
@@ -2067,7 +2090,7 @@ impl AppWindow {
                     .provider
                     .metadata(&uri)
                     .ok()
-                    .map(|item| format!(" - {}", item.kind.label()))
+                    .map(|item| format!(" - {}", item.kind_label()))
                     .unwrap_or_default();
 
                 let status = format!(
@@ -2662,6 +2685,11 @@ impl AppWindow {
             return;
         }
 
+        if let Some(message) = broken_link_message(&item) {
+            self.status_label.set_text(&message);
+            return;
+        }
+
         if item.kind == FileKind::Directory {
             self.load_uri(item.uri, true);
         } else if is_desktop_entry_file(&item) {
@@ -3122,6 +3150,17 @@ impl AppWindow {
                 let this = Rc::clone(self);
                 Rc::new(move || this.extract_archives(archives.clone())) as context_menu::MenuAction
             });
+        // Cloned out of the borrow before the closure captures it: the menu
+        // outlives this call, and `entries` is rebuilt on every listing.
+        let link_target = self
+            .entries
+            .borrow()
+            .get(index)
+            .and_then(|item| item.linked_folder().map(Path::to_path_buf));
+        let enter_link: Option<context_menu::MenuAction> = link_target.map(|target| {
+            let this = Rc::clone(self);
+            Rc::new(move || this.navigate_to_path(target.clone())) as context_menu::MenuAction
+        });
         let rename: context_menu::RenameAction = {
             let this = Rc::clone(self);
             Rc::new(move |path| this.show_rename_dialog(path))
@@ -3142,6 +3181,7 @@ impl AppWindow {
         let Some(context) = context_menu::FileEntryContext::for_paths(
             paths,
             context_menu::FileEntryActions {
+                enter_link,
                 view,
                 bookmark,
                 extract,
@@ -4264,6 +4304,13 @@ impl AppWindow {
                 .set_text("Only local files can be selected");
             return;
         };
+
+        if let Some(message) = broken_link_message(&item) {
+            // Without this the portal would hand its caller a path that does
+            // not resolve, which fails later and somewhere else.
+            self.status_label.set_text(&message);
+            return;
+        }
 
         if item.kind == FileKind::Directory {
             if chooser.options.mode == SelectorMode::Open && chooser.options.directory {

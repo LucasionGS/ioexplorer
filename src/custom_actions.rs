@@ -247,7 +247,11 @@ fn action_kind_label(kind: FileKind) -> &'static str {
     match kind {
         FileKind::Directory => "folder",
         FileKind::File => "file",
-        FileKind::Symlink => "symlink",
+        // A working link reports what it points at, so an action filtering on
+        // `folder` now sees linked folders — which is what a script wants.
+        // `symlink` survives as the value for a link that resolves to nothing
+        // else, keeping the documented value set unchanged.
+        FileKind::BrokenLink => "symlink",
         FileKind::Other => "other",
     }
 }

@@ -139,6 +139,19 @@ pub fn is_desktop_entry_file(item: &FileItem) -> bool {
     item.kind == FileKind::File && item.name.to_ascii_lowercase().ends_with(".desktop")
 }
 
+/// The message to show instead of opening a link whose target is gone.
+///
+/// Launching it anyway reports a failure about the link, when the one thing
+/// worth saying is which target went missing. `None` for anything openable.
+pub fn broken_link_message(item: &FileItem) -> Option<String> {
+    let link = item.link.as_ref().filter(|link| link.resolved.is_none())?;
+    Some(format!(
+        "{} is a broken link to {}",
+        item.display_name(),
+        link.target.display()
+    ))
+}
+
 /// An archive picked out of a selection, with the folder it should unpack into
 /// already worked out from its name.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -276,7 +289,14 @@ pub fn move_path_into(source: &Path, target_dir: &Path) -> std::io::Result<bool>
 }
 
 pub fn copy_path_to(source: &Path, target: &Path) -> std::io::Result<()> {
-    if source.is_dir() {
+    // symlink_metadata, not is_dir: a link is copied as a link. Following it
+    // turns a folder holding `link -> /` into an unbounded copy, and even when
+    // it terminates it silently swaps a one-line link for a duplicate of
+    // everything behind it. `cp -a` and every graphical file manager agree.
+    let file_type = fs::symlink_metadata(source)?.file_type();
+    if file_type.is_symlink() {
+        std::os::unix::fs::symlink(fs::read_link(source)?, target)
+    } else if file_type.is_dir() {
         copy_dir_recursive(source, target)
     } else {
         fs::copy(source, target).map(|_| ())
@@ -284,7 +304,10 @@ pub fn copy_path_to(source: &Path, target: &Path) -> std::io::Result<()> {
 }
 
 pub fn remove_path(path: &Path) -> std::io::Result<()> {
-    if path.is_dir() {
+    // Also symlink_metadata: is_dir() follows, so a link to a folder took the
+    // remove_dir_all branch and failed on the link rather than deleting it.
+    let file_type = fs::symlink_metadata(path)?.file_type();
+    if file_type.is_dir() {
         fs::remove_dir_all(path)
     } else {
         fs::remove_file(path)
@@ -301,11 +324,9 @@ pub fn copy_dir_recursive(source: &Path, target: &Path) -> std::io::Result<()> {
         let entry = entry?;
         let path = entry.path();
         let child_target = target.join(entry.file_name());
-        if path.is_dir() {
-            copy_dir_recursive(&path, &child_target)?;
-        } else {
-            fs::copy(&path, &child_target)?;
-        }
+        // Through copy_path_to, so the link rule above holds at every depth:
+        // this is the loop `~/link -> /` would otherwise open up.
+        copy_path_to(&path, &child_target)?;
     }
     Ok(())
 }
@@ -568,13 +589,14 @@ mod tests {
         path::{Path, PathBuf},
     };
 
-    use crate::providers::{FileItem, FileKind, ProviderUri};
+    use crate::providers::{FileItem, FileKind, LinkInfo, ProviderUri};
     use tempfile::tempdir;
 
     use super::{
-        FileClipboardOperation, archive_paths, copy_path_into, drop_target_is_selected,
-        file_clipboard_payload, file_uri_list_payload, folder_monitor_event_affects_listing,
-        is_desktop_entry_file, move_path_into, new_folder_target,
+        ArchivePath, FileClipboardOperation, archive_paths, broken_link_message, copy_path_into,
+        copy_path_to, drop_target_is_selected, file_clipboard_payload, file_uri_list_payload,
+        folder_monitor_event_affects_listing, is_desktop_entry_file, move_path_into,
+        new_folder_target, remove_path,
     };
 
     fn entry(name: &str, kind: FileKind) -> FileItem {
@@ -588,6 +610,7 @@ mod tests {
             modified: None,
             created: None,
             hidden: false,
+            link: None,
         }
     }
 
@@ -737,5 +760,111 @@ mod tests {
             target,
             &[PathBuf::from("/tmp/other")]
         ));
+    }
+
+    /// The destructive one. `is_dir()` follows a link, so deleting a linked
+    /// folder used to take the `remove_dir_all` branch and fail on the link —
+    /// and the branch it was failing on is one that deletes a whole tree.
+    #[test]
+    fn removing_a_link_to_a_folder_leaves_the_folder() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let real = temp.path().join("real");
+        std::fs::create_dir(&real).expect("dir");
+        std::fs::write(real.join("keep.txt"), b"keep").expect("write");
+        let link = temp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+        remove_path(&link).expect("remove");
+
+        assert!(!link.exists());
+        assert!(real.join("keep.txt").exists());
+    }
+
+    /// `link -> ..` inside a copied tree used to recurse until the disk filled.
+    /// Copying the link as a link is the only variant that terminates.
+    #[test]
+    fn copying_a_folder_containing_a_link_terminates() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let source = temp.path().join("source");
+        std::fs::create_dir(&source).expect("dir");
+        std::fs::write(source.join("file.txt"), b"hi").expect("write");
+        std::os::unix::fs::symlink(temp.path(), source.join("loop")).expect("symlink");
+
+        let target = temp.path().join("copy");
+        copy_path_to(&source, &target).expect("copy");
+
+        assert!(target.join("file.txt").exists());
+        assert!(
+            std::fs::symlink_metadata(target.join("loop"))
+                .expect("loop")
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[test]
+    fn copying_a_link_reproduces_the_link() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::fs::write(temp.path().join("real.txt"), b"hi").expect("write");
+        let link = temp.path().join("link.txt");
+        std::os::unix::fs::symlink("real.txt", &link).expect("symlink");
+
+        let target = temp.path().join("copy.txt");
+        copy_path_to(&link, &target).expect("copy");
+
+        assert_eq!(
+            std::fs::read_link(&target).expect("link"),
+            PathBuf::from("real.txt")
+        );
+    }
+
+    /// The message is the only thing that names the missing target; a bare
+    /// launch failure would name the link and leave the user guessing.
+    #[test]
+    fn a_broken_link_message_names_the_missing_target() {
+        let mut item = entry("dangling", FileKind::BrokenLink);
+        item.link = Some(LinkInfo {
+            target: PathBuf::from("/gone/away"),
+            resolved: None,
+        });
+
+        assert_eq!(
+            broken_link_message(&item).as_deref(),
+            Some("dangling is a broken link to /gone/away")
+        );
+    }
+
+    #[test]
+    fn a_working_link_has_no_broken_message() {
+        let mut item = entry("link", FileKind::Directory);
+        item.link = Some(LinkInfo {
+            target: PathBuf::from("real"),
+            resolved: Some(PathBuf::from("/tmp/real")),
+        });
+
+        assert_eq!(broken_link_message(&item), None);
+    }
+
+    /// A linked archive is a `File` now, so extraction reaches it.
+    #[test]
+    fn a_linked_archive_can_be_extracted() {
+        let mut item = entry("photos.tar.gz", FileKind::File);
+        item.link = Some(LinkInfo {
+            target: PathBuf::from("real.tar.gz"),
+            resolved: Some(PathBuf::from("/tmp/real.tar.gz")),
+        });
+
+        assert!(ArchivePath::for_item(&item).is_some());
+    }
+
+    #[test]
+    fn a_broken_link_is_not_an_archive() {
+        let mut item = entry("photos.tar.gz", FileKind::BrokenLink);
+        item.link = Some(LinkInfo {
+            target: PathBuf::from("gone.tar.gz"),
+            resolved: None,
+        });
+
+        assert!(ArchivePath::for_item(&item).is_none());
     }
 }

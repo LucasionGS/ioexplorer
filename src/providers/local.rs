@@ -8,7 +8,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use super::{FileIcon, FileItem, FileKind, Provider, ProviderError, ProviderResult, ProviderUri};
+use super::{
+    FileIcon, FileItem, FileKind, LinkInfo, Provider, ProviderError, ProviderResult, ProviderUri,
+};
 use crate::sorting::{self, SortOrder};
 
 const SQUASHFS_MAGIC: &[u8; 4] = b"hsqs";
@@ -66,10 +68,26 @@ impl Provider for LocalProvider {
 }
 
 fn item_from_path(parent: &ProviderUri, path: PathBuf) -> ProviderResult<FileItem> {
-    let metadata = fs::symlink_metadata(&path)?;
+    let link_metadata = fs::symlink_metadata(&path)?;
+    let is_link = link_metadata.file_type().is_symlink();
+    let link = is_link.then(|| LinkInfo {
+        target: fs::read_link(&path).unwrap_or_default(),
+        resolved: fs::canonicalize(&path).ok(),
+    });
+
+    // The target's metadata, so a linked folder sorts, sizes, and opens as the
+    // folder it points at rather than as an inert fourth kind. A broken link
+    // falls back to the link's own, which is all that is left of it, and still
+    // has to appear in the listing rather than failing the whole read.
+    let metadata = if is_link {
+        fs::metadata(&path).unwrap_or(link_metadata)
+    } else {
+        link_metadata
+    };
+
     let file_type = metadata.file_type();
-    let kind = if file_type.is_symlink() {
-        FileKind::Symlink
+    let kind = if link.as_ref().is_some_and(|link| link.resolved.is_none()) {
+        FileKind::BrokenLink
     } else if file_type.is_dir() {
         FileKind::Directory
     } else if file_type.is_file() {
@@ -95,6 +113,7 @@ fn item_from_path(parent: &ProviderUri, path: PathBuf) -> ProviderResult<FileIte
         size: (kind == FileKind::File).then_some(metadata.len()),
         modified: metadata.modified().ok(),
         created: metadata.created().ok(),
+        link,
     })
 }
 
@@ -521,6 +540,10 @@ mod tests {
 
     use super::*;
 
+    fn item_for(dir: &Path, name: &str) -> FileItem {
+        item_from_path(&ProviderUri::local(dir), dir.join(name)).expect("item")
+    }
+
     #[test]
     fn lists_directories_before_files() {
         let dir = tempdir().expect("temp dir");
@@ -606,5 +629,91 @@ Icon=icon.png
             appimage_icon_candidates(&files, "org.example.App"),
             vec!["usr/share/icons/hicolor/64x64/apps/org.example.App.png".to_string()]
         );
+    }
+
+    /// The whole point of the feature: a link to a folder has to *be* a folder
+    /// everywhere downstream, because that is what the drop targets, the
+    /// sorting and the double-click handler all test for.
+    #[test]
+    fn a_link_to_a_folder_lists_as_a_folder() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let real = temp.path().join("real");
+        fs::create_dir(&real).expect("dir");
+        std::os::unix::fs::symlink(&real, temp.path().join("link")).expect("symlink");
+
+        let item = item_for(temp.path(), "link");
+        assert_eq!(item.kind, FileKind::Directory);
+        assert_eq!(item.kind_label(), "Folder link");
+        assert_eq!(
+            item.linked_folder(),
+            Some(real.canonicalize().expect("real").as_path())
+        );
+    }
+
+    #[test]
+    fn a_link_to_a_file_carries_the_targets_size() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let real = temp.path().join("real.txt");
+        fs::write(&real, b"twelve bytes").expect("write");
+        std::os::unix::fs::symlink(&real, temp.path().join("link.txt")).expect("symlink");
+
+        let item = item_for(temp.path(), "link.txt");
+        assert_eq!(item.kind, FileKind::File);
+        // Not the length of the target's path, which is what the link itself
+        // measures and what `symlink_metadata` would have reported.
+        assert_eq!(item.size, Some(12));
+    }
+
+    #[test]
+    fn a_broken_link_stays_a_link_that_resolves_to_nothing() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::os::unix::fs::symlink("nowhere", temp.path().join("dangling")).expect("symlink");
+
+        let item = item_for(temp.path(), "dangling");
+        assert_eq!(item.kind, FileKind::BrokenLink);
+        assert!(item.is_broken_link());
+        assert_eq!(item.linked_folder(), None);
+        let link = item.link.expect("link");
+        assert_eq!(link.target, PathBuf::from("nowhere"));
+        assert_eq!(link.resolved, None);
+    }
+
+    /// `target` is the value as written and `resolved` is where it lands. A
+    /// relative link is the case where the two genuinely differ.
+    #[test]
+    fn a_relative_link_keeps_what_was_written_and_where_it_points() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        fs::create_dir(temp.path().join("real")).expect("dir");
+        std::os::unix::fs::symlink("real", temp.path().join("link")).expect("symlink");
+
+        let link = item_for(temp.path(), "link").link.expect("link");
+        assert_eq!(link.target, PathBuf::from("real"));
+        assert_eq!(
+            link.resolved,
+            Some(temp.path().join("real").canonicalize().expect("real"))
+        );
+    }
+
+    /// `a -> b -> a` makes every resolution attempt return ELOOP. It has to
+    /// come back as a broken link rather than hanging or erroring the listing.
+    #[test]
+    fn a_link_loop_reads_as_a_broken_link() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::os::unix::fs::symlink(temp.path().join("b"), temp.path().join("a")).expect("a");
+        std::os::unix::fs::symlink(temp.path().join("a"), temp.path().join("b")).expect("b");
+
+        assert_eq!(item_for(temp.path(), "a").kind, FileKind::BrokenLink);
+    }
+
+    /// A plain file is untouched by any of the above.
+    #[test]
+    fn a_plain_file_records_no_link() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        fs::write(temp.path().join("notes.txt"), b"hi").expect("write");
+
+        let item = item_for(temp.path(), "notes.txt");
+        assert_eq!(item.kind, FileKind::File);
+        assert!(item.link.is_none());
+        assert_eq!(item.kind_label(), "File");
     }
 }

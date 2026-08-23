@@ -10,7 +10,7 @@ use crate::{
         dnd,
         views::{
             EntryContextMenuHandler, EntrySelectionHandler, FileDragHandler, FolderDropHandler,
-            format_size, format_timestamp, image_for_item,
+            entry_icon, format_size, format_timestamp, icon_widget_for_item,
             thumbnail::{self, ThumbnailCache, ThumbnailSpec, ThumbnailTarget},
         },
     },
@@ -48,7 +48,7 @@ struct MetaColumn {
 }
 
 fn kind_value(item: &FileItem) -> String {
-    item.kind.label().to_string()
+    item.kind_label().to_string()
 }
 
 fn size_value(item: &FileItem) -> String {
@@ -293,12 +293,8 @@ fn row_intersects_y(
 }
 
 fn row_icon(row: &gtk::ListBoxRow) -> Option<gtk::Image> {
-    row.child()?
-        .downcast::<gtk::Box>()
-        .ok()?
-        .first_child()?
-        .downcast::<gtk::Image>()
-        .ok()
+    let first = row.child()?.downcast::<gtk::Box>().ok()?.first_child()?;
+    entry_icon(&first)
 }
 
 fn row_for(
@@ -325,7 +321,7 @@ fn row_for(
         .css_classes(["file-row"])
         .build();
 
-    let icon = image_for_item(item, ICON_SIZE);
+    let (icon_widget, icon) = icon_widget_for_item(item, ICON_SIZE);
     icon.add_css_class("file-row-icon");
     thumbnail::apply_cached(
         item,
@@ -340,11 +336,15 @@ fn row_for(
         .ellipsize(gtk::pango::EllipsizeMode::End)
         .build();
 
-    container.append(&icon);
+    container.append(&icon_widget);
     container.append(&name);
 
     for column in context.columns {
         container.append(&meta_label(&(column.value)(item), column.width));
+    }
+
+    if item.kind == FileKind::BrokenLink {
+        container.add_css_class("file-broken-link");
     }
 
     row.set_child(Some(&container));

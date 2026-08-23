@@ -10,7 +10,7 @@ use gtk::prelude::*;
 use crate::{
     providers::FileItem,
     ui::views::{
-        image_for_item,
+        image_for_item, set_link_emblem,
         thumbnail::{self, ThumbnailCache, ThumbnailSpec, ThumbnailTarget},
     },
 };
@@ -22,6 +22,9 @@ use super::layout::GridMetrics;
 pub struct Tile {
     pub root: gtk::Box,
     pub image: gtk::Image,
+    /// Always built, shown only for a link. `update` re-reads an item in place,
+    /// so there would be nothing to add an emblem to later.
+    pub emblem: gtk::Image,
     pub label: gtk::Label,
 }
 
@@ -50,6 +53,15 @@ pub fn build(
     let image = image_for_item(item, icon_size);
     image.add_css_class("file-tile-icon");
 
+    let emblem = gtk::Image::builder()
+        .halign(gtk::Align::Start)
+        .valign(gtk::Align::End)
+        .css_classes(["link-emblem"])
+        .build();
+    set_link_emblem(&emblem, item, icon_size);
+    let icon_overlay = gtk::Overlay::builder().child(&image).build();
+    icon_overlay.add_overlay(&emblem);
+
     let label = gtk::Label::builder()
         .label(item.display_name())
         .justify(gtk::Justification::Center)
@@ -66,7 +78,7 @@ pub fn build(
         label.add_css_class("label-backdrop");
     }
 
-    root.append(&image);
+    root.append(&icon_overlay);
     root.append(&label);
 
     // Synchronous, so a thumbnail already in the cache is on screen in the
@@ -78,7 +90,12 @@ pub fn build(
         thumbnails,
     );
 
-    Tile { root, image, label }
+    Tile {
+        root,
+        image,
+        emblem,
+        label,
+    }
 }
 
 impl Tile {
@@ -88,6 +105,7 @@ impl Tile {
     pub fn update(&self, item: &FileItem, icon_size: i32) {
         crate::ui::views::set_image_for_item(&self.image, item, icon_size);
         self.image.add_css_class("file-tile-icon");
+        set_link_emblem(&self.emblem, item, icon_size);
         self.label.set_label(item.display_name());
     }
 

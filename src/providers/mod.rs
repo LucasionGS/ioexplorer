@@ -157,7 +157,10 @@ impl FromStr for ProviderUri {
 pub enum FileKind {
     Directory,
     File,
-    Symlink,
+    /// A symlink whose target is gone. A working link takes the kind of what it
+    /// points at, so this variant is never the answer to "is it a link?" —
+    /// `FileItem::link` is. Named for what it means to keep it that way.
+    BrokenLink,
     Other,
 }
 
@@ -166,7 +169,7 @@ impl FileKind {
         match self {
             Self::Directory => "Folder",
             Self::File => "File",
-            Self::Symlink => "Link",
+            Self::BrokenLink => "Broken link",
             Self::Other => "Other",
         }
     }
@@ -175,10 +178,22 @@ impl FileKind {
         match self {
             Self::Directory => "folder-symbolic",
             Self::File => "text-x-generic-symbolic",
-            Self::Symlink => "emblem-symbolic-link-symbolic",
+            Self::BrokenLink => "emblem-symbolic-link-symbolic",
             Self::Other => "unknown-symbolic",
         }
     }
+}
+
+/// What a symlink points at.
+///
+/// `target` is the raw `readlink` value because that is what the user wrote and
+/// what a properties pane should show; `resolved` is the canonical path because
+/// that is the only thing safe to navigate to. A broken link has the first and
+/// not the second.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct LinkInfo {
+    pub target: PathBuf,
+    pub resolved: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -199,11 +214,39 @@ pub struct FileItem {
     /// `None` where the filesystem does not record a birth time.
     pub created: Option<SystemTime>,
     pub hidden: bool,
+    /// Set only for a symlink. `kind` describes the target, so this is the one
+    /// thing that says an entry is a link at all.
+    pub link: Option<LinkInfo>,
 }
 
 impl FileItem {
     pub fn display_name(&self) -> &str {
         self.display_name.as_deref().unwrap_or(&self.name)
+    }
+
+    /// What the Kind column shows. A working link reads as a link to whatever
+    /// it points at, which `kind` alone can no longer say.
+    pub fn kind_label(&self) -> &'static str {
+        match (&self.link, self.kind) {
+            (Some(_), FileKind::Directory) => "Folder link",
+            (Some(_), FileKind::File) => "File link",
+            (Some(_), _) => "Broken link",
+            (None, kind) => kind.label(),
+        }
+    }
+
+    /// A link whose target is gone. `kind` is `BrokenLink` for exactly these.
+    pub fn is_broken_link(&self) -> bool {
+        self.link
+            .as_ref()
+            .is_some_and(|link| link.resolved.is_none())
+    }
+
+    /// The resolved target, for a link that points at a folder.
+    pub fn linked_folder(&self) -> Option<&Path> {
+        (self.kind == FileKind::Directory)
+            .then(|| self.link.as_ref()?.resolved.as_deref())
+            .flatten()
     }
 }
 

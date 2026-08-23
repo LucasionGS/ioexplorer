@@ -3,7 +3,7 @@
 use std::{
     cell::{Cell as CellFlag, RefCell},
     collections::{BTreeSet, HashMap},
-    path::PathBuf,
+    path::{Path, PathBuf},
     rc::Rc,
 };
 
@@ -847,6 +847,11 @@ impl DesktopSurface {
         };
         let path = self.folder.join(name);
 
+        if let Some(message) = crate::file_ops::broken_link_message(&item) {
+            self.show_toast(&message);
+            return;
+        }
+
         if item.kind == FileKind::Directory {
             if let Err(error) = crate::launcher::spawn::launch_in_ioexplorer(&path) {
                 self.show_toast(&format!("Failed to open {name}: {error}"));
@@ -1506,7 +1511,24 @@ impl DesktopSurface {
         let bookmark = (items.len() == 1 && items[0].kind == FileKind::Directory)
             .then(|| self.bookmark_action(paths[0].clone()));
 
+        // The desktop has nowhere to navigate to, so entering a link opens the
+        // target in the file manager, exactly as "Open" does for a folder.
+        let enter_link = items
+            .first()
+            .filter(|_| items.len() == 1)
+            .and_then(|item| item.linked_folder().map(Path::to_path_buf))
+            .map(|target| {
+                let surface = Rc::clone(self);
+                Rc::new(move || {
+                    if let Err(error) = crate::launcher::spawn::launch_in_ioexplorer(&target) {
+                        surface
+                            .show_toast(&format!("Failed to open {}: {error}", target.display()));
+                    }
+                }) as MenuAction
+            });
+
         let actions = context_menu::FileEntryActions {
+            enter_link,
             // The image viewer is welded to the file manager's window; "Open"
             // covers the same need here without dragging it across.
             view: None,

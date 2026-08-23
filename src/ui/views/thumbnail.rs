@@ -597,6 +597,7 @@ mod tests {
             modified: Some(UNIX_EPOCH + Duration::from_secs(42)),
             created: Some(UNIX_EPOCH + Duration::from_secs(42)),
             hidden: false,
+            link: None,
         }
     }
 
@@ -719,5 +720,32 @@ mod tests {
             .map(|key| key.spec.icon_size)
             .collect();
         assert_eq!(sizes, HashSet::from([24, 220]));
+    }
+
+    /// A linked photo is a `File` now, so it reaches the thumbnail worker like
+    /// any other. The cache key is the link's path and the validation is the
+    /// target's size and mtime, which is what a link should be keyed on.
+    #[test]
+    fn a_linked_image_still_has_a_preview() {
+        let mut item = image_item();
+        item.link = Some(crate::providers::LinkInfo {
+            target: "real.jpg".into(),
+            resolved: Some("/tmp/real.jpg".into()),
+        });
+
+        assert!(has_preview(&item));
+    }
+
+    /// Nothing to render and nothing to stat, so it must not be queued.
+    #[test]
+    fn a_broken_link_has_no_preview() {
+        let mut item = image_item();
+        item.kind = FileKind::BrokenLink;
+        item.link = Some(crate::providers::LinkInfo {
+            target: "gone.jpg".into(),
+            resolved: None,
+        });
+
+        assert!(!has_preview(&item));
     }
 }

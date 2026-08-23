@@ -6,7 +6,7 @@ use crate::{
         dnd,
         views::{
             EntryContextMenuHandler, EntrySelectionHandler, FileDragHandler, FolderDropHandler,
-            image_for_item,
+            entry_icon, icon_widget_for_item,
             thumbnail::{self, ThumbnailCache, ThumbnailSpec, ThumbnailTarget},
         },
     },
@@ -85,7 +85,7 @@ fn tile_for(
         .css_classes(["file-tile"])
         .build();
 
-    let icon = image_for_item(item, icon_size);
+    let (icon_widget, icon) = icon_widget_for_item(item, icon_size);
     icon.add_css_class("file-tile-icon");
     let label = gtk::Label::builder()
         .label(item.display_name())
@@ -98,7 +98,7 @@ fn tile_for(
         .halign(gtk::Align::Center)
         .build();
 
-    tile.append(&icon);
+    tile.append(&icon_widget);
     tile.append(&label);
 
     thumbnail::apply_cached(
@@ -107,6 +107,10 @@ fn tile_for(
         options.spec(),
         &options.thumbnail_cache,
     );
+
+    if item.kind == FileKind::BrokenLink {
+        tile.add_css_class("file-broken-link");
+    }
 
     install_selection_click(&tile, index, selection_handler);
     install_context_menu_click(&tile, index, context_menu_handler);
@@ -165,13 +169,8 @@ fn flow_child_intersects_y(
 }
 
 fn flow_child_icon(child: &gtk::FlowBoxChild) -> Option<gtk::Image> {
-    child
-        .child()?
-        .downcast::<gtk::Box>()
-        .ok()?
-        .first_child()?
-        .downcast::<gtk::Image>()
-        .ok()
+    let first = child.child()?.downcast::<gtk::Box>().ok()?.first_child()?;
+    entry_icon(&first)
 }
 
 fn install_context_menu_click(

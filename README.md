@@ -16,6 +16,7 @@ It is developed with customization and ricing in mind, as well as efficiency nav
 - Desktop integration metadata and packaging scaffolds.
 - Graphical settings page with General, View, Theme, and an Actions editor.
 - Custom configurable context-menu actions for files and folders.
+- Symlinks that behave as what they point at, with an emblem and Enter linked folder.
 - Theme editor with live UI updates and managed local CSS generation.
 
 ## Dependencies
@@ -456,8 +457,8 @@ rubber band. Double-click opens: folders in IoExplorer, `.desktop` files launch,
 anything else goes to its default application. Drag an icon to move it — it snaps to
 the grid unless you turn snapping off — and drag onto a folder tile to move it in.
 Right-click gives the same menu the file manager uses (Copy, Cut, Paste, Rename,
-Delete, Extract Here, New Folder, your custom actions), plus Arrange Icons, Sort By,
-Snap To Grid, Hide Icons and Open In IoExplorer.
+Delete, Extract Here, Enter linked folder, New Folder, your custom actions), plus
+Arrange Icons, Sort By, Snap To Grid, Hide Icons and Open In IoExplorer.
 
 **Hide Icons** clears every screen at once, whichever one you use the menu on, and the
 choice survives a restart. The desktop stays live while hidden — right-click still
@@ -521,6 +522,29 @@ folders_first = true
 The Snap To Grid item in the context menu is per-output and is stored beside the
 positions; `snap-to-grid` here is only the starting value for an output that has never
 been told otherwise.
+
+## Symlinks
+
+A symlink is treated as whatever it points at. A link to a folder is a folder: you
+double-click into it, drop files onto it, bookmark it, and it sorts with the folders.
+A link to a file opens, extracts, thumbnails and launches like the file it points at.
+Size and dates come from the target, so a linked folder shows no size and a linked
+photo shows the photo's.
+
+Entering a linked folder keeps you on the link's own path, so Up returns to the folder
+holding the link rather than jumping somewhere else in the tree. To go to the real
+location instead, right-click and pick **Enter linked folder**, which navigates to the
+resolved target. On the desktop the same item opens the target in IoExplorer.
+
+Links carry a small emblem in the corner of their icon. A link whose target is missing
+is drawn dimmed with a warning emblem, reads as `Broken link` in the Kind column, and
+says which target it lost when you try to open it. The details pane shows a **Links to**
+row for any link — the resolved path when there is one, the raw link value when there
+is not.
+
+Copying a link copies the link, not a duplicate of everything behind it, matching
+`cp -a` and other file managers. Deleting one deletes the link and leaves the target
+alone. Creating symlinks from the file manager is not supported yet.
 
 ## Desktop Portal File Chooser
 
@@ -647,12 +671,15 @@ In icon view, use Ctrl+scroll to resize file entries. The chosen icon size is sa
 
 Listings can be sorted by name, modified date, created date, size, or extension, in either direction, from the sort button in the toolbar, from Settings -> View, or by clicking a column header in list view. Clicking the header already sorted reverses it; an arrow marks the active column. The Kind header sorts by extension, which is the grouping a type column is generally wanted for. `[list_columns]` chooses which columns appear, and so which headers are available — `created` is off by default. `folders_first` keeps directories above files whichever key is chosen; turn it off to let folders sort in with everything else. Created dates come from the filesystem's birth time and are unavailable on filesystems that do not record one. Like the view mode and icon size, the chosen order is saved in `~/.local/state/ioexplorer/state` and overrides the configured `[sort]` on later launches.
 
-Custom actions can also be added, edited, deleted, reordered, and configured with Run on each from Settings -> Actions. Changes are saved back to `config.toml` and take effect immediately for context menus. The editor shows command variables that can be used in custom commands: `{path}`, `{name}`, `{parent}`, `{stem}`, `{extension}`, `{uri}`, and `{kind}`.
+Custom actions can also be added, edited, deleted, reordered, and configured with Run on each from Settings -> Actions. Changes are saved back to `config.toml` and take effect immediately for context menus. The editor shows command variables that can be used in custom commands: `{path}`, `{name}`, `{parent}`, `{stem}`, `{extension}`, `{uri}`, and `{kind}`. A symlink reports the kind of what it
+points at, so an action filtered to `folder` also runs on linked folders; `{kind}` is
+`symlink` only for a link whose target is missing.
 
 Custom actions appear in file, folder, and empty-folder-space context menus when every selected target matches at least one configured filter. Empty `filters` match everything. By default, IoExplorer runs the configured command once with all selected or current paths expanded as shell-quoted arguments, using the current folder as the working directory. If a command does not use any variables, the selected paths are appended as final arguments. If variables are used, placeholders such as `{path}` expand to all selected entries. Set `run_on_each = true` to run the command once per entry instead. Supported filters include glob patterns such as `*.txt`, the folder keyword `folder/`, and common type groups such as `image/*`, `video/*`, `audio/*`, and `text/*`.
 
 ## Roadmap
 
+- Creating symlinks from the file manager.
 - Richer file operations.
 - Split panes and saved layout profiles.
 - Filtering.
