@@ -22,7 +22,7 @@ mod software;
 mod ssh;
 mod vpn;
 mod window;
-mod windows;
+pub(crate) mod windows;
 
 use std::{cell::RefCell, env, rc::Rc, sync::mpsc};
 

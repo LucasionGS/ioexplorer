@@ -18,6 +18,7 @@ It is developed with customization and ricing in mind, as well as efficiency nav
 - Custom configurable context-menu actions for files and folders.
 - Symlinks that behave as what they point at, with an emblem and Enter linked folder.
 - Theme editor with live UI updates and managed local CSS generation.
+- A freeze-frame screenshot tool with window picking and a pen.
 
 ## Dependencies
 
@@ -26,6 +27,8 @@ Install a Rust toolchain plus GTK4 development libraries. On Arch-derived system
 ```sh
 sudo pacman -S rust gtk4 gtk4-layer-shell glib2 pkgconf desktop-file-utils appstream flatpak flatpak-builder
 ```
+
+`ioexplorer-shot` additionally uses `grim`, `wl-clipboard` and `libnotify` at runtime.
 
 ## Build And Run
 
@@ -64,6 +67,13 @@ cargo run --bin ioexplorer-start -- --left --top
 ```
 
 In server mode, later `ioexplorer-start` calls send the requested placement to the running instance and exit immediately.
+
+The screenshot tool is a one-shot binary, see [Screenshots](#screenshots):
+
+```sh
+cargo run --bin ioexplorer-shot
+cargo run --bin ioexplorer-shot -- all --no-copy -o /tmp/all.png
+```
 
 The desktop runs as a long-lived process, one layer surface per output:
 
@@ -522,6 +532,85 @@ folders_first = true
 The Snap To Grid item in the context menu is per-output and is stored beside the
 positions; `snap-to-grid` here is only the starting value for an output that has never
 been told otherwise.
+
+## Screenshots
+
+`ioexplorer-shot` freezes the screen the moment it is run, then lets you choose what to
+keep. Because everything happens on that frozen frame, a menu that closes on focus loss,
+a tooltip or a video frame is still there when you finish selecting.
+
+```sh
+ioexplorer-shot            # region: select an area, a window or a screen
+ioexplorer-shot window     # the focused window
+ioexplorer-shot screen     # the focused screen
+ioexplorer-shot all        # every screen, laid out as they are arranged
+```
+
+Bind those to keys in your compositor. Each shot is saved to
+`~/Pictures/Screenshots` and copied to the clipboard, and a notification says where it
+went. `--no-save`, `--no-copy` and `--no-notify` switch those off for one shot, and
+`-o PATH` writes to an exact path instead — `-o -` writes the PNG to stdout for piping,
+without copying or notifying.
+
+The exit status is 0 when a shot was taken, 1 when it was cancelled or failed, and 2 for
+invalid arguments, so a script can tell whether there is an image to use.
+
+It needs `grim` to capture the screen. `wl-clipboard` is recommended: without `wl-copy`
+the process has to stay alive in the background to serve the clipboard until something
+else is copied. `notify-send` (libnotify) is used for notifications when present.
+
+### Region mode
+
+Every screen is covered by the frozen frame with a toolbar on the one you are using.
+
+| Input | Action |
+| --- | --- |
+| Drag | Select an area. It may span several screens |
+| `Shift` while dragging | Keep the selection square |
+| Click, `Enter` | Take the window under the pointer, or the screen if there is none |
+| `R` / `P` | Region tool / pen tool |
+| `W` | Take the focused window |
+| `S` | Take the screen under the pointer |
+| `A` | Take every screen |
+| `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / redo a pen stroke |
+| `Esc`, right-click | Cancel an unfinished drag, or close |
+
+Hovering a window outlines it, tints it and names it with its size, so what a click will
+take is never a guess. The label gives the size of the saved image in device pixels, which
+on a HiDPI screen is larger than the logical size.
+
+The **pen** draws freehand over the frozen frame in the colour and width picked on the
+toolbar; hold `Shift` for a straight line. Switch back to the region tool — or press `W`,
+`S` or `A` — and the drawing is in the shot. Tools are self-contained, so more (arrows,
+boxes, text, blur) can be added without touching the overlay; see `src/shot/tools/mod.rs`.
+
+Which window is under the pointer comes from the compositor, since Wayland gives clients
+no way to see each other's windows. On Hyprland the stacking order is rebuilt from what
+determines it — special workspace over regular, fullscreen over floating over tiled, and
+the most recently focused floating window on top. sway is supported through `swaymsg`
+but untested. Anywhere else, region, screen and all-screen shots work and clicking picks a
+whole screen, since no windows are known.
+
+A selection spanning screens of different scale is rendered at the highest scale it
+touches; a selection within one screen keeps that screen's pixels exactly. Gaps in an
+irregular monitor layout come out transparent.
+
+Compositors that animate layer surfaces will fade the overlay in. It is showing the same
+image that is already on screen, so this is barely visible, but on Hyprland a layer rule
+disabling animations for the `ioexplorer-shot` namespace removes it entirely.
+
+### Settings
+
+```toml
+[shot]
+directory = "~/Pictures/Screenshots"         # defaults to XDG_PICTURES_DIR/Screenshots
+file-name = "Screenshot_%Y-%m-%d_%H-%M-%S"   # strftime fields; .png is added
+save = true
+copy = true
+notify = true
+```
+
+A name that is already taken gets `-2`, `-3` and so on rather than being overwritten.
 
 ## Symlinks
 

@@ -644,6 +644,66 @@ impl DesktopConfig {
     }
 }
 
+/// Settings for `ioexplorer-shot`.
+#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ShotConfig {
+    /// Where shots are saved. Defaults to `Screenshots` inside
+    /// `XDG_PICTURES_DIR`, then `~/Pictures/Screenshots`. A leading `~/` is
+    /// expanded.
+    #[serde(default)]
+    pub directory: Option<PathBuf>,
+    /// File name without extension, with `strftime` fields.
+    #[serde(default = "default_shot_file_name")]
+    pub file_name: String,
+    #[serde(default = "default_true")]
+    pub save: bool,
+    #[serde(default = "default_true")]
+    pub copy: bool,
+    #[serde(default = "default_true")]
+    pub notify: bool,
+}
+
+fn default_shot_file_name() -> String {
+    "Screenshot_%Y-%m-%d_%H-%M-%S".to_string()
+}
+
+// Hand-written for the same reason as `DesktopConfig`: a derived `Default`
+// would save nowhere, copy nothing and name every file "".
+impl Default for ShotConfig {
+    fn default() -> Self {
+        Self {
+            directory: None,
+            file_name: default_shot_file_name(),
+            save: true,
+            copy: true,
+            notify: true,
+        }
+    }
+}
+
+impl ShotConfig {
+    pub fn directory_path(&self) -> PathBuf {
+        let user_dirs = directories::UserDirs::new();
+
+        if let Some(directory) = &self.directory {
+            return match (directory.strip_prefix("~"), &user_dirs) {
+                (Ok(rest), Some(dirs)) => dirs.home_dir().join(rest),
+                _ => directory.clone(),
+            };
+        }
+
+        match &user_dirs {
+            Some(dirs) => dirs
+                .picture_dir()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| dirs.home_dir().join("Pictures"))
+                .join("Screenshots"),
+            None => PathBuf::from("Screenshots"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
 pub struct AppConfig {
     pub default_view: ViewMode,
@@ -662,6 +722,8 @@ pub struct AppConfig {
     pub spotlight: SpotlightConfig,
     #[serde(default)]
     pub desktop: DesktopConfig,
+    #[serde(default)]
+    pub shot: ShotConfig,
 }
 
 impl Default for AppConfig {
@@ -682,6 +744,7 @@ impl Default for AppConfig {
             actions: Vec::new(),
             spotlight: SpotlightConfig::default(),
             desktop: DesktopConfig::default(),
+            shot: ShotConfig::default(),
         }
     }
 }
@@ -775,6 +838,11 @@ impl AppConfig {
 /// it in that window and see an empty or half-written config. A rename within
 /// the same directory is atomic, and produces one event rather than a burst.
 pub fn write_atomic(path: &Path, contents: &str) -> io::Result<()> {
+    write_bytes_atomic(path, contents.as_bytes())
+}
+
+/// [`write_atomic`] for binary contents.
+pub fn write_bytes_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -1675,5 +1743,55 @@ folders_first = true
         assert!(contents.contains("filters = ["));
         assert!(contents.contains("\"*.txt\""));
         assert!(contents.contains("\"*.md\""));
+    }
+
+    #[test]
+    fn shot_section_defaults_when_absent_and_round_trips() {
+        let config: AppConfig = toml::from_str(
+            "default_view = \"icon\"\nshow_hidden = false\nicon_size = 128\nsidebar_width = 220\n\
+             [list_columns]\nsize = true\nkind = true\nmodified = true\n",
+        )
+        .expect("valid config");
+        assert_eq!(config.shot, ShotConfig::default());
+        assert!(config.shot.save && config.shot.copy && config.shot.notify);
+
+        let edited = AppConfig {
+            shot: ShotConfig {
+                directory: Some(PathBuf::from("/tmp/shots")),
+                file_name: "shot-%s".to_string(),
+                save: false,
+                copy: true,
+                notify: false,
+            },
+            ..AppConfig::default()
+        };
+        let contents = toml::to_string_pretty(&edited).expect("serializable config");
+        assert!(contents.contains("[shot]"));
+        assert!(contents.contains("file-name = \"shot-%s\""));
+        let parsed: AppConfig = toml::from_str(&contents).expect("valid config");
+        assert_eq!(parsed.shot, edited.shot);
+    }
+
+    #[test]
+    fn shot_directory_expands_a_home_prefix() {
+        let Some(dirs) = directories::UserDirs::new() else {
+            return;
+        };
+        let config = ShotConfig {
+            directory: Some(PathBuf::from("~/Shots")),
+            ..ShotConfig::default()
+        };
+        assert_eq!(config.directory_path(), dirs.home_dir().join("Shots"));
+
+        let absolute = ShotConfig {
+            directory: Some(PathBuf::from("/srv/shots")),
+            ..ShotConfig::default()
+        };
+        assert_eq!(absolute.directory_path(), PathBuf::from("/srv/shots"));
+        assert!(
+            ShotConfig::default()
+                .directory_path()
+                .ends_with("Screenshots")
+        );
     }
 }

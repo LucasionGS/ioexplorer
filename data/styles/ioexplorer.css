@@ -975,3 +975,56 @@ window {
   background: rgba(18, 21, 28, 0.94);
   border: 1px solid rgba(255, 255, 255, 0.12);
 }
+
+/* ioexplorer-shot. The window is entirely covered by the frozen frame; black
+ * rather than the translucent theme wash, so nothing live shows through for
+ * the frame before the first draw. */
+.shot-window {
+  background: black;
+}
+
+.shot-toolbar {
+  padding: 5px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(13, 15, 20, 0.92);
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.45);
+}
+
+.shot-toolbar button {
+  min-height: 30px;
+  min-width: 30px;
+  padding: 0 11px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  box-shadow: none;
+  font-weight: 600;
+}
+
+.shot-toolbar button:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.shot-toolbar button:checked {
+  background: rgba(82, 145, 238, 0.36);
+}
+
+.shot-toolbar button:disabled {
+  opacity: 0.4;
+}
+
+.shot-toolbar button.shot-swatch {
+  min-width: 26px;
+  padding: 0 4px;
+}
+
+.shot-toolbar button.shot-close:hover {
+  background: rgba(239, 68, 68, 0.32);
+}
+
+.shot-toolbar separator {
+  min-width: 1px;
+  margin: 6px 3px;
+  background: rgba(255, 255, 255, 0.12);
+}
