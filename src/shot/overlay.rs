@@ -123,6 +123,9 @@ struct Toolbar {
     root: gtk::Box,
     tool_buttons: Vec<gtk::ToggleButton>,
     style_controls: gtk::Box,
+    /// The custom colour picker. While it is open, typed keys belong to its
+    /// hex entry rather than to the overlay's shortcuts.
+    color_popover: gtk::Popover,
     undo: gtk::Button,
     redo: gtk::Button,
 }
@@ -463,6 +466,17 @@ impl Overlay {
     }
 
     fn key_pressed(&self, key: gdk::Key, state: gdk::ModifierType) -> glib::Propagation {
+        // The overlay captures keys before any widget sees them, so without
+        // this a hex colour typed into the picker would fire `A`, `S`, `W`…
+        let picking_color = self
+            .toolbar
+            .borrow()
+            .as_ref()
+            .is_some_and(|toolbar| toolbar.color_popover.is_visible());
+        if picking_color {
+            return glib::Propagation::Proceed;
+        }
+
         let control = state.contains(gdk::ModifierType::CONTROL_MASK);
         let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
 
@@ -804,7 +818,7 @@ impl Overlay {
 
         let style_controls = gtk::Box::new(gtk::Orientation::Horizontal, 2);
         style_controls.append(&separator());
-        self.append_swatches(&style_controls);
+        let color_popover = self.append_swatches(&style_controls);
         style_controls.append(&separator());
         self.append_widths(&style_controls);
         root.append(&style_controls);
@@ -863,12 +877,15 @@ impl Overlay {
             root,
             tool_buttons,
             style_controls,
+            color_popover,
             undo,
             redo,
         }
     }
 
-    fn append_swatches(self: &Rc<Self>, container: &gtk::Box) {
+    /// The preset swatches, then a custom colour that opens a full picker.
+    /// All of them are one radio group, so exactly one reads as selected.
+    fn append_swatches(self: &Rc<Self>, container: &gtk::Box) -> gtk::Popover {
         let current = self.session.borrow().style.color;
         let mut first: Option<gtk::ToggleButton> = None;
 
@@ -878,24 +895,7 @@ impl Overlay {
                 .content_height(16)
                 .build();
             swatch.set_draw_func(move |_, cr, width, height| {
-                let radius = f64::from(width.min(height)) / 2.0 - 1.0;
-                cr.arc(
-                    f64::from(width) / 2.0,
-                    f64::from(height) / 2.0,
-                    radius,
-                    0.0,
-                    std::f64::consts::TAU,
-                );
-                cr.set_source_rgba(
-                    f64::from(color.red()),
-                    f64::from(color.green()),
-                    f64::from(color.blue()),
-                    1.0,
-                );
-                let _ = cr.fill_preserve();
-                cr.set_source_rgba(1.0, 1.0, 1.0, 0.35);
-                cr.set_line_width(1.0);
-                let _ = cr.stroke();
+                draw_swatch(cr, width, height, &color);
             });
 
             let button = gtk::ToggleButton::builder()
@@ -921,6 +921,88 @@ impl Overlay {
             });
             container.append(&button);
         }
+
+        let (button, popover) = self.custom_color_button();
+        button.set_group(first.as_ref());
+        container.append(&button);
+        popover
+    }
+
+    /// A swatch showing the custom colour inside a hue ring. Every click
+    /// selects the custom colour and opens the picker, including a click on
+    /// the swatch that is already selected — that is how the colour is changed.
+    #[allow(deprecated)] // `GtkColorChooserWidget`; see below.
+    fn custom_color_button(self: &Rc<Self>) -> (gtk::ToggleButton, gtk::Popover) {
+        let custom = Rc::new(Cell::new(CUSTOM_COLOR_DEFAULT));
+
+        let swatch = gtk::DrawingArea::builder()
+            .content_width(16)
+            .content_height(16)
+            .build();
+        swatch.set_draw_func({
+            let custom = Rc::clone(&custom);
+            move |_, cr, width, height| draw_custom_swatch(cr, width, height, &custom.get())
+        });
+
+        let button = gtk::ToggleButton::builder()
+            .child(&swatch)
+            .tooltip_text("Custom colour")
+            .focus_on_click(false)
+            .css_classes(["shot-swatch"])
+            .build();
+
+        // `GtkColorChooserWidget` is deprecated in favour of `GtkColorDialog`,
+        // but a dialog is a new toplevel window, and ordinary windows stack
+        // *below* an overlay-layer surface — it would open invisibly behind the
+        // frozen screen. A popover is a popup of this very surface, so it
+        // appears above it, and the widget has no replacement that can live in
+        // one.
+        let chooser = gtk::ColorChooserWidget::builder()
+            .show_editor(true)
+            .use_alpha(true)
+            .rgba(&custom.get())
+            .build();
+        let popover = gtk::Popover::builder()
+            .child(&chooser)
+            .position(gtk::PositionType::Bottom)
+            .css_classes(["shot-color-popover"])
+            .build();
+        popover.set_parent(&button);
+        // A popover is not a regular child, so it has to be detached by hand
+        // or GTK warns about a leaked child when the toolbar is destroyed.
+        button.connect_destroy({
+            let popover = popover.clone();
+            move |_| popover.unparent()
+        });
+
+        chooser.connect_rgba_notify({
+            let weak = Rc::downgrade(self);
+            let custom = Rc::clone(&custom);
+            let swatch = swatch.clone();
+            let button = button.clone();
+            move |chooser| {
+                let color = chooser.rgba();
+                custom.set(color);
+                swatch.queue_draw();
+                button.set_active(true);
+                if let Some(this) = weak.upgrade() {
+                    this.set_style(|style| style.color = color);
+                }
+            }
+        });
+
+        button.connect_clicked({
+            let weak = Rc::downgrade(self);
+            let popover = popover.clone();
+            move |_| {
+                if let Some(this) = weak.upgrade() {
+                    this.set_style(|style| style.color = custom.get());
+                }
+                popover.popup();
+            }
+        });
+
+        (button, popover)
     }
 
     fn append_widths(self: &Rc<Self>, container: &gtk::Box) {
@@ -1141,4 +1223,91 @@ fn draw_label(canvas: &Canvas, snapshot: &gtk::Snapshot, output: Rect, highlight
     ));
     snapshot.append_layout(&layout, &LABEL_TEXT);
     snapshot.restore();
+}
+
+/// The custom swatch's colour until one is picked.
+const CUSTOM_COLOR_DEFAULT: gdk::RGBA = gdk::RGBA::new(0.66, 0.36, 0.98, 1.0);
+
+fn draw_swatch(cr: &gtk::cairo::Context, width: i32, height: i32, color: &gdk::RGBA) {
+    let radius = f64::from(width.min(height)) / 2.0 - 1.0;
+    cr.arc(
+        f64::from(width) / 2.0,
+        f64::from(height) / 2.0,
+        radius,
+        0.0,
+        std::f64::consts::TAU,
+    );
+    cr.set_source_rgba(
+        f64::from(color.red()),
+        f64::from(color.green()),
+        f64::from(color.blue()),
+        1.0,
+    );
+    let _ = cr.fill_preserve();
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.35);
+    cr.set_line_width(1.0);
+    let _ = cr.stroke();
+}
+
+/// A hue wheel ring around a dot of the current custom colour, so the button
+/// reads as "any colour" while still showing which one is set.
+fn draw_custom_swatch(cr: &gtk::cairo::Context, width: i32, height: i32, color: &gdk::RGBA) {
+    const SEGMENTS: usize = 24;
+    let (cx, cy) = (f64::from(width) / 2.0, f64::from(height) / 2.0);
+    let outer = f64::from(width.min(height)) / 2.0 - 0.5;
+    let ring = 3.0;
+
+    cr.set_line_width(ring);
+    for segment in 0..SEGMENTS {
+        let start = segment as f64 / SEGMENTS as f64;
+        let end = (segment + 1) as f64 / SEGMENTS as f64;
+        let (red, green, blue) = hue_to_rgb(start);
+        cr.set_source_rgb(red, green, blue);
+        // A hair of overlap, so no seams show between segments.
+        cr.arc(
+            cx,
+            cy,
+            outer - ring / 2.0,
+            start * std::f64::consts::TAU - 0.02,
+            end * std::f64::consts::TAU + 0.02,
+        );
+        let _ = cr.stroke();
+    }
+
+    cr.arc(cx, cy, outer - ring - 1.5, 0.0, std::f64::consts::TAU);
+    cr.set_source_rgba(
+        f64::from(color.red()),
+        f64::from(color.green()),
+        f64::from(color.blue()),
+        f64::from(color.alpha()),
+    );
+    let _ = cr.fill();
+}
+
+/// Fully saturated, full-value RGB for a hue in `0.0..1.0`.
+fn hue_to_rgb(hue: f64) -> (f64, f64, f64) {
+    let sector = (hue.rem_euclid(1.0)) * 6.0;
+    let rising = sector.fract();
+    let falling = 1.0 - rising;
+    match sector as u8 {
+        0 => (1.0, rising, 0.0),
+        1 => (falling, 1.0, 0.0),
+        2 => (0.0, 1.0, rising),
+        3 => (0.0, falling, 1.0),
+        4 => (rising, 0.0, 1.0),
+        _ => (1.0, 0.0, falling),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hue_to_rgb;
+
+    #[test]
+    fn hue_wheel_primaries() {
+        assert_eq!(hue_to_rgb(0.0), (1.0, 0.0, 0.0));
+        assert_eq!(hue_to_rgb(1.0 / 3.0).1, 1.0);
+        assert_eq!(hue_to_rgb(2.0 / 3.0).2, 1.0);
+        assert_eq!(hue_to_rgb(1.0), (1.0, 0.0, 0.0), "the wheel wraps");
+    }
 }

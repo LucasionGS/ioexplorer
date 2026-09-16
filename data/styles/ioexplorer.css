@@ -1028,3 +1028,16 @@ window {
   margin: 6px 3px;
   background: rgba(255, 255, 255, 0.12);
 }
+
+/* The picker popover is a child of a toolbar button, so the toolbar's compact
+ * button rules would otherwise reach the chooser's own buttons. */
+.shot-color-popover button {
+  min-width: 0;
+  min-height: 0;
+  padding: 4px;
+  font-weight: normal;
+}
+
+.shot-color-popover > contents {
+  padding: 10px;
+}

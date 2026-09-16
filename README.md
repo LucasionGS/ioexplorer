@@ -580,7 +580,8 @@ take is never a guess. The label gives the size of the saved image in device pix
 on a HiDPI screen is larger than the logical size.
 
 The **pen** draws freehand over the frozen frame in the colour and width picked on the
-toolbar; hold `Shift` for a straight line. Switch back to the region tool — or press `W`,
+toolbar; hold `Shift` for a straight line. The last swatch, ringed with a hue wheel, is a
+custom colour: click it to open a full picker with a hex entry and opacity. Switch back to the region tool — or press `W`,
 `S` or `A` — and the drawing is in the shot. Tools are self-contained, so more (arrows,
 boxes, text, blur) can be added without touching the overlay; see `src/shot/tools/mod.rs`.
 
