@@ -46,7 +46,7 @@ impl FrozenOutput {
 }
 
 /// An output as GDK describes it, before capture.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct OutputInfo {
     pub name: String,
     pub rect: Rect,

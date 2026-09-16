@@ -178,6 +178,13 @@ pub fn all() -> Vec<Box<dyn Tool>> {
     ]
 }
 
+/// The tools offered when picking an area to record: selection only, kept to
+/// one screen. Marks would be meaningless — they are not drawn into a live
+/// recording.
+pub fn for_recording() -> Vec<Box<dyn Tool>> {
+    vec![Box::new(SelectTool::confined())]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1041,3 +1041,50 @@ window {
 .shot-color-popover > contents {
   padding: 10px;
 }
+
+.shot-record-badge {
+  padding: 0 10px;
+  color: rgb(239, 68, 68);
+  font-weight: 700;
+}
+
+/* The recording indicator: a small pill on a screen that is not recorded. */
+.shot-indicator-window {
+  background: transparent;
+}
+
+.shot-indicator {
+  padding: 4px 4px 4px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(13, 15, 20, 0.92);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+.shot-indicator-dot {
+  color: rgb(239, 68, 68);
+}
+
+.shot-indicator-dot.dim {
+  opacity: 0.35;
+}
+
+.shot-indicator-time {
+  font-weight: 700;
+  font-feature-settings: "tnum";
+}
+
+.shot-indicator button {
+  min-height: 26px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(239, 68, 68, 0.85);
+  color: white;
+  font-weight: 700;
+  box-shadow: none;
+}
+
+.shot-indicator button:hover {
+  background: rgb(239, 68, 68);
+}

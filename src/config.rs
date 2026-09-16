@@ -662,10 +662,91 @@ pub struct ShotConfig {
     pub copy: bool,
     #[serde(default = "default_true")]
     pub notify: bool,
+    // A table, so it has to be written after every scalar above it.
+    #[serde(default)]
+    pub record: RecordConfig,
 }
 
 fn default_shot_file_name() -> String {
     "Screenshot_%Y-%m-%d_%H-%M-%S".to_string()
+}
+
+/// Settings for `ioexplorer-shot record`. `copy` and `notify` are shared with
+/// screenshots, from the enclosing `[shot]` table.
+#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct RecordConfig {
+    /// Where recordings are saved. Defaults to `Recordings` inside
+    /// `XDG_VIDEOS_DIR`, then `~/Videos/Recordings`. A leading `~/` is expanded.
+    #[serde(default)]
+    pub directory: Option<PathBuf>,
+    /// File name without extension, with `strftime` fields.
+    #[serde(default = "default_record_file_name")]
+    pub file_name: String,
+    /// Record what is playing on the default output.
+    #[serde(default = "default_true")]
+    pub audio: bool,
+    /// Mix the default microphone in with the output audio.
+    #[serde(default)]
+    pub microphone: bool,
+    /// An ffmpeg video encoder. Unset picks `h264_nvenc` on an NVIDIA driver
+    /// and `libx264` everywhere else.
+    #[serde(default)]
+    pub codec: Option<String>,
+    /// Constant frame rate. `0` records only when the screen changes, which
+    /// makes smaller files that some editors handle badly.
+    #[serde(default = "default_record_framerate")]
+    pub framerate: u32,
+    /// Show a small timer with a stop button while recording, on a screen that
+    /// is not being recorded.
+    #[serde(default = "default_true")]
+    pub indicator: bool,
+}
+
+fn default_record_file_name() -> String {
+    "Recording_%Y-%m-%d_%H-%M-%S".to_string()
+}
+
+fn default_record_framerate() -> u32 {
+    60
+}
+
+impl Default for RecordConfig {
+    fn default() -> Self {
+        Self {
+            directory: None,
+            file_name: default_record_file_name(),
+            audio: true,
+            microphone: false,
+            codec: None,
+            framerate: default_record_framerate(),
+            indicator: true,
+        }
+    }
+}
+
+impl RecordConfig {
+    pub fn directory_path(&self) -> PathBuf {
+        let user_dirs = directories::UserDirs::new();
+        if let Some(directory) = &self.directory {
+            return expand_home(directory, user_dirs.as_ref());
+        }
+        match &user_dirs {
+            Some(dirs) => dirs
+                .video_dir()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| dirs.home_dir().join("Videos"))
+                .join("Recordings"),
+            None => PathBuf::from("Recordings"),
+        }
+    }
+}
+
+fn expand_home(path: &Path, user_dirs: Option<&directories::UserDirs>) -> PathBuf {
+    match (path.strip_prefix("~"), user_dirs) {
+        (Ok(rest), Some(dirs)) => dirs.home_dir().join(rest),
+        _ => path.to_path_buf(),
+    }
 }
 
 // Hand-written for the same reason as `DesktopConfig`: a derived `Default`
@@ -678,6 +759,7 @@ impl Default for ShotConfig {
             save: true,
             copy: true,
             notify: true,
+            record: RecordConfig::default(),
         }
     }
 }
@@ -687,10 +769,7 @@ impl ShotConfig {
         let user_dirs = directories::UserDirs::new();
 
         if let Some(directory) = &self.directory {
-            return match (directory.strip_prefix("~"), &user_dirs) {
-                (Ok(rest), Some(dirs)) => dirs.home_dir().join(rest),
-                _ => directory.clone(),
-            };
+            return expand_home(directory, user_dirs.as_ref());
         }
 
         match &user_dirs {
@@ -1762,12 +1841,19 @@ folders_first = true
                 save: false,
                 copy: true,
                 notify: false,
+                record: RecordConfig {
+                    microphone: true,
+                    codec: Some("libx264".to_string()),
+                    ..RecordConfig::default()
+                },
             },
             ..AppConfig::default()
         };
         let contents = toml::to_string_pretty(&edited).expect("serializable config");
         assert!(contents.contains("[shot]"));
         assert!(contents.contains("file-name = \"shot-%s\""));
+        assert!(contents.contains("[shot.record]"));
+        assert!(contents.contains("microphone = true"));
         let parsed: AppConfig = toml::from_str(&contents).expect("valid config");
         assert_eq!(parsed.shot, edited.shot);
     }
@@ -1793,5 +1879,15 @@ folders_first = true
                 .directory_path()
                 .ends_with("Screenshots")
         );
+        assert!(
+            RecordConfig::default()
+                .directory_path()
+                .ends_with("Recordings")
+        );
+        let recordings = RecordConfig {
+            directory: Some(PathBuf::from("~/Clips")),
+            ..RecordConfig::default()
+        };
+        assert_eq!(recordings.directory_path(), dirs.home_dir().join("Clips"));
     }
 }

@@ -28,6 +28,31 @@ pub const RESERVED_KEYS: &[char] = &['w', 's', 'a'];
 
 type FinishCallback = Box<dyn FnOnce(Finish)>;
 
+/// What the chosen area is for, which decides the tools and actions offered.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Purpose {
+    Screenshot,
+    /// Selection only, kept to one screen, with no all-screens action: the
+    /// recorder captures a single output.
+    Recording,
+}
+
+impl Purpose {
+    fn tools(self) -> Vec<Box<dyn Tool>> {
+        match self {
+            Purpose::Screenshot => tools::all(),
+            Purpose::Recording => tools::for_recording(),
+        }
+    }
+
+    fn verb(self) -> &'static str {
+        match self {
+            Purpose::Screenshot => "Capture",
+            Purpose::Recording => "Record",
+        }
+    }
+}
+
 /// How the overlay ended.
 pub enum Finish {
     Capture {
@@ -135,6 +160,7 @@ pub struct Overlay {
     surfaces: RefCell<Vec<Surface>>,
     toolbar: RefCell<Option<Toolbar>>,
     accent: gdk::RGBA,
+    purpose: Purpose,
     on_finish: RefCell<Option<FinishCallback>>,
     finished: Cell<bool>,
 }
@@ -148,6 +174,7 @@ impl Overlay {
         outputs: Vec<FrozenOutput>,
         scene: Scene,
         accent: gdk::RGBA,
+        purpose: Purpose,
         on_finish: impl FnOnce(Finish) + 'static,
     ) -> Rc<Self> {
         let toolbar_output = scene
@@ -168,7 +195,7 @@ impl Overlay {
                 pointer: scene.cursor,
                 outputs,
                 scene,
-                tools: tools::all(),
+                tools: purpose.tools(),
                 active: 0,
                 annotations: Vec::new(),
                 undone: Vec::new(),
@@ -179,6 +206,7 @@ impl Overlay {
             surfaces: RefCell::new(Vec::new()),
             toolbar: RefCell::new(None),
             accent,
+            purpose,
             on_finish: RefCell::new(Some(Box::new(on_finish))),
             finished: Cell::new(false),
         });
@@ -632,6 +660,9 @@ impl Overlay {
     }
 
     fn capture_all(&self) {
+        if self.purpose == Purpose::Recording {
+            return;
+        }
         let area = self.session.borrow().all_screens();
         if let Some(area) = area {
             self.capture(area);
@@ -641,6 +672,11 @@ impl Overlay {
     fn capture(&self, area: Rect) {
         let annotations = std::mem::take(&mut self.session.borrow_mut().annotations);
         self.finish(Finish::Capture { area, annotations });
+    }
+
+    /// Closes the overlay as though the user had pressed Escape.
+    pub fn cancel(&self) {
+        self.finish(Finish::Cancel);
     }
 
     fn finish(&self, finish: Finish) {
@@ -782,6 +818,17 @@ impl Overlay {
             .css_classes(["shot-toolbar"])
             .build();
 
+        let recording = self.purpose == Purpose::Recording;
+        let verb = self.purpose.verb();
+        if recording {
+            let badge = gtk::Label::builder()
+                .label("● Record")
+                .tooltip_text("Drag an area, or click a window or screen, to start recording")
+                .css_classes(["shot-record-badge"])
+                .build();
+            root.append(&badge);
+        }
+
         let mut tool_buttons: Vec<gtk::ToggleButton> = Vec::new();
         let tools: Vec<(&'static str, &'static str, char)> = self
             .session
@@ -812,7 +859,10 @@ impl Overlay {
                     }
                 }
             });
-            root.append(&button);
+            // A single tool has nothing to switch between.
+            if !recording {
+                root.append(&button);
+            }
             tool_buttons.push(button);
         }
 
@@ -821,33 +871,36 @@ impl Overlay {
         let color_popover = self.append_swatches(&style_controls);
         style_controls.append(&separator());
         self.append_widths(&style_controls);
-        root.append(&style_controls);
-
-        root.append(&separator());
         let undo = action_button("Undo", "Undo the last mark (Ctrl+Z)", self, Self::undo);
         let redo = action_button("Redo", "Redo (Ctrl+Shift+Z)", self, Self::redo);
-        root.append(&undo);
-        root.append(&redo);
+        if !recording {
+            root.append(&style_controls);
+            root.append(&separator());
+            root.append(&undo);
+            root.append(&redo);
+        }
 
         root.append(&separator());
         root.append(&action_button(
             "Window",
-            "Capture the focused window (W)",
+            &format!("{verb} the focused window (W)"),
             self,
             Self::capture_focused_window,
         ));
         root.append(&action_button(
             "Screen",
-            "Capture this screen (S)",
+            &format!("{verb} this screen (S)"),
             self,
             Self::capture_screen,
         ));
-        root.append(&action_button(
-            "All screens",
-            "Capture every screen, as they are arranged (A)",
-            self,
-            Self::capture_all,
-        ));
+        if !recording {
+            root.append(&action_button(
+                "All screens",
+                "Capture every screen, as they are arranged (A)",
+                self,
+                Self::capture_all,
+            ));
+        }
 
         root.append(&separator());
         let close = action_button("✕", "Cancel (Esc)", self, |this| {

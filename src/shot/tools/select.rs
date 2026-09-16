@@ -13,15 +13,33 @@ const DRAG_THRESHOLD: f64 = 4.0;
 pub struct SelectTool {
     anchor: Option<Point>,
     band: Option<Rect>,
+    /// Keep the band on the screen the drag started on. Recording needs this:
+    /// a screen recorder captures one output at a time.
+    confined: bool,
 }
 
 impl SelectTool {
-    fn band_for(ctx: &ToolContext, anchor: Point, at: Point) -> Rect {
-        if ctx.shift() {
+    pub fn confined() -> Self {
+        Self {
+            confined: true,
+            ..Self::default()
+        }
+    }
+
+    fn band_for(&self, ctx: &ToolContext, anchor: Point, at: Point) -> Rect {
+        let band = if ctx.shift() {
             Rect::square_from_corners(anchor, at)
         } else {
             Rect::from_corners(anchor, at)
+        };
+        if !self.confined {
+            return band;
         }
+        ctx.outputs
+            .iter()
+            .find(|output| output.rect.contains(anchor))
+            .and_then(|output| band.intersection(&output.rect))
+            .unwrap_or(band)
     }
 }
 
@@ -62,7 +80,7 @@ impl Tool for SelectTool {
         // Once a band exists it stays a band, even if dragged back to a
         // sliver: shrinking a selection is not changing one's mind about it.
         if self.band.is_some() || anchor.distance(at) >= DRAG_THRESHOLD {
-            self.band = Some(Self::band_for(ctx, anchor, at));
+            self.band = Some(self.band_for(ctx, anchor, at));
         }
     }
 
@@ -74,7 +92,7 @@ impl Tool for SelectTool {
 
         match band {
             Some(_) => {
-                let band = Self::band_for(ctx, anchor, at).snapped_out();
+                let band = self.band_for(ctx, anchor, at).snapped_out();
                 // A band collapsed to a line has nothing in it to capture.
                 if band.width < 1.0 || band.height < 1.0 {
                     Outcome::None
@@ -259,6 +277,30 @@ mod tests {
         let ctx = ctx(&outputs, &scene, gdk::ModifierType::empty());
 
         assert_eq!(ctx.pixel_size(Rect::new(0.0, 0.0, 10.0, 10.0)), (20, 20));
+    }
+
+    #[test]
+    fn a_confined_band_stops_at_the_edge_of_its_screen() {
+        let mut outputs = outputs();
+        outputs.push(FrozenOutput {
+            name: "DP-2".to_string(),
+            rect: Rect::new(200.0, 0.0, 200.0, 100.0),
+            image: outputs[0].image.clone(),
+        });
+        let scene = Scene::default();
+        let ctx = ctx(&outputs, &scene, gdk::ModifierType::empty());
+
+        let mut free = SelectTool::default();
+        free.press(&ctx, Point::new(150.0, 20.0));
+        free.drag(&ctx, Point::new(300.0, 80.0));
+        let spanning = capture_area(free.release(&ctx, Point::new(300.0, 80.0)));
+        assert_eq!(spanning, Some(Rect::new(150.0, 20.0, 150.0, 60.0)));
+
+        let mut confined = SelectTool::confined();
+        confined.press(&ctx, Point::new(150.0, 20.0));
+        confined.drag(&ctx, Point::new(300.0, 80.0));
+        let clipped = capture_area(confined.release(&ctx, Point::new(300.0, 80.0)));
+        assert_eq!(clipped, Some(Rect::new(150.0, 20.0, 50.0, 60.0)));
     }
 
     #[test]

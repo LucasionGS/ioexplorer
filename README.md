@@ -18,7 +18,7 @@ It is developed with customization and ricing in mind, as well as efficiency nav
 - Custom configurable context-menu actions for files and folders.
 - Symlinks that behave as what they point at, with an emblem and Enter linked folder.
 - Theme editor with live UI updates and managed local CSS generation.
-- A freeze-frame screenshot tool with window picking and a pen.
+- A freeze-frame screenshot tool with window picking and a pen, and screen recording with audio.
 
 ## Dependencies
 
@@ -28,7 +28,8 @@ Install a Rust toolchain plus GTK4 development libraries. On Arch-derived system
 sudo pacman -S rust gtk4 gtk4-layer-shell glib2 pkgconf desktop-file-utils appstream flatpak flatpak-builder
 ```
 
-`ioexplorer-shot` additionally uses `grim`, `wl-clipboard` and `libnotify` at runtime.
+`ioexplorer-shot` additionally uses `grim`, `wl-clipboard` and `libnotify` at runtime, and
+`wf-recorder`, `ffmpeg` and `libpulse` for recording.
 
 ## Build And Run
 
@@ -73,6 +74,7 @@ The screenshot tool is a one-shot binary, see [Screenshots](#screenshots):
 ```sh
 cargo run --bin ioexplorer-shot
 cargo run --bin ioexplorer-shot -- all --no-copy -o /tmp/all.png
+cargo run --bin ioexplorer-shot -- record screen --mic
 ```
 
 The desktop runs as a long-lived process, one layer surface per output:
@@ -552,8 +554,8 @@ went. `--no-save`, `--no-copy` and `--no-notify` switch those off for one shot, 
 `-o PATH` writes to an exact path instead — `-o -` writes the PNG to stdout for piping,
 without copying or notifying.
 
-The exit status is 0 when a shot was taken, 1 when it was cancelled or failed, and 2 for
-invalid arguments, so a script can tell whether there is an image to use.
+The exit status is 0 when a shot or recording was saved, 1 when it was cancelled or
+failed, and 2 for invalid arguments, so a script can tell whether there is a file to use.
 
 It needs `grim` to capture the screen. `wl-clipboard` is recommended: without `wl-copy`
 the process has to stay alive in the background to serve the clipboard until something
@@ -607,11 +609,65 @@ disabling animations for the `ioexplorer-shot` namespace removes it entirely.
 directory = "~/Pictures/Screenshots"         # defaults to XDG_PICTURES_DIR/Screenshots
 file-name = "Screenshot_%Y-%m-%d_%H-%M-%S"   # strftime fields; .png is added
 save = true
-copy = true
-notify = true
+copy = true        # also applies to recordings
+notify = true      # also applies to recordings
+
+[shot.record]
+directory = "~/Videos/Recordings"            # defaults to XDG_VIDEOS_DIR/Recordings
+file-name = "Recording_%Y-%m-%d_%H-%M-%S"    # strftime fields; .mp4 is added
+audio = true         # what is playing
+microphone = false   # mixed in with the output audio
+codec = "libx264"    # any ffmpeg encoder; unset picks h264_nvenc on NVIDIA, else libx264
+framerate = 60       # 0 records only when the screen changes
+indicator = true
 ```
 
 A name that is already taken gets `-2`, `-3` and so on rather than being overwritten.
+
+### Recording
+
+The same tool records video, with sound:
+
+```sh
+ioexplorer-shot record            # select an area, a window or a screen, then record it
+ioexplorer-shot record window     # the focused window
+ioexplorer-shot record screen     # the focused screen
+ioexplorer-shot stop              # stop and save
+```
+
+**Running any `record` command again stops the recording**, so one key both starts and
+ends it; `stop` does the same, and never starts anything. While recording, a small
+indicator with the elapsed time and a Stop button sits in the corner of a screen that
+is not being recorded. With a single screen it only appears when that corner is outside
+the recorded area, since anything drawn there would be in the video.
+
+Recordings are saved to `~/Videos/Recordings` as MP4. The finished file is copied to the
+clipboard *as a file*, so pasting into a chat attaches it, and a notification gives its
+path and length. `-o` picks an exact path, and its extension picks the container
+(`.mp4`, `.mkv`, `.webm` with a matching codec).
+
+What is playing is recorded by default. `--mic` mixes your microphone in on the same
+track, `--no-mic` leaves it out when the config turns it on, and `--no-audio` drops
+output audio. Both sources are checked before recording starts: a microphone that
+delivers nothing is left out with a notification instead of stalling the recording.
+
+Things to know:
+
+- **All screens cannot be recorded.** The recorder captures one output at a time, so a
+  region is kept to the screen the drag starts on, and a window hanging over two screens
+  records the part on the screen holding most of it.
+- **A window recording does not follow the window.** It records the area the window
+  occupied when recording started.
+- **The encoder** defaults to `h264_nvenc` when the NVIDIA driver is loaded, which
+  encodes on the GPU, and `libx264` otherwise.
+- **The capture is written as a stream and converted when you stop.** A recording
+  interrupted by a crash or power loss leaves a `.part.ts` file beside where the video
+  would have been; it plays in most players and can be converted with
+  `ffmpeg -i name.part.ts -c copy name.mp4`.
+
+It needs `wf-recorder`, `ffmpeg`, and `pactl` (from `libpulse`, which works against
+PipeWire) for audio. Recording uses `wlr-screencopy`, which Hyprland, sway and other
+wlroots-based compositors provide.
 
 ## Symlinks
 

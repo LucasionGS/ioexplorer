@@ -12,6 +12,7 @@ mod compositor;
 mod deliver;
 mod geometry;
 mod overlay;
+mod record;
 mod tools;
 
 use std::{
@@ -30,13 +31,15 @@ use capture::FrozenOutput;
 use compositor::Scene;
 use deliver::Destination;
 use geometry::Rect;
-use overlay::{Finish, Overlay};
+use overlay::{Finish, Overlay, Purpose};
 use tools::Annotation;
 
 const APP_ID: &str = "io.github.ionix.IoExplorer.Shot";
 
 const USAGE: &str = "\
 Usage: ioexplorer-shot [MODE] [OPTIONS]
+       ioexplorer-shot record [region|window|screen] [OPTIONS]
+       ioexplorer-shot stop
 
 Modes:
   region    Freeze the screen and select an area, a window or a screen (default)
@@ -44,12 +47,21 @@ Modes:
   screen    Capture the focused screen
   all       Capture every screen, in their arranged layout
 
+Recording:
+  record [MODE]  Record video of an area, the focused window or the focused
+                 screen. Running any record command again, or `stop`, stops
+                 the recording and saves it. `all` cannot be recorded.
+  stop           Stop a recording in progress
+
 Options:
-  -o, --output PATH   Write the image to PATH instead of the screenshot folder
-                      (`-` writes it to stdout)
-      --no-save       Do not save a file
-      --no-copy       Do not copy the image to the clipboard
+  -o, --output PATH   Write to PATH instead of the screenshot or recording
+                      folder (`-` writes a screenshot to stdout)
+      --no-save       Do not save a screenshot file
+      --no-copy       Do not copy the result to the clipboard
       --no-notify     Do not show a notification
+      --mic           Record the microphone, mixed with the output audio
+      --no-mic        Do not record the microphone
+      --no-audio      Do not record output audio
   -h, --help          Show this help
 
 In region mode:
@@ -60,8 +72,8 @@ In region mode:
   Ctrl+Z           Undo the last pen stroke (Ctrl+Shift+Z redoes)
   Esc, right-click Cancel
 
-Exit status is 0 when a shot was taken, 1 when it was cancelled or failed,
-and 2 for invalid arguments.";
+Exit status is 0 when a shot or recording was saved, 1 when it was cancelled or
+failed, and 2 for invalid arguments.";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Mode {
@@ -72,13 +84,27 @@ pub enum Mode {
     All,
 }
 
+/// What the command line asks for.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum Action {
+    #[default]
+    Screenshot,
+    Record,
+    Stop,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 struct ShotArgs {
+    action: Action,
     mode: Mode,
     output: Option<PathBuf>,
     no_save: bool,
     no_copy: bool,
     no_notify: bool,
+    /// `Some` only when `--mic` or `--no-mic` was given, so the config decides
+    /// otherwise.
+    microphone: Option<bool>,
+    no_audio: bool,
     help: bool,
 }
 
@@ -86,6 +112,7 @@ impl ShotArgs {
     fn parse(args: impl IntoIterator<Item = String>) -> Result<Self, String> {
         let mut parsed = Self::default();
         let mut mode_seen = false;
+        let mut positionals = 0;
         let mut args = args.into_iter();
 
         while let Some(arg) = args.next() {
@@ -94,6 +121,9 @@ impl ShotArgs {
                 "--no-save" => parsed.no_save = true,
                 "--no-copy" => parsed.no_copy = true,
                 "--no-notify" => parsed.no_notify = true,
+                "--mic" => parsed.microphone = Some(true),
+                "--no-mic" => parsed.microphone = Some(false),
+                "--no-audio" => parsed.no_audio = true,
                 "-o" | "--output" => {
                     let path = args.next().ok_or_else(|| format!("{arg} needs a path"))?;
                     parsed.output = Some(PathBuf::from(path));
@@ -104,7 +134,19 @@ impl ShotArgs {
                 other if other.starts_with('-') && other != "-" => {
                     return Err(format!("unknown option: {other}"));
                 }
+                "record" if positionals == 0 => {
+                    positionals += 1;
+                    parsed.action = Action::Record;
+                }
+                "stop" if positionals == 0 => {
+                    positionals += 1;
+                    parsed.action = Action::Stop;
+                }
                 mode => {
+                    positionals += 1;
+                    if parsed.action == Action::Stop {
+                        return Err(format!("`stop` takes no mode: {mode}"));
+                    }
                     if mode_seen {
                         return Err(format!("more than one mode given: {mode}"));
                     }
@@ -120,7 +162,50 @@ impl ShotArgs {
             }
         }
 
+        parsed.validate()?;
         Ok(parsed)
+    }
+
+    /// Rejects combinations that would otherwise be silently ignored.
+    fn validate(&self) -> Result<(), String> {
+        let recording = matches!(self.action, Action::Record | Action::Stop);
+        if !recording && (self.microphone.is_some() || self.no_audio) {
+            return Err("--mic, --no-mic and --no-audio only apply to `record`".to_string());
+        }
+        if self.action == Action::Record {
+            if self.mode == Mode::All {
+                return Err(
+                    "all screens cannot be recorded at once; use `record screen` for one"
+                        .to_string(),
+                );
+            }
+            if self.no_save {
+                return Err("a recording is always saved; --no-save does not apply".to_string());
+            }
+            if let Some(output) = &self.output {
+                if output == std::path::Path::new("-") {
+                    return Err("a recording cannot be written to stdout".to_string());
+                }
+                if output.extension().is_none() {
+                    return Err(format!(
+                        "{} needs an extension such as .mp4 or .mkv, which picks the container",
+                        output.display()
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn record_options(&self) -> record::RecordOptions {
+        record::RecordOptions {
+            mode: (self.action == Action::Record).then_some(self.mode),
+            output: self.output.clone(),
+            audio: self.no_audio.then_some(false),
+            microphone: self.microphone,
+            copy: !self.no_copy,
+            notify: !self.no_notify,
+        }
     }
 
     fn destination(&self, config: &AppConfig) -> Destination {
@@ -156,6 +241,9 @@ pub fn run() -> glib::ExitCode {
     if args.help {
         println!("{USAGE}");
         return glib::ExitCode::SUCCESS;
+    }
+    if args.action != Action::Screenshot {
+        return record::run(args.record_options());
     }
 
     // Region mode stays unique, so a second press of the hotkey while the
@@ -275,7 +363,7 @@ fn open_overlay(
     // weakly, so something has to own it until it finishes.
     let keep: Rc<RefCell<Option<Rc<Overlay>>>> = Rc::new(RefCell::new(None));
     let frozen = outputs.clone();
-    let overlay = Overlay::open(app, display, outputs, scene, accent, {
+    let overlay = Overlay::open(app, display, outputs, scene, accent, Purpose::Screenshot, {
         let app = app.clone();
         let exit_code = Rc::clone(exit_code);
         let keep = Rc::clone(&keep);
@@ -395,6 +483,47 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<ShotArgs, String> {
         ShotArgs::parse(args.iter().map(|arg| arg.to_string()))
+    }
+
+    #[test]
+    fn record_takes_a_mode_and_audio_flags() {
+        let args = parse(&["record", "window", "--mic", "--no-copy"]).unwrap();
+        assert_eq!(args.action, Action::Record);
+        assert_eq!(args.mode, Mode::Window);
+
+        let options = args.record_options();
+        assert_eq!(options.mode, Some(Mode::Window));
+        assert_eq!(options.microphone, Some(true));
+        assert_eq!(options.audio, None, "left to the config");
+        assert!(!options.copy);
+
+        let region = parse(&["record", "--no-audio"]).unwrap();
+        assert_eq!(region.mode, Mode::Region);
+        assert_eq!(region.record_options().audio, Some(false));
+    }
+
+    #[test]
+    fn stop_reaches_only_a_running_recording() {
+        let args = parse(&["stop"]).unwrap();
+        assert_eq!(args.action, Action::Stop);
+        assert_eq!(args.record_options().mode, None);
+        assert!(parse(&["stop", "window"]).is_err());
+    }
+
+    #[test]
+    fn recording_rejects_what_it_cannot_do() {
+        assert!(parse(&["record", "all"]).is_err());
+        assert!(parse(&["record", "-o", "-"]).is_err());
+        assert!(parse(&["record", "-o", "/tmp/clip"]).is_err());
+        assert!(parse(&["record", "--no-save"]).is_err());
+        assert!(parse(&["window", "--mic"]).is_err());
+        assert!(parse(&["record", "-o", "/tmp/clip.mkv"]).is_ok());
+    }
+
+    #[test]
+    fn record_is_only_a_command_in_first_position() {
+        assert!(parse(&["window", "record"]).is_err());
+        assert!(parse(&["record", "record"]).is_err());
     }
 
     #[test]
