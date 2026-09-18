@@ -31,6 +31,9 @@ sudo pacman -S rust gtk4 gtk4-layer-shell glib2 pkgconf desktop-file-utils appst
 `ioexplorer-shot` additionally uses `grim`, `wl-clipboard` and `libnotify` at runtime, and
 `wf-recorder`, `ffmpeg` and `libpulse` for recording.
 
+`ioexplorer-quick` types with `wtype` and copies with `wl-clipboard` when they are
+installed.
+
 ## Build And Run
 
 ```sh
@@ -75,6 +78,13 @@ The screenshot tool is a one-shot binary, see [Screenshots](#screenshots):
 cargo run --bin ioexplorer-shot
 cargo run --bin ioexplorer-shot -- all --no-copy -o /tmp/all.png
 cargo run --bin ioexplorer-shot -- record screen --mic
+```
+
+The quick menu is a one-shot binary too, see [Quick menu](#quick-menu):
+
+```sh
+cargo run --bin ioexplorer-quick
+cargo run --bin ioexplorer-quick -- --tab emoji --insert copy
 ```
 
 The desktop runs as a long-lived process, one layer surface per output:
@@ -668,6 +678,93 @@ Things to know:
 It needs `wf-recorder`, `ffmpeg`, and `pactl` (from `libpulse`, which works against
 PipeWire) for audio. Recording uses `wlr-screencopy`, which Hyprland, sway and other
 wlroots-based compositors provide.
+
+## Quick menu
+
+`ioexplorer-quick` is a small picker for symbols, emoji and your saved GIFs that opens
+at the pointer, like Windows' Win+. panel. Bind it to a key in your compositor:
+
+```ini
+# ~/.config/hypr/hyprland.conf
+bind = SUPER, period, exec, ioexplorer-quick
+```
+
+It opens on the **Symbols** tab: punctuation and typography, currency, maths, arrows,
+accented Latin, Greek, shapes, box drawing, technical keys and assorted symbols. The
+**Emoji** tab holds every emoji in Unicode's groups, with a skin-tone button in the
+footer that stays set. Each tab starts on *Recently used* once something has been
+picked there.
+
+Typing searches the tab you are on. Emoji match by name and by CLDR keyword, so `lol`
+finds 😂. Symbols match by name across the whole of Unicode, with the curated
+categories ranked first; a code point also works, as `U+2192`, `2192` or the character
+itself. Characters your fonts cannot draw are left out.
+
+| Key                     | Action                                                   |
+| ----------------------- | -------------------------------------------------------- |
+| Arrows                  | Move through the grid                                    |
+| Enter, click            | Insert and close                                         |
+| Shift+Enter, Shift+click | Queue and keep the menu open                            |
+| Backspace               | With the search empty, remove the last queued pick       |
+| Tab, Shift+Tab          | Next / previous tab                                      |
+| Page Up / Page Down     | Previous / next category                                 |
+| Esc                     | Clear the search, then close                             |
+
+### GIFs
+
+The **GIF** tab shows the GIFs and images you have saved, playing, most recently used
+first. It cannot search the web. Instead, copy a GIF anywhere, open the tab, and it
+offers to save it with tags: "Copy image" in a browser, a copied Tenor or Giphy link,
+a link straight to an image, or an image file copied in a file manager all work.
+Because Chromium's "Copy image" puts only a still frame on the clipboard, the menu
+follows the copied link and downloads the original instead. PNG, JPEG and WebP images
+can be saved the same way.
+
+Typing searches tags and file names. F2, or the pencil in the footer, edits the tags of
+the selected GIF. Delete, or the bin, moves it to the trash.
+
+Picking a GIF that was saved from a link inserts that link: Discord and most chat apps
+show it animated. A GIF or image without a link goes on the clipboard as the image, as
+a PNG for apps that only accept PNG, and as the file, then gets pasted with Ctrl+V.
+Chromium-based apps only take the PNG, which is a still frame. Set
+`gif-prefer-link = false` to always paste the image. Every format is offered for a
+few seconds, which covers the paste. After that the image is handed to `wl-copy` as a
+PNG, so it stays on the clipboard after the menu exits.
+
+Saved GIFs live in `~/Pictures/GIFs`. Their tags and links are kept in
+`.ioexplorer-gifs.toml` in the same folder. Images you put in that folder yourself
+show up too, untagged.
+
+### Closing
+
+Clicking outside the menu, or running the command again, closes it. Anything queued
+is inserted on close.
+
+A pick is typed into the window you were in and also put on the clipboard. Typing
+uses `wtype`. Without it, the text is pasted with Ctrl+V through `ydotool`, which works
+in most applications but not in terminals. With neither, the pick is only copied, and
+a notification says so. `--insert type|copy|both` overrides the config for one run,
+and `--tab symbols|emoji|gif` picks the tab it opens on.
+
+The menu opens beside the pointer on Hyprland. Other compositors do not tell clients
+where the pointer is, so there it opens in the middle of the focused screen.
+
+### Settings
+
+```toml
+[quick]
+insert = "both"          # type, copy or both
+default-tab = "symbols"  # symbols, emoji or gif
+recent-limit = 40        # per tab; 0 turns the Recently used category off
+gif-directory = "~/Pictures/GIFs"   # defaults to XDG_PICTURES_DIR/GIFs
+gif-prefer-link = true   # insert a GIF saved from a link as that link
+```
+
+Recent picks and the skin tone are kept in `~/.local/state/ioexplorer/quick.toml`.
+
+The character tables live in `data/quick/` and are embedded in the binary. Run
+`python3 data/quick/generate.py` to rebuild them from the current Unicode and CLDR
+releases.
 
 ## Symlinks
 

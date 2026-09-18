@@ -2,6 +2,7 @@ pub mod app;
 pub mod desktop;
 pub mod file_manager;
 pub mod portal;
+pub mod quick;
 pub mod shot;
 pub mod spotlight;
 pub mod start_menu;

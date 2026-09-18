@@ -1088,3 +1088,174 @@ window {
 .shot-indicator button:hover {
   background: rgb(239, 68, 68);
 }
+
+/* ioexplorer-quick: the symbol and emoji menu that opens at the pointer. The
+   surface itself is kept transparent in code; only the card is painted. */
+.quick-card {
+  padding: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 14px;
+  background: rgba(13, 15, 20, 0.94);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.4);
+}
+
+.quick-tab {
+  min-height: 28px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  box-shadow: none;
+  font-weight: 600;
+}
+
+.quick-tab:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.quick-tab:checked {
+  background: rgba(82, 145, 238, 0.3);
+}
+
+.quick-entry {
+  min-height: 34px;
+  border-radius: 8px;
+}
+
+.quick-category {
+  min-width: 0;
+  min-height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  box-shadow: none;
+  font-size: 1.1em;
+  opacity: 0.7;
+}
+
+.quick-category:hover {
+  background: rgba(255, 255, 255, 0.08);
+  opacity: 1;
+}
+
+.quick-category:checked {
+  background: rgba(82, 145, 238, 0.24);
+  box-shadow: inset 0 -2px rgb(82, 145, 238);
+  opacity: 1;
+}
+
+.quick-section {
+  padding: 0 4px;
+  font-size: 0.86em;
+  font-weight: 700;
+}
+
+.quick-scroll,
+.quick-scroll > viewport,
+.quick-grid {
+  background: transparent;
+}
+
+.quick-grid > child {
+  padding: 0;
+  margin: 1px;
+  border-radius: 8px;
+}
+
+.quick-grid > child:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.quick-grid > child:selected {
+  background: rgba(67, 123, 214, 0.4);
+}
+
+.quick-cell {
+  min-height: 40px;
+  font-size: 22px;
+}
+
+.quick-footer {
+  padding: 6px 4px 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.quick-preview {
+  font-size: 26px;
+}
+
+.quick-name {
+  font-weight: 600;
+}
+
+.quick-queue {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(82, 145, 238, 0.24);
+}
+
+.quick-tone {
+  min-width: 34px;
+  min-height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  box-shadow: none;
+  font-size: 1.2em;
+}
+
+.quick-tone:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+/* The GIF tab: a grid of playing thumbnails, the offer to save what is on the
+   clipboard, and tag editing in the footer. */
+.quick-gif {
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.28);
+}
+
+.quick-grid > child:selected .quick-gif {
+  background: transparent;
+}
+
+.quick-banner {
+  padding: 8px;
+  border-radius: 10px;
+  border: 1px solid rgba(82, 145, 238, 0.4);
+  background: rgba(82, 145, 238, 0.12);
+}
+
+.quick-banner-picture {
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.28);
+}
+
+.quick-banner-title {
+  font-weight: 700;
+}
+
+.quick-banner-detail {
+  font-size: 0.86em;
+}
+
+.quick-tag-entry {
+  min-height: 30px;
+  border-radius: 8px;
+}
+
+.quick-save {
+  min-height: 30px;
+  padding: 0 14px;
+  border-radius: 8px;
+  font-weight: 700;
+}
+
+.quick-icon-button {
+  min-width: 30px;
+  min-height: 30px;
+  padding: 0;
+  border-radius: 8px;
+}

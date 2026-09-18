@@ -749,6 +749,87 @@ fn expand_home(path: &Path, user_dirs: Option<&directories::UserDirs>) -> PathBu
     }
 }
 
+/// Settings for `ioexplorer-quick`.
+#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct QuickConfig {
+    /// What picking a character does.
+    #[serde(default)]
+    pub insert: QuickInsert,
+    /// The tab the menu opens on.
+    #[serde(default)]
+    pub default_tab: QuickTab,
+    /// How many recently used characters each tab remembers. `0` turns the
+    /// Recent category off and forgets nothing new.
+    #[serde(default = "default_quick_recent_limit")]
+    pub recent_limit: usize,
+    /// Where the GIF tab keeps saved GIFs and images. Defaults to `GIFs`
+    /// inside `XDG_PICTURES_DIR`, then `~/Pictures/GIFs`. A leading `~/` is
+    /// expanded.
+    #[serde(default)]
+    pub gif_directory: Option<PathBuf>,
+    /// Insert a saved GIF as the link it was saved from, when there is one,
+    /// rather than as the image. Chat apps embed the link animated, where a
+    /// pasted GIF often arrives as a still frame.
+    #[serde(default = "default_true")]
+    pub gif_prefer_link: bool,
+}
+
+fn default_quick_recent_limit() -> usize {
+    40
+}
+
+impl Default for QuickConfig {
+    fn default() -> Self {
+        Self {
+            insert: QuickInsert::default(),
+            default_tab: QuickTab::default(),
+            recent_limit: default_quick_recent_limit(),
+            gif_directory: None,
+            gif_prefer_link: true,
+        }
+    }
+}
+
+impl QuickConfig {
+    pub fn gif_directory_path(&self) -> PathBuf {
+        let user_dirs = directories::UserDirs::new();
+        if let Some(directory) = &self.gif_directory {
+            return expand_home(directory, user_dirs.as_ref());
+        }
+        match &user_dirs {
+            Some(dirs) => dirs
+                .picture_dir()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| dirs.home_dir().join("Pictures"))
+                .join("GIFs"),
+            None => PathBuf::from("GIFs"),
+        }
+    }
+}
+
+/// How a picked character reaches the application that had focus.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum QuickInsert {
+    /// Typed into the focused window.
+    Type,
+    /// Put on the clipboard only.
+    Copy,
+    /// Typed, and put on the clipboard as well.
+    #[default]
+    Both,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum QuickTab {
+    #[default]
+    Symbols,
+    Emoji,
+    Gif,
+}
+
 // Hand-written for the same reason as `DesktopConfig`: a derived `Default`
 // would save nowhere, copy nothing and name every file "".
 impl Default for ShotConfig {
@@ -803,6 +884,8 @@ pub struct AppConfig {
     pub desktop: DesktopConfig,
     #[serde(default)]
     pub shot: ShotConfig,
+    #[serde(default)]
+    pub quick: QuickConfig,
 }
 
 impl Default for AppConfig {
@@ -824,6 +907,7 @@ impl Default for AppConfig {
             spotlight: SpotlightConfig::default(),
             desktop: DesktopConfig::default(),
             shot: ShotConfig::default(),
+            quick: QuickConfig::default(),
         }
     }
 }
@@ -1889,5 +1973,35 @@ folders_first = true
             ..RecordConfig::default()
         };
         assert_eq!(recordings.directory_path(), dirs.home_dir().join("Clips"));
+    }
+
+    #[test]
+    fn quick_section_defaults_when_absent_and_parses() {
+        let config: AppConfig = toml::from_str(
+            "default_view = \"icon\"\nshow_hidden = false\nicon_size = 128\nsidebar_width = 220\n\
+             [list_columns]\nsize = true\nkind = true\nmodified = true\n",
+        )
+        .expect("valid config");
+        assert_eq!(config.quick, QuickConfig::default());
+        assert_eq!(config.quick.insert, QuickInsert::Both);
+        assert_eq!(config.quick.default_tab, QuickTab::Symbols);
+
+        let quick: QuickConfig =
+            toml::from_str("insert = \"copy\"\ndefault-tab = \"emoji\"\nrecent-limit = 0\n")
+                .expect("valid quick config");
+        assert_eq!(quick.insert, QuickInsert::Copy);
+        assert_eq!(quick.default_tab, QuickTab::Emoji);
+        assert_eq!(quick.recent_limit, 0);
+        assert!(quick.gif_prefer_link);
+        assert!(
+            QuickConfig::default()
+                .gif_directory_path()
+                .ends_with("GIFs")
+        );
+
+        let gif: QuickConfig = toml::from_str("default-tab = \"gif\"\ngif-prefer-link = false\n")
+            .expect("valid quick config");
+        assert_eq!(gif.default_tab, QuickTab::Gif);
+        assert!(!gif.gif_prefer_link);
     }
 }

@@ -165,7 +165,7 @@ fn copy_with_wl_copy(png: &[u8]) -> Result<(), String> {
     wl_copy("image/png", png)
 }
 
-fn wl_copy(mime_type: &str, contents: &[u8]) -> Result<(), String> {
+pub(crate) fn wl_copy(mime_type: &str, contents: &[u8]) -> Result<(), String> {
     let mut child = Command::new("wl-copy")
         .args(["--type", mime_type])
         .stdin(Stdio::piped())

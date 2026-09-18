@@ -9,7 +9,7 @@
 mod canvas;
 mod capture;
 mod compositor;
-mod deliver;
+pub(crate) mod deliver;
 mod geometry;
 mod overlay;
 mod record;
