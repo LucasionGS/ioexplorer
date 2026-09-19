@@ -130,12 +130,6 @@ pub struct QuickMenu {
     queued: RefCell<Vec<String>>,
     /// A saved image that was put on the clipboard.
     picked_image: RefCell<Option<PathBuf>>,
-    /// Whether each text renders with the installed fonts, rather than as a
-    /// box with its code point in.
-    renders: RefCell<HashMap<String, bool>>,
-    /// The oldest emoji version the fonts cannot draw; `None` when they draw
-    /// them all. Worked out when the Emoji tab is first shown.
-    emoji_limit: Cell<Option<Option<(u8, u8)>>>,
 
     library: RefCell<Library>,
     /// The GIF tab's grid, in the order shown.
@@ -155,7 +149,7 @@ pub struct QuickMenu {
     clips: RefCell<Vec<Clip>>,
     /// Watches the history, so a copy made while the menu is open shows up.
     history_monitor: RefCell<Option<gio::FileMonitor>>,
-    /// Whether `--watch-clipboard` is running; looked up once per menu.
+    /// Whether a server records the clipboard; looked up once per menu.
     recording: Cell<Option<bool>>,
 
     /// Suppresses the handlers that react to the widgets being set from code.
@@ -435,8 +429,6 @@ impl QuickMenu {
             category: Cell::new(Category::Recent),
             queued: RefCell::new(Vec::new()),
             picked_image: RefCell::new(None),
-            renders: RefCell::new(HashMap::new()),
-            emoji_limit: Cell::new(None),
             library: RefCell::new(library),
             gifs: RefCell::new(Vec::new()),
             thumbs,
@@ -1100,7 +1092,7 @@ impl QuickMenu {
             (false, true) => "No copied text like that".to_string(),
             (false, false) => format!("Copied text with “{query}”"),
             (true, true) if !recording => {
-                "Copies are not being recorded. Run ioexplorer-quick --watch-clipboard with the session to keep them here."
+                "Copies are not being recorded. Run ioexplorer-quick --server with the session to keep them here."
                     .to_string()
             }
             (true, true) => "Nothing copied yet".to_string(),
@@ -1331,36 +1323,12 @@ impl QuickMenu {
         self.tone_button.set_label(TONE_SAMPLES[tone]);
     }
 
-    /// Whether `text` draws with the installed fonts. Symbols come from all of
-    /// Unicode, and a grid of boxes with code points in them helps nobody.
     fn renders(&self, text: &str) -> bool {
-        if let Some(known) = self.renders.borrow().get(text) {
-            return *known;
-        }
-        let layout = self.window.create_pango_layout(Some(text));
-        let renders = layout.unknown_glyphs_count() == 0;
-        self.renders.borrow_mut().insert(text.to_string(), renders);
-        renders
+        text_renders(text)
     }
 
-    /// The oldest emoji version the fonts cannot draw. Judged by the versions'
-    /// lone code points, which a font either has or draws as a box; sequences
-    /// cannot be judged that way, but arrive together with those.
     fn emoji_limit(&self) -> Option<(u8, u8)> {
-        if let Some(limit) = self.emoji_limit.get() {
-            return limit;
-        }
-        let limit = data::emoji()
-            .versions()
-            .into_iter()
-            .filter(|(version, _)| *version > TRUSTED_EMOJI_VERSION)
-            .find(|(_, members)| members.iter().any(|emoji| !self.renders(emoji.glyph)))
-            .map(|(version, _)| version);
-        if let Some(version) = limit {
-            tracing::debug!(?version, "the installed fonts stop at this emoji version");
-        }
-        self.emoji_limit.set(Some(limit));
-        limit
+        fonts_emoji_limit()
     }
 
     // -- GIFs ----------------------------------------------------------------
@@ -2154,10 +2122,105 @@ pub fn screens(monitors: &[gdk::Monitor]) -> Vec<Screen> {
         .collect()
 }
 
+thread_local! {
+    /// Whether each text draws with the installed fonts, rather than as a box
+    /// with its code point in. Kept for the life of the process, which for a
+    /// server is every menu it opens.
+    static RENDERS: RefCell<HashMap<String, bool>> = RefCell::new(HashMap::new());
+    /// The oldest emoji version the fonts cannot draw; `None` inside when they
+    /// draw them all, and `None` outside until it is worked out.
+    static EMOJI_LIMIT: Cell<Option<Option<(u8, u8)>>> = const { Cell::new(None) };
+    /// Lays out the texts [`text_renders`] judges.
+    static MEASURE: gtk::Label = gtk::Label::new(None);
+    static TRANSPARENT: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether `text` draws with the installed fonts. Symbols come from all of
+/// Unicode, and a grid of boxes with code points in them helps nobody.
+fn text_renders(text: &str) -> bool {
+    if let Some(known) = RENDERS.with_borrow(|renders| renders.get(text).copied()) {
+        return known;
+    }
+    let renders =
+        MEASURE.with(|label| label.create_pango_layout(Some(text)).unknown_glyphs_count() == 0);
+    RENDERS.with_borrow_mut(|known| known.insert(text.to_string(), renders));
+    renders
+}
+
+/// The oldest emoji version the fonts cannot draw. Judged by the versions'
+/// lone code points, which a font either has or draws as a box; sequences
+/// cannot be judged that way, but arrive together with those.
+fn fonts_emoji_limit() -> Option<(u8, u8)> {
+    if let Some(limit) = EMOJI_LIMIT.get() {
+        return limit;
+    }
+    let limit = data::emoji()
+        .versions()
+        .into_iter()
+        .filter(|(version, _)| *version > TRUSTED_EMOJI_VERSION)
+        .find(|(_, members)| members.iter().any(|emoji| !text_renders(emoji.glyph)))
+        .map(|(version, _)| version);
+    if let Some(version) = limit {
+        tracing::debug!(?version, "the installed fonts stop at this emoji version");
+    }
+    EMOJI_LIMIT.set(Some(limit));
+    limit
+}
+
+/// Does ahead of time what the first menu would otherwise do as it opens:
+/// reads the character tables, checks which the fonts can draw, and draws
+/// once, which starts the renderer and loads the fonts. For a server, before
+/// anyone is waiting.
+pub fn warm_up() {
+    data::unicode();
+    fonts_emoji_limit();
+    for category in SYMBOL_CATEGORIES {
+        for item in category.items() {
+            text_renders(&item.text);
+        }
+    }
+    if !gtk4_layer_shell::is_supported() {
+        return;
+    }
+
+    // A pixel in a corner, below every window, that takes no keys: nothing
+    // anyone can see or type into, gone after its first frame.
+    install_transparency();
+    let sample = gtk::Label::builder()
+        .label("→ ★ € ∑ 😀 👍🏽")
+        .css_classes(["quick-cell"])
+        .build();
+    let window = gtk::Window::builder()
+        .css_classes(["quick-window"])
+        .decorated(false)
+        .default_width(1)
+        .default_height(1)
+        .child(&sample)
+        .build();
+    window.init_layer_shell();
+    window.set_namespace(Some("ioexplorer-quick-warm-up"));
+    window.set_layer(Layer::Background);
+    window.set_keyboard_mode(KeyboardMode::None);
+    window.set_anchor(Edge::Top, true);
+    window.set_anchor(Edge::Left, true);
+    window.set_opacity(0.0);
+    window.connect_map(|window| {
+        let window = window.clone();
+        glib::timeout_add_local_once(std::time::Duration::from_millis(300), move || {
+            window.destroy();
+        });
+    });
+    window.present();
+}
+
 /// The surface covers the whole output, so it must stay see-through whatever
 /// a theme does to `window`. Like the desktop surface it keeps the faintest
-/// tint, so a click beside the card reaches it and closes the menu.
+/// tint, so a click beside the card reaches it and closes the menu. Once per
+/// process: a server opens many menus.
 fn install_transparency() {
+    if TRANSPARENT.replace(true) {
+        return;
+    }
     let Some(display) = gdk::Display::default() else {
         return;
     };

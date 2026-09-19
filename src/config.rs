@@ -774,7 +774,7 @@ pub struct QuickConfig {
     #[serde(default = "default_true")]
     pub gif_prefer_link: bool,
     /// How many copies the Clipboard tab keeps, pinned ones aside. Recorded
-    /// by `ioexplorer-quick --watch-clipboard`.
+    /// by `ioexplorer-quick --server`.
     #[serde(default = "default_quick_clipboard_limit")]
     pub clipboard_limit: usize,
 }

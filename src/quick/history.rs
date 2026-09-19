@@ -1,11 +1,11 @@
 //! The clipboard history behind the Clipboard tab.
 //!
 //! Wayland hands the clipboard only to the focused window, so the menu cannot
-//! follow it from one opening to the next. `ioexplorer-quick
-//! --watch-clipboard` runs `wl-paste --watch`, which reads it through the
-//! compositor's data-control protocol and starts `ioexplorer-quick
-//! --record-clipboard` for every copy; that records the copy here. The menu
-//! only reads what was recorded.
+//! follow it from one opening to the next. `ioexplorer-quick --server` runs
+//! `wl-paste --watch` beside it, which reads it through the compositor's
+//! data-control protocol and starts `ioexplorer-quick --record-clipboard` for
+//! every copy; that records the copy here. The menu only reads what was
+//! recorded.
 //!
 //! Texts live in the index; images are files beside it. Pinned entries stay
 //! until unpinned; the rest are dropped oldest first beyond the limit.
@@ -14,7 +14,7 @@ use std::{
     fs, io,
     io::Read,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -309,39 +309,64 @@ fn take_own_copy(directory: &Path) -> bool {
         .is_ok_and(|marked| now_millis().saturating_sub(marked) < OWN_COPY_WINDOW.as_millis())
 }
 
-/// Whether a `--watch-clipboard` is recording, judged by its `wl-paste`.
+/// Whether a server's watcher is recording, judged by its `wl-paste`.
 pub fn watcher_running() -> bool {
-    let Ok(processes) = fs::read_dir("/proc") else {
-        return true;
-    };
-    processes.flatten().any(|process| {
-        fs::read(process.path().join("cmdline")).is_ok_and(|cmdline| {
-            let args: Vec<&[u8]> = cmdline.split(|byte| *byte == 0).collect();
-            args.iter().any(|arg| *arg == b"--record-clipboard")
-                && args.iter().any(|arg| arg.ends_with(b"ioexplorer-quick"))
-        })
-    })
+    !watcher_pids().is_empty() || !Path::new("/proc").is_dir()
 }
 
-/// `--watch-clipboard`: becomes `wl-paste --watch`, recording every copy
-/// until the session ends. Only returns when that cannot start, with why.
-pub fn watch() -> String {
-    use std::os::unix::process::CommandExt;
-
-    let exe = match std::env::current_exe() {
-        Ok(exe) => exe,
-        Err(error) => return format!("cannot find this program: {error}"),
+/// Every `wl-paste --watch … ioexplorer-quick --record-clipboard`.
+fn watcher_pids() -> Vec<u32> {
+    let Ok(processes) = fs::read_dir("/proc") else {
+        return Vec::new();
     };
-    // Its output is never used, and must not be a file: wl-paste picks the
-    // type to ask for from a file's name, and would then call every copy
-    // that is not text empty.
-    let error = Command::new("wl-paste")
-        .arg("--watch")
-        .arg(exe)
-        .arg("--record-clipboard")
-        .stdout(Stdio::null())
-        .exec();
-    format!("cannot run wl-paste --watch: {error}")
+    processes
+        .flatten()
+        .filter_map(|process| {
+            let pid: u32 = process.file_name().to_str()?.parse().ok()?;
+            let cmdline = fs::read(process.path().join("cmdline")).ok()?;
+            let args: Vec<&[u8]> = cmdline.split(|byte| *byte == 0).collect();
+            let watcher = args.iter().any(|arg| *arg == b"--record-clipboard")
+                && args.iter().any(|arg| arg.ends_with(b"ioexplorer-quick"));
+            watcher.then_some(pid)
+        })
+        .collect()
+}
+
+/// The server's `wl-paste --watch`, stopped when this is dropped.
+pub struct Watcher {
+    child: Child,
+}
+
+impl Watcher {
+    /// Starts recording copies. A watcher left behind by a server that did
+    /// not stop cleanly is stopped first, so no copy is recorded twice.
+    pub fn start() -> Result<Self, String> {
+        for pid in watcher_pids() {
+            tracing::info!(pid, "stopping a clipboard watcher left behind");
+            let _ = Command::new("kill").arg(pid.to_string()).status();
+        }
+        let exe = std::env::current_exe()
+            .map_err(|error| format!("cannot find this program: {error}"))?;
+        // Its output is never used, and must not be a file: wl-paste picks
+        // the type to ask for from a file's name, and would then call every
+        // copy that is not text empty.
+        let child = Command::new("wl-paste")
+            .arg("--watch")
+            .arg(exe)
+            .arg("--record-clipboard")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .spawn()
+            .map_err(|error| format!("cannot run wl-paste --watch: {error}"))?;
+        Ok(Self { child })
+    }
+}
+
+impl Drop for Watcher {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 /// `--record-clipboard`: run by `wl-paste --watch` for one copy.

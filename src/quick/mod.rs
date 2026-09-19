@@ -1,11 +1,17 @@
-//! `ioexplorer-quick`: a quick menu at the pointer for symbols, emoji and
-//! saved GIFs, in the spirit of Windows' Win+. panel.
+//! `ioexplorer-quick`: a quick menu at the pointer for symbols, emoji, saved
+//! GIFs and the clipboard history, in the spirit of Windows' Win+. panel.
 //!
 //! The menu opens beside the pointer on the Symbols tab (or the configured
 //! one). Picking a character closes it and types the character into the window
 //! that had focus, puts it on the clipboard, or both. A saved GIF goes in the
-//! same way as the link it was saved from, or else is pasted as the image. Running the command again
-//! while the menu is open closes it, so one key both opens and dismisses it.
+//! same way as the link it was saved from, or else is pasted as the image.
+//! Running the command again while the menu is open closes it, so one key both
+//! opens and dismisses it.
+//!
+//! `--server` keeps it running: GTK, the stylesheets and the character tables
+//! stay loaded, so the menu opens at once, and the clipboard is recorded for
+//! the Clipboard tab. The command then only asks the server over its socket,
+//! and falls back to opening the menu itself when no server is listening.
 
 mod data;
 mod gifs;
@@ -17,15 +23,17 @@ mod window;
 
 use std::{
     cell::{Cell, RefCell},
+    fs,
     path::PathBuf,
     rc::Rc,
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use gtk::{gdk, gio, glib, prelude::*};
 
 use crate::{
     config::{AppConfig, QuickInsert, QuickTab},
+    launcher::toggle::{self, ToggleMessage},
     shot::deliver::wl_copy,
     theme,
 };
@@ -33,6 +41,11 @@ use crate::{
 use window::{Picked, QuickMenu};
 
 const APP_ID: &str = "io.github.ionix.IoExplorer.Quick";
+const QUICK_SOCKET: &str = "quick.sock";
+const QUICK_SOCKET_FALLBACK: &str = "ioexplorer-quick.sock";
+
+const SIGINT: i32 = 2;
+const SIGTERM: i32 = 15;
 
 /// How long to wait after the menu closes before typing, so the compositor
 /// has handed keyboard focus back to the window the text is for.
@@ -54,9 +67,9 @@ Options:
                        (default: the config's default-tab, or symbols)
   -i, --insert MODE    What picking does: type, copy, or both (default: the
                        config's insert, or both)
-      --watch-clipboard
-                       Record every copy for the Clipboard tab, until the
-                       session ends; start it with the session
+      --server         Stay running, so the menu opens at once, and record
+                       every copy for the Clipboard tab; start it with the
+                       session. The command then hands over to it.
   -h, --help           Show this help
 
 In the menu:
@@ -78,20 +91,21 @@ In the GIF tab:
   A GIF or image on the clipboard is offered for saving, with tags:
   Ctrl+S               Go to the offer's tags; Enter or Ctrl+S there saves
 
-In the Clipboard tab, which needs --watch-clipboard running:
+In the Clipboard tab, which needs --server running:
   Type                 Search copied text
   Ctrl+D, right-click  Pin, or unpin; pinned copies stay and come first
   Delete               Forget the selected copy
 
 Exit status is 0 when something was inserted, 1 when the menu was closed
-without a pick, and 2 for invalid arguments.";
+without a pick, and 2 for invalid arguments. With a server running, the
+command hands over and exits with 0 at once.";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct QuickArgs {
     tab: Option<QuickTab>,
     insert: Option<QuickInsert>,
     help: bool,
-    watch_clipboard: bool,
+    server: bool,
     record_clipboard: bool,
 }
 
@@ -114,7 +128,7 @@ impl QuickArgs {
             };
             match flag.as_str() {
                 "-h" | "--help" => parsed.help = true,
-                "--watch-clipboard" => parsed.watch_clipboard = true,
+                "--server" => parsed.server = true,
                 "--record-clipboard" => parsed.record_clipboard = true,
                 "-t" | "--tab" => parsed.tab = Some(parse_tab(&value(&flag)?)?),
                 "-i" | "--insert" => parsed.insert = Some(parse_insert(&value(&flag)?)?),
@@ -122,6 +136,45 @@ impl QuickArgs {
             }
         }
         Ok(parsed)
+    }
+}
+
+/// What a server is asked for: a menu, on these terms, or closing the open
+/// one. One line: `open TAB INSERT`, with `-` for the config's choice.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct OpenRequest {
+    tab: Option<QuickTab>,
+    insert: Option<QuickInsert>,
+}
+
+impl ToggleMessage for OpenRequest {
+    fn serialize(&self) -> String {
+        let tab = self.tab.map_or("-", |tab| match tab {
+            QuickTab::Symbols => "symbols",
+            QuickTab::Emoji => "emoji",
+            QuickTab::Gif => "gif",
+            QuickTab::Clipboard => "clipboard",
+        });
+        let insert = self.insert.map_or("-", |insert| match insert {
+            QuickInsert::Type => "type",
+            QuickInsert::Copy => "copy",
+            QuickInsert::Both => "both",
+        });
+        format!("open {tab} {insert}\n")
+    }
+
+    fn parse(text: &str) -> Option<Self> {
+        let mut parts = text.split_whitespace();
+        (parts.next()? == "open").then_some(())?;
+        let tab = match parts.next()? {
+            "-" => None,
+            tab => Some(parse_tab(tab).ok()?),
+        };
+        let insert = match parts.next()? {
+            "-" => None,
+            insert => Some(parse_insert(insert).ok()?),
+        };
+        parts.next().is_none().then_some(Self { tab, insert })
     }
 }
 
@@ -158,11 +211,6 @@ pub fn run() -> glib::ExitCode {
         println!("{USAGE}");
         return glib::ExitCode::SUCCESS;
     }
-    if args.watch_clipboard {
-        // Only returns when wl-paste cannot run.
-        eprintln!("ioexplorer-quick: {}", history::watch());
-        return glib::ExitCode::FAILURE;
-    }
     if args.record_clipboard {
         let limit = AppConfig::load().quick.clipboard_limit;
         return match history::record(limit) {
@@ -174,9 +222,22 @@ pub fn run() -> glib::ExitCode {
         };
     }
 
-    // Unique: a second launch reaches this one's `activate`, which closes the
-    // menu, so the hotkey toggles it. When the process is only still here to
-    // serve the clipboard, the second launch opens a new menu in it instead.
+    if args.server {
+        return run_server();
+    }
+
+    let request = OpenRequest {
+        tab: args.tab,
+        insert: args.insert,
+    };
+    if toggle::send(QUICK_SOCKET, QUICK_SOCKET_FALLBACK, &request).is_ok() {
+        return glib::ExitCode::SUCCESS;
+    }
+
+    // No server: this process opens the menu. Unique: a second launch reaches
+    // this one's `activate`, which closes the menu, so the hotkey toggles it.
+    // When the process is only still here to serve the clipboard, the second
+    // launch opens a new menu in it instead.
     let app = gtk::Application::builder()
         .application_id(APP_ID)
         .flags(gio::ApplicationFlags::empty())
@@ -192,7 +253,7 @@ pub fn run() -> glib::ExitCode {
             let open = menu.borrow().clone();
             match open {
                 Some(open) => open.close(),
-                None => start(app, args, &exit_code, &menu),
+                None => start(app, request, &exit_code, &menu, None),
             }
         }
     });
@@ -205,11 +266,119 @@ pub fn run() -> glib::ExitCode {
     }
 }
 
+/// What a server keeps between menus.
+struct Server {
+    user_css: Option<theme::UserCss>,
+    /// The user's stylesheet and when it last changed, as last loaded.
+    css_loaded: RefCell<Option<(PathBuf, Option<SystemTime>)>>,
+    watcher: RefCell<Option<history::Watcher>>,
+}
+
+impl Server {
+    /// Rereads the user's stylesheet when it changed since the last menu, so
+    /// a theme edit shows without restarting the server.
+    fn refresh_css(&self, config: &AppConfig) {
+        let Some(user_css) = &self.user_css else {
+            return;
+        };
+        let current = css_stamp(config);
+        if *self.css_loaded.borrow() == current {
+            return;
+        }
+        match current.as_ref().map(|(path, _)| fs::read_to_string(path)) {
+            Some(Ok(css)) => user_css.load(&css),
+            _ => user_css.clear(),
+        }
+        *self.css_loaded.borrow_mut() = current;
+    }
+}
+
+fn css_stamp(config: &AppConfig) -> Option<(PathBuf, Option<SystemTime>)> {
+    let path = theme::effective_custom_css_path(config)?;
+    let modified = fs::metadata(&path).and_then(|meta| meta.modified()).ok();
+    Some((path, modified))
+}
+
+fn run_server() -> glib::ExitCode {
+    let (listener, _socket) = match toggle::bind(QUICK_SOCKET, QUICK_SOCKET_FALLBACK) {
+        Ok(Some(bound)) => bound,
+        Ok(None) => {
+            eprintln!("ioexplorer-quick: a server is running already");
+            return glib::ExitCode::SUCCESS;
+        }
+        Err(error) => {
+            eprintln!("ioexplorer-quick: cannot start the server: {error}");
+            return glib::ExitCode::FAILURE;
+        }
+    };
+    let receiver = RefCell::new(Some(toggle::spawn_listener::<OpenRequest>(listener)));
+
+    let app = gtk::Application::builder()
+        .application_id(APP_ID)
+        .flags(gio::ApplicationFlags::NON_UNIQUE)
+        .build();
+    app.connect_activate(move |app| {
+        let Some(receiver) = receiver.borrow_mut().take() else {
+            return;
+        };
+        let config = AppConfig::load();
+        let server = Rc::new(Server {
+            user_css: theme::install(&config),
+            css_loaded: RefCell::new(css_stamp(&config)),
+            watcher: RefCell::new(match history::Watcher::start() {
+                Ok(watcher) => Some(watcher),
+                Err(error) => {
+                    tracing::warn!(%error, "the clipboard is not recorded");
+                    None
+                }
+            }),
+        });
+        window::warm_up();
+        tracing::info!("the quick menu server is ready");
+
+        let menu: Rc<RefCell<Option<Rc<QuickMenu>>>> = Rc::new(RefCell::new(None));
+        let exit_code = Rc::new(Cell::new(0));
+        let requests = Rc::clone(&server);
+        let weak_app = app.downgrade();
+        toggle::install_receiver(receiver, move |request: OpenRequest| {
+            let Some(app) = weak_app.upgrade() else {
+                return;
+            };
+            let open = menu.borrow().clone();
+            match open {
+                Some(open) => open.close(),
+                None => start(&app, request, &exit_code, &menu, Some(&requests)),
+            }
+        });
+
+        for signal in [SIGINT, SIGTERM] {
+            let app = app.downgrade();
+            glib::unix_signal_add_local(signal as _, move || {
+                if let Some(app) = app.upgrade() {
+                    app.quit();
+                }
+                glib::ControlFlow::Break
+            });
+        }
+
+        // Held until it is told to stop, which also stops the watcher.
+        let hold = RefCell::new(Some(app.hold()));
+        app.connect_shutdown(move |_| {
+            server.watcher.borrow_mut().take();
+            hold.borrow_mut().take();
+        });
+    });
+
+    let argv0 = std::env::args().next().unwrap_or_default();
+    app.run_with_args(&[argv0])
+}
+
 fn start(
     app: &gtk::Application,
-    args: QuickArgs,
+    request: OpenRequest,
     exit_code: &Rc<Cell<u8>>,
     slot: &Rc<RefCell<Option<Rc<QuickMenu>>>>,
+    server: Option<&Rc<Server>>,
 ) {
     let Some(display) = gdk::Display::default() else {
         eprintln!("ioexplorer-quick: no display");
@@ -217,13 +386,21 @@ fn start(
     };
 
     let config = AppConfig::load();
-    let _user_css = theme::install(&config);
+    let _user_css = match server {
+        Some(server) => {
+            server.refresh_css(&config);
+            None
+        }
+        None => theme::install(&config),
+    };
+    // A server stays anyway; only a one-shot hands an image to wl-copy.
+    let handoff = server.is_none();
     let mut quick = config.quick;
-    if let Some(insert) = args.insert {
+    if let Some(insert) = request.insert {
         quick.insert = insert;
     }
     let mode = quick.insert;
-    let tab = args.tab.unwrap_or(quick.default_tab);
+    let tab = request.tab.unwrap_or(quick.default_tab);
 
     let monitors: Vec<gdk::Monitor> = display
         .monitors()
@@ -252,7 +429,7 @@ fn start(
             exit_code.set(0);
             glib::timeout_add_local_once(FOCUS_RETURN_DELAY, move || {
                 if deliver(&picked, mode) {
-                    serve_clipboard(hold, picked.image);
+                    serve_clipboard(hold, picked.image, handoff);
                 } else {
                     drop(hold);
                 }
@@ -285,15 +462,17 @@ fn deliver(picked: &Picked, mode: QuickInsert) -> bool {
 /// Keeps the process alive while it owns the clipboard, since exiting would
 /// take the copied contents with it.
 ///
-/// A picked image is served in every format only for [`IMAGE_SERVE_TIME`],
-/// which covers the paste; then it goes to `wl-copy` as a PNG, which keeps it
-/// on the clipboard after the process exits. `wl-copy` offers one format only,
-/// so it has to be the one everything accepts. Anything else, or an image
-/// without `wl-copy` to hand it to, is served until something else is copied.
+/// With `handoff`, a picked image is served in every format only for
+/// [`IMAGE_SERVE_TIME`], which covers the paste; then it goes to `wl-copy` as
+/// a PNG, which keeps it on the clipboard after the process exits. `wl-copy`
+/// offers one format only, so it has to be the one everything accepts. A
+/// server stays running, so it keeps serving every format. Anything else, or
+/// an image without `wl-copy` to hand it to, is served until something else
+/// is copied.
 ///
 /// Only this hold is released: a menu opened in the meantime keeps the
 /// process running.
-fn serve_clipboard(hold: gio::ApplicationHoldGuard, image: Option<PathBuf>) {
+fn serve_clipboard(hold: gio::ApplicationHoldGuard, image: Option<PathBuf>, handoff: bool) {
     let Some(display) = gdk::Display::default() else {
         drop(hold);
         return;
@@ -316,7 +495,9 @@ fn serve_clipboard(hold: gio::ApplicationHoldGuard, image: Option<PathBuf>) {
     });
     *handler.borrow_mut() = Some(id);
 
-    let Some(image) = image else { return };
+    let Some(image) = image.filter(|_| handoff) else {
+        return;
+    };
     glib::timeout_add_local_once(IMAGE_SERVE_TIME, move || {
         if hold.borrow().is_none() || !clipboard.is_local() {
             return;
@@ -370,6 +551,27 @@ mod tests {
         let joined = parse(&["--tab=symbols", "--insert=type"]).unwrap();
         assert_eq!(joined.tab, Some(QuickTab::Symbols));
         assert_eq!(joined.insert, Some(QuickInsert::Type));
+    }
+
+    #[test]
+    fn requests_round_trip() {
+        for request in [
+            OpenRequest::default(),
+            OpenRequest {
+                tab: Some(QuickTab::Clipboard),
+                insert: Some(QuickInsert::Copy),
+            },
+            OpenRequest {
+                tab: Some(QuickTab::Emoji),
+                insert: None,
+            },
+        ] {
+            assert_eq!(OpenRequest::parse(&request.serialize()), Some(request));
+        }
+        assert_eq!(OpenRequest::parse("open stickers -"), None);
+        assert_eq!(OpenRequest::parse("toggle"), None);
+        assert_eq!(OpenRequest::parse("open - - extra"), None);
+        assert!(parse(&["--server"]).unwrap().server);
     }
 
     #[test]

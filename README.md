@@ -754,19 +754,37 @@ Picking a text inserts it like a symbol; picking an image puts it back on the cl
 and pastes it. Typing searches the copied text. Ctrl+D or a right-click pins a copy so
 it stays and comes first; Delete forgets one.
 
-Wayland only lets the focused window read the clipboard, so copies are recorded by a
-small watcher that has to run with your session:
-
-```ini
-# ~/.config/hypr/hyprland.conf
-exec-once = ioexplorer-quick --watch-clipboard
-```
-
-It runs `wl-paste --watch`, which needs `wl-clipboard` and a compositor with the
+Wayland only lets the focused window read the clipboard, so copies are recorded by the
+[server](#server), which has to run with your session. It runs `wl-paste --watch`, which needs `wl-clipboard` and a compositor with the
 data-control protocol (Hyprland, sway and most wlroots compositors have it). Password
 managers' copies are skipped, as are the menu's own picks, which are in the menu already.
 The history keeps the last 100 copies, pinned ones aside, in
 `~/.local/state/ioexplorer/clipboard/`.
+
+### Server
+
+`ioexplorer-quick --server` keeps the quick menu running in the background. GTK, the
+stylesheets and the character tables stay loaded, so the menu opens at once instead of
+starting a new program each time, and the server records the clipboard for the
+Clipboard tab. The same `ioexplorer-quick` command, and its `--tab` and `--insert`
+options, then hands over to the server and returns straight away. Without a server
+it still works: it opens the menu itself.
+
+Start it with your session, either as a systemd user service:
+
+```sh
+systemctl --user enable --now ioexplorer-quick.service
+```
+
+or from Hyprland:
+
+```ini
+# ~/.config/hypr/hyprland.conf
+exec-once = ioexplorer-quick --server
+```
+
+Config changes, including your CSS, apply from the next menu it opens. Restart it after
+upgrading the package.
 
 ### Closing
 
