@@ -1615,7 +1615,7 @@ impl QuickMenu {
     }
 
     /// A copied text goes in like a character; a copied image goes back on
-    /// the clipboard and is pasted, like a saved GIF.
+    /// the clipboard, like a saved GIF.
     fn pick_clip(&self, position: u32, keep_open: bool) {
         let Some(clip) = self.clips.borrow().get(position as usize).cloned() else {
             return;

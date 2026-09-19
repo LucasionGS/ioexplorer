@@ -737,9 +737,10 @@ where a pasted GIF arrives as a still frame. The menu closes once the drop lands
 
 Picking a GIF that was saved from a link inserts that link: Discord and most chat apps
 show it animated. A GIF or image without a link goes on the clipboard as the image, as
-a PNG for apps that only accept PNG, and as the file, then gets pasted with Ctrl+V.
-Chromium-based apps only take the PNG, which is a still frame. Set
-`gif-prefer-link = false` to always paste the image. Every format is offered for a
+a PNG for apps that only accept PNG, and as the file, ready to paste; with
+`insert = "type"` or `"both"` it is pasted for you with Ctrl+V. Chromium-based apps
+only take the PNG, which is a still frame. Set `gif-prefer-link = false` to always
+use the image. Every format is offered for a
 few seconds, which covers the paste. After that the image is handed to `wl-copy` as a
 PNG, so it stays on the clipboard after the menu exits.
 
@@ -750,8 +751,8 @@ show up too, untagged.
 ### Clipboard
 
 The **Clipboard** tab lists what you copied recently, text and images, newest first.
-Picking a text inserts it like a symbol; picking an image puts it back on the clipboard
-and pastes it. Typing searches the copied text. Ctrl+D or a right-click pins a copy so
+Picking a text or an image puts it back on the clipboard, and like any pick, types or
+pastes it too when `insert` asks for that. Typing searches the copied text. Ctrl+D or a right-click pins a copy so
 it stays and comes first; Delete forgets one.
 
 Wayland only lets the focused window read the clipboard, so copies are recorded by the
@@ -791,10 +792,12 @@ upgrading the package.
 Clicking outside the menu, or running the command again, closes it. Anything queued
 is inserted on close.
 
-A pick is typed into the window you were in and also put on the clipboard. Typing
-uses `wtype`. Without it, the text is pasted with Ctrl+V through `ydotool`, which works
-in most applications but not in terminals. With neither, the pick is only copied, and
-a notification says so. `--insert type|copy|both` overrides the config for one run,
+A pick is put on the clipboard, ready to paste wherever you want it. Set
+`insert = "type"` to have it typed into the window you were in instead, or `"both"` for
+both; those also paste picked images with Ctrl+V. Typing uses `wtype`. Without it, the
+text is pasted with Ctrl+V through `ydotool`, which works in most applications but not
+in terminals. With neither, the pick is only copied, and a notification says so.
+`--insert copy|type|both` overrides the config for one run,
 and `--tab symbols|emoji|gif|clipboard` picks the tab it opens on.
 
 The menu opens beside the pointer on Hyprland. Other compositors do not tell clients
@@ -804,7 +807,7 @@ where the pointer is, so there it opens in the middle of the focused screen.
 
 ```toml
 [quick]
-insert = "both"          # type, copy or both
+insert = "copy"          # copy, type or both
 default-tab = "symbols"  # symbols, emoji, gif or clipboard
 recent-limit = 40        # per tab; 0 turns the Recently used category off
 gif-directory = "~/Pictures/GIFs"   # defaults to XDG_PICTURES_DIR/GIFs

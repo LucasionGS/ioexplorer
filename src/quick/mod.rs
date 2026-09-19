@@ -2,9 +2,10 @@
 //! GIFs and the clipboard history, in the spirit of Windows' Win+. panel.
 //!
 //! The menu opens beside the pointer on the Symbols tab (or the configured
-//! one). Picking a character closes it and types the character into the window
-//! that had focus, puts it on the clipboard, or both. A saved GIF goes in the
-//! same way as the link it was saved from, or else is pasted as the image.
+//! one). Picking a character closes it and puts the character on the
+//! clipboard, or, as configured, types it into the window that had focus, or
+//! both. A saved GIF goes in the same way as the link it was saved from, or
+//! else as the image.
 //! Running the command again while the menu is open closes it, so one key both
 //! opens and dismisses it.
 //!
@@ -65,8 +66,9 @@ something copied earlier. Running it again while the menu is open closes it.
 Options:
   -t, --tab TAB        Open on TAB: symbols, emoji, gif or clipboard
                        (default: the config's default-tab, or symbols)
-  -i, --insert MODE    What picking does: type, copy, or both (default: the
-                       config's insert, or both)
+  -i, --insert MODE    What picking does: copy, type, or both; type and both
+                       also paste images (default: the config's insert, or
+                       copy)
       --server         Stay running, so the menu opens at once, and record
                        every copy for the Clipboard tab; start it with the
                        session. The command then hands over to it.

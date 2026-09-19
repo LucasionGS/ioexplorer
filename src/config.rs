@@ -821,12 +821,12 @@ impl QuickConfig {
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum QuickInsert {
-    /// Typed into the focused window.
+    /// Typed into the focused window; an image is pasted with Ctrl+V.
     Type,
-    /// Put on the clipboard only.
-    Copy,
-    /// Typed, and put on the clipboard as well.
+    /// Put on the clipboard only, to paste yourself.
     #[default]
+    Copy,
+    /// Typed, and put on the clipboard as well; an image is pasted.
     Both,
 }
 
@@ -1993,7 +1993,7 @@ folders_first = true
         )
         .expect("valid config");
         assert_eq!(config.quick, QuickConfig::default());
-        assert_eq!(config.quick.insert, QuickInsert::Both);
+        assert_eq!(config.quick.insert, QuickInsert::Copy);
         assert_eq!(config.quick.default_tab, QuickTab::Symbols);
 
         let quick: QuickConfig =
