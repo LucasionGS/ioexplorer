@@ -1,5 +1,5 @@
-//! What the quick menu remembers between openings: the recently used
-//! characters of each tab, and the skin tone last chosen.
+//! What the quick menu remembers between openings: the recently used and the
+//! favourite characters of each tab, and the skin tone last chosen.
 
 use std::{fs, path::PathBuf};
 
@@ -19,6 +19,11 @@ pub struct QuickState {
     pub symbols: Vec<String>,
     #[serde(default)]
     pub emoji: Vec<String>,
+    /// In the order they were added.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub favourite_symbols: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub favourite_emoji: Vec<String>,
 }
 
 impl QuickState {
@@ -47,12 +52,46 @@ impl QuickState {
         }
     }
 
-    /// Saved GIFs keep their own use times, in the GIF library's index.
+    /// Saved GIFs keep their own use times, in the GIF library's index, and
+    /// the clipboard history is its own.
     pub fn recent(&self, tab: QuickTab) -> &[String] {
         match tab {
             QuickTab::Symbols => &self.symbols,
             QuickTab::Emoji => &self.emoji,
-            QuickTab::Gif => &[],
+            QuickTab::Gif | QuickTab::Clipboard => &[],
+        }
+    }
+
+    /// Saved GIFs keep theirs in the GIF library's index, and the clipboard
+    /// history its pins.
+    pub fn favourites(&self, tab: QuickTab) -> &[String] {
+        match tab {
+            QuickTab::Symbols => &self.favourite_symbols,
+            QuickTab::Emoji => &self.favourite_emoji,
+            QuickTab::Gif | QuickTab::Clipboard => &[],
+        }
+    }
+
+    pub fn is_favourite(&self, tab: QuickTab, text: &str) -> bool {
+        self.favourites(tab)
+            .iter()
+            .any(|favourite| favourite == text)
+    }
+
+    /// Adds `text` to `tab`'s favourites, or takes it out. Returns whether it
+    /// is a favourite now.
+    pub fn toggle_favourite(&mut self, tab: QuickTab, text: &str) -> bool {
+        let favourites = match tab {
+            QuickTab::Symbols => &mut self.favourite_symbols,
+            QuickTab::Emoji => &mut self.favourite_emoji,
+            QuickTab::Gif | QuickTab::Clipboard => return false,
+        };
+        if let Some(position) = favourites.iter().position(|favourite| favourite == text) {
+            favourites.remove(position);
+            false
+        } else {
+            favourites.push(text.to_string());
+            true
         }
     }
 
@@ -61,7 +100,7 @@ impl QuickState {
         let recent = match tab {
             QuickTab::Symbols => &mut self.symbols,
             QuickTab::Emoji => &mut self.emoji,
-            QuickTab::Gif => return,
+            QuickTab::Gif | QuickTab::Clipboard => return,
         };
         if limit == 0 {
             return;
@@ -102,12 +141,28 @@ mod tests {
     }
 
     #[test]
+    fn favourites_toggle_in_order_per_tab() {
+        let mut state = QuickState::default();
+        assert!(state.toggle_favourite(QuickTab::Symbols, "→"));
+        assert!(state.toggle_favourite(QuickTab::Symbols, "★"));
+        assert!(state.toggle_favourite(QuickTab::Emoji, "😀"));
+        assert_eq!(state.favourites(QuickTab::Symbols), ["→", "★"]);
+        assert!(state.is_favourite(QuickTab::Emoji, "😀"));
+        assert!(!state.is_favourite(QuickTab::Symbols, "😀"));
+
+        assert!(!state.toggle_favourite(QuickTab::Symbols, "→"));
+        assert_eq!(state.favourites(QuickTab::Symbols), ["★"]);
+        assert!(!state.toggle_favourite(QuickTab::Gif, "a.gif"));
+    }
+
+    #[test]
     fn round_trips() {
         let mut state = QuickState {
             skin_tone: 3,
             ..QuickState::default()
         };
         state.record(QuickTab::Emoji, "👍🏽", 10);
+        state.toggle_favourite(QuickTab::Symbols, "§");
         let contents = toml::to_string_pretty(&state).unwrap();
         assert_eq!(toml::from_str::<QuickState>(&contents).unwrap(), state);
         assert_eq!(

@@ -11,7 +11,7 @@ optdepends=(
   'xdg-desktop-portal: use ioexplorer as a desktop portal FileChooser backend'
   'xdg-utils: set ioexplorer as the default directory handler with xdg-mime'
   'grim: screen capture for ioexplorer-shot'
-  'wl-clipboard: copy screenshots and quick menu picks to the clipboard without staying running'
+  'wl-clipboard: copy screenshots and quick menu picks to the clipboard, and record the quick menu clipboard history'
   'libnotify: screenshot notifications'
   'wf-recorder: screen recording with ioexplorer-shot record'
   'ffmpeg: finishing recordings and checking audio sources'

@@ -9,6 +9,7 @@
 
 mod data;
 mod gifs;
+mod history;
 mod insert;
 mod placement;
 mod state;
@@ -45,14 +46,17 @@ const IMAGE_SERVE_TIME: Duration = Duration::from_secs(3);
 const USAGE: &str = "\
 Usage: ioexplorer-quick [OPTIONS]
 
-Opens a quick menu at the pointer to pick a symbol, an emoji or a saved GIF.
-Running it again while the menu is open closes it.
+Opens a quick menu at the pointer to pick a symbol, an emoji, a saved GIF or
+something copied earlier. Running it again while the menu is open closes it.
 
 Options:
-  -t, --tab TAB        Open on TAB: symbols, emoji or gif (default: the
-                       config's default-tab, or symbols)
+  -t, --tab TAB        Open on TAB: symbols, emoji, gif or clipboard
+                       (default: the config's default-tab, or symbols)
   -i, --insert MODE    What picking does: type, copy, or both (default: the
                        config's insert, or both)
+      --watch-clipboard
+                       Record every copy for the Clipboard tab, until the
+                       session ends; start it with the session
   -h, --help           Show this help
 
 In the menu:
@@ -61,15 +65,23 @@ In the menu:
   Enter, click         Insert and close
   Shift+Enter/click    Queue and keep the menu open; the queue is inserted
                        when it closes, and Backspace removes from it
+  Ctrl+D, right-click  Add to favourites, or remove; favourites come first
   Tab, Shift+Tab       Next / previous tab
   Page Up / Page Down  Previous / next category
   Esc                  Clear the search, then close
 
 In the GIF tab:
   Type                 Search by tag or file name
+  Drag                 Drop the GIF's file into another window
   F2                   Edit the selected GIF's tags
   Delete               Move the selected GIF to the trash
-  A GIF or image on the clipboard is offered for saving, with tags.
+  A GIF or image on the clipboard is offered for saving, with tags:
+  Ctrl+S               Go to the offer's tags; Enter or Ctrl+S there saves
+
+In the Clipboard tab, which needs --watch-clipboard running:
+  Type                 Search copied text
+  Ctrl+D, right-click  Pin, or unpin; pinned copies stay and come first
+  Delete               Forget the selected copy
 
 Exit status is 0 when something was inserted, 1 when the menu was closed
 without a pick, and 2 for invalid arguments.";
@@ -79,6 +91,8 @@ struct QuickArgs {
     tab: Option<QuickTab>,
     insert: Option<QuickInsert>,
     help: bool,
+    watch_clipboard: bool,
+    record_clipboard: bool,
 }
 
 impl QuickArgs {
@@ -100,6 +114,8 @@ impl QuickArgs {
             };
             match flag.as_str() {
                 "-h" | "--help" => parsed.help = true,
+                "--watch-clipboard" => parsed.watch_clipboard = true,
+                "--record-clipboard" => parsed.record_clipboard = true,
                 "-t" | "--tab" => parsed.tab = Some(parse_tab(&value(&flag)?)?),
                 "-i" | "--insert" => parsed.insert = Some(parse_insert(&value(&flag)?)?),
                 other => return Err(format!("unknown argument: {other}")),
@@ -114,6 +130,7 @@ fn parse_tab(value: &str) -> Result<QuickTab, String> {
         "symbols" | "symbol" => Ok(QuickTab::Symbols),
         "emoji" | "emojis" => Ok(QuickTab::Emoji),
         "gif" | "gifs" => Ok(QuickTab::Gif),
+        "clipboard" | "clip" => Ok(QuickTab::Clipboard),
         other => Err(format!("unknown tab: {other}")),
     }
 }
@@ -140,6 +157,21 @@ pub fn run() -> glib::ExitCode {
     if args.help {
         println!("{USAGE}");
         return glib::ExitCode::SUCCESS;
+    }
+    if args.watch_clipboard {
+        // Only returns when wl-paste cannot run.
+        eprintln!("ioexplorer-quick: {}", history::watch());
+        return glib::ExitCode::FAILURE;
+    }
+    if args.record_clipboard {
+        let limit = AppConfig::load().quick.clipboard_limit;
+        return match history::record(limit) {
+            Ok(()) => glib::ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("ioexplorer-quick: cannot record the copy: {error}");
+                glib::ExitCode::FAILURE
+            }
+        };
     }
 
     // Unique: a second launch reaches this one's `activate`, which closes the
@@ -289,7 +321,11 @@ fn serve_clipboard(hold: gio::ApplicationHoldGuard, image: Option<PathBuf>) {
         if hold.borrow().is_none() || !clipboard.is_local() {
             return;
         }
-        match gifs::png_file(&image).and_then(|png| wl_copy("image/png", &png)) {
+        let handed = gifs::png_file(&image).and_then(|png| {
+            history::mark_own_copy();
+            wl_copy("image/png", &png)
+        });
+        match handed {
             // wl-copy taking the clipboard over fires `changed`, which
             // releases the hold.
             Ok(()) => tracing::debug!("the image is handed to wl-copy"),

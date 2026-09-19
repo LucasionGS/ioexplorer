@@ -7,9 +7,13 @@ pub mod thumbs;
 
 use std::io::Cursor;
 
+use std::path::Path;
+
 use gtk::{gdk, glib, prelude::*};
 
 pub use library::{Gif, ImageKind, Library, parse_tags};
+
+use super::history;
 
 /// Puts `gif` on the clipboard in every form an application might take: the
 /// image in its own format, a PNG of it for applications that only take PNG
@@ -19,15 +23,20 @@ pub use library::{Gif, ImageKind, Library, parse_tags};
 /// Must run while the menu still has keyboard focus: a Wayland compositor
 /// only lets a client set the clipboard in response to its own input.
 pub fn offer(gif: &Gif) -> Result<(), String> {
-    let display = gdk::Display::default().ok_or("no display")?;
-    let bytes = std::fs::read(&gif.path).map_err(|error| error.to_string())?;
+    offer_image(&gif.path, gif.kind)
+}
 
-    let uri = gtk::gio::File::for_path(&gif.path).uri();
+/// [`offer`] for any image file.
+pub fn offer_image(path: &Path, kind: ImageKind) -> Result<(), String> {
+    let display = gdk::Display::default().ok_or("no display")?;
+    let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+
+    let uri = gtk::gio::File::for_path(path).uri();
     let mut providers = vec![gdk::ContentProvider::for_bytes(
-        gif.kind.mime_type(),
+        kind.mime_type(),
         &glib::Bytes::from(&bytes),
     )];
-    if gif.kind != ImageKind::Png {
+    if kind != ImageKind::Png {
         match png_of(&bytes) {
             Ok(png) => providers.push(gdk::ContentProvider::for_bytes(
                 "image/png",
@@ -45,6 +54,7 @@ pub fn offer(gif: &Gif) -> Result<(), String> {
         &glib::Bytes::from_owned(format!("copy\n{uri}").into_bytes()),
     ));
 
+    history::mark_own_copy();
     display
         .clipboard()
         .set_content(Some(&gdk::ContentProvider::new_union(&providers)))

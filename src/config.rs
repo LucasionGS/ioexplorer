@@ -773,10 +773,18 @@ pub struct QuickConfig {
     /// pasted GIF often arrives as a still frame.
     #[serde(default = "default_true")]
     pub gif_prefer_link: bool,
+    /// How many copies the Clipboard tab keeps, pinned ones aside. Recorded
+    /// by `ioexplorer-quick --watch-clipboard`.
+    #[serde(default = "default_quick_clipboard_limit")]
+    pub clipboard_limit: usize,
 }
 
 fn default_quick_recent_limit() -> usize {
     40
+}
+
+fn default_quick_clipboard_limit() -> usize {
+    100
 }
 
 impl Default for QuickConfig {
@@ -787,6 +795,7 @@ impl Default for QuickConfig {
             recent_limit: default_quick_recent_limit(),
             gif_directory: None,
             gif_prefer_link: true,
+            clipboard_limit: default_quick_clipboard_limit(),
         }
     }
 }
@@ -828,6 +837,7 @@ pub enum QuickTab {
     Symbols,
     Emoji,
     Gif,
+    Clipboard,
 }
 
 // Hand-written for the same reason as `DesktopConfig`: a derived `Default`

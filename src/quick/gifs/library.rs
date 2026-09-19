@@ -88,6 +88,12 @@ struct Meta {
     added: u64,
     #[serde(default, skip_serializing_if = "is_zero")]
     last_used: u64,
+    #[serde(default, skip_serializing_if = "is_false")]
+    favourite: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn is_zero(value: &u64) -> bool {
@@ -108,6 +114,7 @@ pub struct Gif {
     pub kind: ImageKind,
     pub tags: Vec<String>,
     pub source: Option<String>,
+    pub favourite: bool,
     added: u64,
     last_used: u64,
 }
@@ -163,7 +170,8 @@ impl Library {
         &self.directory
     }
 
-    /// Every image in the folder, most recently used first, then newest.
+    /// Every image in the folder: favourites first, then the most recently
+    /// used, then the newest.
     pub fn list(&self) -> Vec<Gif> {
         let Ok(entries) = fs::read_dir(&self.directory) else {
             return Vec::new();
@@ -191,14 +199,15 @@ impl Library {
                     kind,
                     tags: meta.tags,
                     source: meta.source,
+                    favourite: meta.favourite,
                     added: meta.added,
                     last_used: meta.last_used,
                 })
             })
             .collect();
         gifs.sort_by(|a, b| {
-            (b.last_used, b.added)
-                .cmp(&(a.last_used, a.added))
+            (b.favourite, b.last_used, b.added)
+                .cmp(&(a.favourite, a.last_used, a.added))
                 .then_with(|| a.file_name.cmp(&b.file_name))
         });
         gifs
@@ -269,6 +278,7 @@ impl Library {
                 source,
                 added: now_secs(),
                 last_used: 0,
+                favourite: false,
             },
         );
         self.write_index()?;
@@ -278,6 +288,16 @@ impl Library {
     pub fn set_tags(&mut self, file_name: &str, tags: Vec<String>) -> io::Result<()> {
         self.entry(file_name).tags = tags;
         self.write_index()
+    }
+
+    /// Makes the image a favourite, or no longer one. Returns whether it is
+    /// one now.
+    pub fn toggle_favourite(&mut self, file_name: &str) -> io::Result<bool> {
+        let entry = self.entry(file_name);
+        entry.favourite = !entry.favourite;
+        let favourite = entry.favourite;
+        self.write_index()?;
+        Ok(favourite)
     }
 
     pub fn touch(&mut self, file_name: &str) -> io::Result<()> {
@@ -493,6 +513,17 @@ mod tests {
         let listed = Library::open(dir.path().to_path_buf()).list();
         assert_eq!(listed[0].file_name, "wave.png", "most recently used first");
         assert_eq!(listed[0].label(), "hello, wave");
+
+        // A favourite comes before anything used more recently.
+        assert!(library.toggle_favourite("cat-dance.gif").unwrap());
+        let listed = Library::open(dir.path().to_path_buf()).list();
+        assert_eq!(listed[0].file_name, "cat-dance.gif", "favourites first");
+        assert!(listed[0].favourite);
+        assert!(!library.toggle_favourite("cat-dance.gif").unwrap());
+        assert_eq!(
+            Library::open(dir.path().to_path_buf()).list()[0].file_name,
+            "wave.png"
+        );
 
         // A second save of the same name gets a counter.
         let again = library

@@ -11,6 +11,7 @@ use std::{
     process::{Command, Stdio},
 };
 
+use super::history;
 use crate::{config::QuickInsert, launcher::spawn::on_path, shot::deliver::wl_copy};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -56,6 +57,7 @@ pub fn insert(text: &str, mode: QuickInsert) -> Inserted {
 }
 
 fn copy(text: &str, inserted: &mut Inserted) {
+    history::mark_own_copy();
     match wl_copy("text/plain;charset=utf-8", text.as_bytes()) {
         Ok(()) => inserted.copied = true,
         Err(error) => {
