@@ -1,5 +1,5 @@
 pkgname=ioexplorer-git
-pkgver=r0.000000
+pkgver=r76.0fd48fe
 pkgrel=1
 pkgdesc='Wayland-native provider-oriented file manager, spotlight, and other utilities for Wayland desktops'
 arch=('x86_64')
@@ -21,6 +21,11 @@ optdepends=(
 )
 source=("$pkgname::git+https://github.com/LucasionGS/ioexplorer.git")
 sha256sums=('SKIP')
+
+pkgver() {
+  cd "$srcdir/ioexplorer-git"
+  printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+}
 
 build() {
   cd "$srcdir/$pkgname"

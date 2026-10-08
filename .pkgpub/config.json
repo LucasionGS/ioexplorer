@@ -1,0 +1,10 @@
+{
+  "packages": {
+    "PKGBUILD": {
+      "versionSource": {
+        "type": "git-revision",
+        "srcDir": "ioexplorer-git"
+      }
+    }
+  }
+}
