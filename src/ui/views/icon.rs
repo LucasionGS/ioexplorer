@@ -1,3 +1,5 @@
+use std::{cell::RefCell, rc::Rc};
+
 use gtk::prelude::*;
 
 use crate::{
@@ -89,15 +91,20 @@ fn tile_for(
 
     let (icon_widget, icon) = icon_widget_for_item(item, icon_size, options.icon_style);
     icon.add_css_class("file-tile-icon");
+    // The tile is as wide as its slot whatever the name, so one long name no
+    // longer widens every column of the grid. The name wraps to two lines and
+    // ellipsizes; selecting the tile spells it out, and hovering shows it in a
+    // balloon (see `install_name_balloon`).
     let label = gtk::Label::builder()
         .label(item.display_name())
         .justify(gtk::Justification::Center)
         .wrap(true)
         .wrap_mode(gtk::pango::WrapMode::WordChar)
         .lines(2)
-        .max_width_chars(18)
+        .max_width_chars(1)
         .ellipsize(gtk::pango::EllipsizeMode::End)
-        .halign(gtk::Align::Center)
+        .halign(gtk::Align::Fill)
+        .css_classes(["file-tile-label"])
         .build();
 
     tile.append(&icon_widget);
@@ -114,6 +121,7 @@ fn tile_for(
         tile.add_css_class("file-broken-link");
     }
 
+    install_name_balloon(&tile, &label);
     install_selection_click(&tile, index, selection_handler);
     install_context_menu_click(&tile, index, context_menu_handler);
     dnd::install_drag_source(&tile, move |_, _| file_drag_handler(index));
@@ -127,6 +135,88 @@ fn tile_for(
     }
 
     tile
+}
+
+/// Spells out a selected tile's whole name in place, or folds it back to two
+/// ellipsized lines.
+pub fn set_tile_name_expanded(child: &gtk::FlowBoxChild, expanded: bool) {
+    let Some(label) = child
+        .child()
+        .and_then(|tile| tile.last_child())
+        .and_downcast::<gtk::Label>()
+    else {
+        return;
+    };
+    label.set_ellipsize(if expanded {
+        gtk::pango::EllipsizeMode::None
+    } else {
+        gtk::pango::EllipsizeMode::End
+    });
+}
+
+/// Shows a cut-off name whole in a balloon under the tile while the pointer
+/// is on it. A balloon rather than growing the tile, which would reflow the
+/// grid under the pointer as it moves across it.
+fn install_name_balloon(tile: &gtk::Box, label: &gtk::Label) {
+    // Made on the first hover only: a folder of thousands of files should
+    // not build a popover per tile up front.
+    let balloon = Rc::new(RefCell::new(None::<gtk::Popover>));
+    let motion = gtk::EventControllerMotion::new();
+
+    let label = label.clone();
+    let enter_tile = tile.clone();
+    let enter_balloon = Rc::clone(&balloon);
+    motion.connect_enter(move |_, _, _| {
+        let cut_off =
+            label.ellipsize() != gtk::pango::EllipsizeMode::None && label.layout().is_ellipsized();
+        if !cut_off {
+            return;
+        }
+
+        let popover = enter_balloon
+            .borrow_mut()
+            .get_or_insert_with(|| name_balloon(&enter_tile, &label.label()))
+            .clone();
+        // Just under the tile rather than over the name: a balloon under the
+        // pointer could take the pointer from the tile, closing it again.
+        popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
+            0,
+            enter_tile.height() - 6,
+            enter_tile.width(),
+            1,
+        )));
+        popover.popup();
+    });
+    motion.connect_leave(move |_| {
+        if let Some(popover) = balloon.borrow().as_ref() {
+            popover.popdown();
+        }
+    });
+    tile.add_controller(motion);
+}
+
+fn name_balloon(tile: &gtk::Box, name: &str) -> gtk::Popover {
+    let popover = gtk::Popover::builder()
+        .child(
+            &gtk::Label::builder()
+                .label(name)
+                .justify(gtk::Justification::Center)
+                .wrap(true)
+                .wrap_mode(gtk::pango::WrapMode::WordChar)
+                .max_width_chars(28)
+                .build(),
+        )
+        .autohide(false)
+        .has_arrow(false)
+        .can_focus(false)
+        .can_target(false)
+        .position(gtk::PositionType::Bottom)
+        .css_classes(["file-name-balloon"])
+        .build();
+    popover.set_parent(tile);
+    let parented = popover.clone();
+    tile.connect_destroy(move |_| parented.unparent());
+    popover
 }
 
 pub fn load_visible_thumbnails(

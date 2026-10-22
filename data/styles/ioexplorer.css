@@ -739,6 +739,14 @@ button.list-header-button.list-header-active {
   padding: 8px;
 }
 
+/* A cut-off tile name, shown whole while the pointer is on the tile. */
+popover.file-name-balloon > contents {
+  padding: 4px 10px;
+  border-radius: var(--io-radius);
+  background: var(--io-popover-bg);
+  box-shadow: 0 6px 18px var(--io-shadow);
+}
+
 .file-tile-icon.image-thumbnail {
   border-radius: var(--io-radius);
   background: var(--io-muted-bg);

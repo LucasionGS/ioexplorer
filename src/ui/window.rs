@@ -5537,6 +5537,9 @@ fn set_entry_selected_class(widget: &impl IsA<gtk::Widget>, selected: bool) {
     } else {
         widget.remove_css_class("entry-selected");
     }
+    if let Some(child) = widget.dynamic_cast_ref::<gtk::FlowBoxChild>() {
+        views::icon::set_tile_name_expanded(child, selected);
+    }
 }
 
 fn widget_is_text_input(widget: &gtk::Widget) -> bool {
