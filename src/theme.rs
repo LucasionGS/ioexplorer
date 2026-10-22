@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     fs, io,
     path::{Path, PathBuf},
 };
@@ -68,7 +69,7 @@ impl UserCss {
     }
 
     pub fn load(&self, css: &str) {
-        self.provider.load_from_string(css);
+        self.provider.load_from_string(&with_derived_tokens(css));
     }
 
     pub fn clear(&self) {
@@ -212,9 +213,9 @@ pub fn replace_auto_generated_css(existing: &str, generated_css: &str) -> String
     }
 }
 
-/// The generated block: the eight base tokens, set where the bundled sheet
-/// declares them. Every surface in the bundled sheet is painted from these, so
-/// the block never has to name a widget.
+/// The generated block: the `theme.*` values the editor reads back, then the
+/// eight base tokens set from them. Every surface in the bundled sheet is
+/// painted from the tokens, so the block never has to name a widget.
 pub fn generated_theme_css(settings: &ThemeSettings) -> String {
     let radius = settings.corner_radius.clamp(0, 18);
     let window_background = rgba_css(&settings.window_background);
@@ -235,18 +236,51 @@ pub fn generated_theme_css(settings: &ThemeSettings) -> String {
 /* theme.border={border} */\n\
 /* theme.corner_radius={radius} */\n\
 \n\
-window,\n\
-tooltip {{\n\
-  --io-window-bg: {window_background};\n\
-  --io-panel-bg: {panel_background};\n\
-  --io-muted-bg: {muted_background};\n\
-  --io-accent: {accent};\n\
-  --io-selection: {selection};\n\
-  --io-text: {text};\n\
-  --io-border: {border};\n\
-  --io-radius: {radius}px;\n\
-}}"
+{}",
+        token_css(settings)
     )
+}
+
+/// The rule setting the base tokens to `settings`.
+fn token_css(settings: &ThemeSettings) -> String {
+    let radius = settings.corner_radius.clamp(0, 18);
+    format!(
+        "window,\n\
+tooltip {{\n\
+  --io-window-bg: {};\n\
+  --io-panel-bg: {};\n\
+  --io-muted-bg: {};\n\
+  --io-accent: {};\n\
+  --io-selection: {};\n\
+  --io-text: {};\n\
+  --io-border: {};\n\
+  --io-radius: {radius}px;\n\
+}}",
+        rgba_css(&settings.window_background),
+        rgba_css(&settings.panel_background),
+        rgba_css(&settings.muted_background),
+        rgba_css(&settings.accent),
+        rgba_css(&settings.selection),
+        rgba_css(&settings.text),
+        rgba_css(&settings.border),
+    )
+}
+
+/// A theme saved before the stylesheet ran on tokens carries its palette
+/// only as `theme.*` comments and rules for particular widgets. Its tokens
+/// are derived from those comments and appended, so the theme also reaches
+/// every surface its rules never named, instead of leaving them Ionix.
+pub fn with_derived_tokens(css: &str) -> Cow<'_, str> {
+    if css.contains("--io-window-bg") {
+        return Cow::Borrowed(css);
+    }
+    match generated_settings_from_css(css) {
+        Some(settings) => Cow::Owned(format!(
+            "{css}\n\n/* Tokens derived from the theme.* values above. */\n{}\n",
+            token_css(&settings)
+        )),
+        None => Cow::Borrowed(css),
+    }
 }
 
 pub fn generated_settings_from_css(css: &str) -> Option<ThemeSettings> {
@@ -465,6 +499,27 @@ mod tests {
             let body = rule_body(rule).unwrap_or_else(|| panic!("no rule for {rule}"));
             assert!(!body.contains("var(--io-"), "{rule} follows the palette");
         }
+    }
+
+    #[test]
+    fn an_old_theme_gets_its_tokens_from_its_values() {
+        let old = format!(
+            "{AUTO_GEN_START}\n/* theme.accent=rgb(107,143,223) */\n.topbar {{ background: red; }}\n{AUTO_GEN_END}\n"
+        );
+
+        let css = with_derived_tokens(&old);
+
+        assert!(css.starts_with(&old));
+        assert!(css.contains("--io-accent: rgb(107,143,223);"));
+    }
+
+    #[test]
+    fn a_theme_with_tokens_or_without_values_is_left_alone() {
+        let current = css_with_auto_generated_theme("", &ThemeSettings::default());
+        let plain = ".topbar { background: red; }";
+
+        assert!(matches!(with_derived_tokens(&current), Cow::Borrowed(_)));
+        assert!(matches!(with_derived_tokens(plain), Cow::Borrowed(_)));
     }
 
     /// The body of the first rule whose selector list ends with `selector`.

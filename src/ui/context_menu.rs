@@ -156,7 +156,7 @@ impl ContextMenu {
             .position(gtk::PositionType::Bottom)
             .pointing_to(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1))
             .child(&menu)
-            .css_classes(["context-menu"])
+            .css_classes(["io-menu"])
             .build();
 
         let mut previous_destructive = false;

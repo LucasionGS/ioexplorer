@@ -129,7 +129,7 @@ impl SortMenu {
         let popover = gtk::Popover::builder()
             .child(&menu)
             .has_arrow(false)
-            .css_classes(["context-menu", "sort-menu"])
+            .css_classes(["io-menu", "sort-menu"])
             .build();
 
         let button = gtk::MenuButton::builder()

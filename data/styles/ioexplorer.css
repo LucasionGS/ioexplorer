@@ -913,6 +913,10 @@ button.list-header-button.list-header-active {
    File manager: menus
    ============================================================ */
 
+/* Menus are `popover.io-menu` rather than `.context-menu`: theme files
+   written for the old sheet paint `.context-menu` itself, which on a
+   popover fills the whole surface, shadow margin and all, behind the
+   rounded contents. */
 .context-menu-separator {
   min-height: 1px;
   margin: 4px 8px;

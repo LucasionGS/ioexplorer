@@ -2854,7 +2854,7 @@ impl AppWindow {
         let popover = gtk::Popover::builder()
             .has_arrow(false)
             .child(&menu)
-            .css_classes(["context-menu"])
+            .css_classes(["io-menu"])
             .build();
         for crumb in hidden {
             let item = gtk::Button::builder()
