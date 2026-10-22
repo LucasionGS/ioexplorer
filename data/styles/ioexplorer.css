@@ -230,6 +230,7 @@ window {
 }
 
 .io-file-manager scale > trough > highlight {
+  margin: 0;
   border: none;
   border-radius: 999px;
   background: var(--io-accent);
