@@ -58,6 +58,18 @@ impl BookmarkAction {
     }
 }
 
+/// The custom actions as one group of their own.
+fn custom_group(custom_actions: &[CustomAction]) -> Vec<ContextMenuAction> {
+    custom_actions
+        .iter()
+        .enumerate()
+        .map(|(index, action)| match index {
+            0 => action.context_action().starting_group(),
+            _ => action.context_action(),
+        })
+        .collect()
+}
+
 pub trait ContextMenuContext {
     fn actions(&self) -> Vec<ContextMenuAction>;
 }
@@ -67,6 +79,10 @@ pub struct ContextMenuAction {
     icon_name: Option<&'static str>,
     destructive: bool,
     activate: Rc<dyn Fn()>,
+    /// The shortcut that does the same, shown dimmed at the end of the item.
+    accel: Option<&'static str>,
+    /// Drawn with a separator above it, opening a group of related items.
+    starts_group: bool,
 }
 
 impl ContextMenuAction {
@@ -81,7 +97,19 @@ impl ContextMenuAction {
             icon_name,
             destructive,
             activate,
+            accel: None,
+            starts_group: false,
         }
+    }
+
+    pub fn with_accel(mut self, accel: &'static str) -> Self {
+        self.accel = Some(accel);
+        self
+    }
+
+    pub fn starting_group(mut self) -> Self {
+        self.starts_group = true;
+        self
     }
 
     // Readers, so a caller composing menus (the desktop wraps these contexts to
@@ -119,11 +147,7 @@ impl ContextMenu {
 
         let menu = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
-            .spacing(2)
-            .margin_top(6)
-            .margin_bottom(6)
-            .margin_start(6)
-            .margin_end(6)
+            .spacing(1)
             .build();
 
         let popover = gtk::Popover::builder()
@@ -135,7 +159,19 @@ impl ContextMenu {
             .css_classes(["context-menu"])
             .build();
 
-        for action in actions {
+        let mut previous_destructive = false;
+        for (index, action) in actions.into_iter().enumerate() {
+            // A destructive item always stands apart from the ones above it.
+            let separated = action.starts_group || (action.destructive && !previous_destructive);
+            if index > 0 && separated {
+                menu.append(
+                    &gtk::Separator::builder()
+                        .orientation(gtk::Orientation::Horizontal)
+                        .css_classes(["context-menu-separator"])
+                        .build(),
+                );
+            }
+            previous_destructive = action.destructive;
             menu.append(&action_button(&popover, action));
         }
 
@@ -179,7 +215,8 @@ impl ContextMenuContext for EmptySpaceContext {
                 Some("edit-paste-symbolic"),
                 false,
                 Rc::new(move || paste()),
-            ),
+            )
+            .with_accel("Ctrl+V"),
             ContextMenuAction::new(
                 "New Folder",
                 Some("folder-new-symbolic"),
@@ -188,7 +225,7 @@ impl ContextMenuContext for EmptySpaceContext {
             ),
             self.bookmark.context_action(),
         ];
-        actions.extend(self.custom_actions.iter().map(CustomAction::context_action));
+        actions.extend(custom_group(&self.custom_actions));
         actions
     }
 }
@@ -397,32 +434,37 @@ impl ContextMenuContext for FileSingleSelectionContext {
         actions.extend(view);
         actions.extend(bookmark);
         actions.extend(extract);
-        actions.extend(self.custom_actions.iter().map(CustomAction::context_action));
+        actions.extend(custom_group(&self.custom_actions));
         actions.extend([
             ContextMenuAction::new(
                 "Copy",
                 Some("edit-copy-symbolic"),
                 false,
                 Rc::new(move || copy(copy_paths.clone())),
-            ),
+            )
+            .with_accel("Ctrl+C")
+            .starting_group(),
             ContextMenuAction::new(
                 "Cut",
                 Some("edit-cut-symbolic"),
                 false,
                 Rc::new(move || cut(cut_paths.clone())),
-            ),
+            )
+            .with_accel("Ctrl+X"),
             ContextMenuAction::new(
                 "Rename",
                 Some("edit-rename-symbolic"),
                 false,
                 Rc::new(move || rename(rename_path.clone())),
-            ),
+            )
+            .with_accel("F2"),
             ContextMenuAction::new(
                 "Delete",
                 Some("user-trash-symbolic"),
                 true,
                 Rc::new(move || delete(delete_paths.clone())),
-            ),
+            )
+            .with_accel("Delete"),
         ]);
         actions
     }
@@ -471,26 +513,30 @@ impl ContextMenuContext for FileMultiSelectionContext {
         let mut actions = Vec::new();
         actions.extend(view);
         actions.extend(extract);
-        actions.extend(self.custom_actions.iter().map(CustomAction::context_action));
+        actions.extend(custom_group(&self.custom_actions));
         actions.extend([
             ContextMenuAction::new(
                 copy_label,
                 Some("edit-copy-symbolic"),
                 false,
                 Rc::new(move || copy(copy_paths.clone())),
-            ),
+            )
+            .with_accel("Ctrl+C")
+            .starting_group(),
             ContextMenuAction::new(
                 cut_label,
                 Some("edit-cut-symbolic"),
                 false,
                 Rc::new(move || cut(cut_paths.clone())),
-            ),
+            )
+            .with_accel("Ctrl+X"),
             ContextMenuAction::new(
                 delete_label,
                 Some("user-trash-symbolic"),
                 true,
                 Rc::new(move || delete(delete_paths.clone())),
-            ),
+            )
+            .with_accel("Delete"),
         ]);
         actions
     }
@@ -527,6 +573,14 @@ fn action_button(popover: &gtk::Popover, action: ContextMenuAction) -> gtk::Butt
             .hexpand(true)
             .build(),
     );
+    if let Some(accel) = action.accel {
+        content.append(
+            &gtk::Label::builder()
+                .label(accel)
+                .css_classes(["context-menu-accel"])
+                .build(),
+        );
+    }
     button.set_child(Some(&content));
 
     let popover = popover.clone();

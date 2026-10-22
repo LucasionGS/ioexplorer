@@ -897,12 +897,36 @@ button.list-header-button.list-header-active {
 }
 
 /* ============================================================
+   File manager: dialogs
+   ============================================================ */
+
+.dialog-title {
+  font-size: 1.1em;
+  font-weight: 700;
+}
+
+.dialog-subtitle {
+  color: var(--io-text-dim);
+}
+
+/* ============================================================
    File manager: menus
    ============================================================ */
 
+.context-menu-separator {
+  min-height: 1px;
+  margin: 4px 8px;
+}
+
+.context-menu-accel {
+  margin-left: 18px;
+  color: var(--io-text-faint);
+  font-size: 0.85em;
+}
+
 button.context-menu-item,
 .sort-menu-item {
-  min-width: 180px;
+  min-width: 200px;
   min-height: 0;
   padding: 7px 10px;
   border-radius: var(--io-radius-sm);

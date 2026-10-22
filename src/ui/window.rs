@@ -4263,12 +4263,19 @@ impl AppWindow {
             .margin_end(14)
             .build();
 
-        content.append(&gtk::Label::builder().label("New name").xalign(0.0).build());
+        content.append(&dialog_header(
+            "edit-rename-symbolic",
+            "Rename",
+            &current_name,
+        ));
         let name_entry = gtk::Entry::builder()
             .text(&current_name)
             .hexpand(true)
             .build();
-        name_entry.select_region(0, -1);
+        // The name without its extension, which is what is usually being
+        // changed; the whole name for a folder or a dotfile.
+        let stem_end = rename_selection_end(&current_name, path.is_dir());
+        name_entry.select_region(0, stem_end);
         content.append(&name_entry);
 
         let button_row = gtk::Box::builder()
@@ -4578,12 +4585,11 @@ impl AppWindow {
             .margin_end(14)
             .build();
 
-        content.append(
-            &gtk::Label::builder()
-                .label("Folder name")
-                .xalign(0.0)
-                .build(),
-        );
+        let place = target_dir
+            .file_name()
+            .map(|name| format!("In {}", name.to_string_lossy()))
+            .unwrap_or_else(|| format!("In {}", target_dir.display()));
+        content.append(&dialog_header("folder-new-symbolic", "New folder", &place));
         let name_entry = gtk::Entry::builder()
             .text("New Folder")
             .hexpand(true)
@@ -4998,6 +5004,55 @@ fn free_space_text(path: &Path) -> Option<String> {
             views::format_bytes(size)
         )
     })
+}
+
+/// The top of a small dialog: a glyph, what the dialog does, and what it
+/// does it to.
+fn dialog_header(icon_name: &str, title: &str, subtitle: &str) -> gtk::Box {
+    let icon = gtk::Image::new();
+    views::set_glyph_tile(&icon, icon_name, 44, "ft-folder");
+    icon.set_valign(gtk::Align::Center);
+
+    let text = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(2)
+        .valign(gtk::Align::Center)
+        .build();
+    text.append(
+        &gtk::Label::builder()
+            .label(title)
+            .xalign(0.0)
+            .css_classes(["dialog-title"])
+            .build(),
+    );
+    text.append(
+        &gtk::Label::builder()
+            .label(subtitle)
+            .xalign(0.0)
+            .ellipsize(gtk::pango::EllipsizeMode::Middle)
+            .max_width_chars(40)
+            .css_classes(["dialog-subtitle"])
+            .build(),
+    );
+
+    let header = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(12)
+        .margin_bottom(6)
+        .build();
+    header.append(&icon);
+    header.append(&text);
+    header
+}
+
+/// Where the rename field's selection ends: before the extension of a file,
+/// at the end for a folder or a name that is all extension (".bashrc").
+fn rename_selection_end(name: &str, is_dir: bool) -> i32 {
+    let end = match name.rfind('.') {
+        Some(dot) if !is_dir && dot > 0 => dot,
+        _ => name.len(),
+    };
+    name[..end].chars().count() as i32
 }
 
 fn home_uri() -> Option<ProviderUri> {
@@ -6411,7 +6466,7 @@ mod tests {
     use super::{
         breadcrumb_trail, dropped_file_name_for_bytes, dropped_file_name_for_uri, folder_summary,
         format_media_duration, is_gif_image_path, next_tab_index_after_close, parse_ffprobe_output,
-        partition_drop_uris, tab_title,
+        partition_drop_uris, rename_selection_end, tab_title,
     };
 
     fn test_item(name: &str) -> FileItem {
@@ -6513,6 +6568,15 @@ mod tests {
             "3 items: 2 folders, 1 file"
         );
         assert_eq!(folder_summary(&[folder("a"), folder("b")]), "2 items");
+    }
+
+    #[test]
+    fn renaming_selects_the_name_before_its_extension() {
+        assert_eq!(rename_selection_end("photo.jpg", false), 5);
+        assert_eq!(rename_selection_end("archive.tar.gz", false), 11);
+        assert_eq!(rename_selection_end(".bashrc", false), 7);
+        assert_eq!(rename_selection_end("my.folder", true), 9);
+        assert_eq!(rename_selection_end("ångström.txt", false), 8);
     }
 
     #[test]
