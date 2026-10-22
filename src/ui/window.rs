@@ -918,11 +918,15 @@ impl AppWindow {
             .activate_on_single_click(false)
             .css_classes(["content-list"])
             .build();
+        // Packed to the start at its natural width: a flow box left to fill
+        // spreads a short line of tiles across the whole view. The column cap
+        // is high so a wide window still fits as many tiles as it has room for.
         let flow_box = gtk::FlowBox::builder()
             .selection_mode(gtk::SelectionMode::None)
             .activate_on_single_click(false)
+            .halign(gtk::Align::Start)
             .valign(gtk::Align::Start)
-            .max_children_per_line(12)
+            .max_children_per_line(64)
             .row_spacing(2)
             .column_spacing(2)
             .css_classes(["content-grid"])
