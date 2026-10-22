@@ -53,18 +53,25 @@ pub fn populate(
     }
 
     for (index, item) in items.iter().enumerate() {
-        flow.insert(
-            &tile_for(
-                index,
-                item,
-                options.clone(),
-                folder_drop_handler.clone(),
-                file_drag_handler.clone(),
-                selection_handler.clone(),
-                context_menu_handler.clone(),
-            ),
-            -1,
+        let tile = tile_for(
+            index,
+            item,
+            options.clone(),
+            folder_drop_handler.clone(),
+            file_drag_handler.clone(),
+            selection_handler.clone(),
+            context_menu_handler.clone(),
         );
+        // The flow box hands each line's spare width to its cells, so a cell
+        // left to fill would be wider in a folder of three files than in one
+        // of thirty. Centred, the cell keeps the tile's own size, and with it
+        // the hover and selection fill drawn on it.
+        let cell = gtk::FlowBoxChild::builder()
+            .child(&tile)
+            .halign(gtk::Align::Center)
+            .valign(gtk::Align::Start)
+            .build();
+        flow.insert(&cell, -1);
     }
 }
 
