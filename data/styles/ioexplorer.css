@@ -906,82 +906,136 @@ button.context-menu-item.destructive-action:hover {
   background: transparent;
 }
 
+.computer-header {
+  margin-bottom: 8px;
+}
+
 .computer-page-title {
-  font-size: 1.15em;
+  font-size: 1.45em;
   font-weight: 700;
+}
+
+.computer-page-subtitle {
+  color: var(--io-text-dim);
+}
+
+.computer-section-title {
+  margin: 14px 2px 2px;
+  font-size: 0.8em;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--io-text-faint);
 }
 
 .computer-volume-list {
   background: transparent;
 }
 
+/* Each drive is a card of its own; the list behind them stays bare. */
 .computer-volume-list row {
-  margin: 2px 0;
-  border-radius: var(--io-radius);
+  margin: 4px 0;
+  border: 1px solid var(--io-separator);
+  border-radius: var(--io-radius-lg);
+  background: var(--io-card-bg);
 }
 
 .computer-volume-list row:hover {
   background: var(--io-hover-bg);
 }
 
+.computer-volume-list row:selected {
+  border-color: alpha(var(--io-accent), 0.5);
+  background: var(--io-accent-soft);
+}
+
 .computer-volume-name {
+  font-size: 1.05em;
   font-weight: 700;
 }
 
-.computer-volume-progress trough {
-  min-height: 8px;
+.computer-chip {
+  padding: 1px 8px;
   border-radius: 999px;
-  background: var(--io-muted-bg);
+  background: var(--io-active-bg);
+  color: var(--io-text-dim);
+  font-size: 0.78em;
+  font-weight: 600;
 }
 
-.computer-volume-progress progress {
+.computer-volume-detail {
+  color: var(--io-text-dim);
+  font-size: 0.92em;
+}
+
+progressbar.computer-volume-progress > trough {
+  min-height: 8px;
+  border-radius: 999px;
+  background: var(--io-active-bg);
+}
+
+progressbar.computer-volume-progress > trough > progress {
   min-height: 8px;
   border-radius: 999px;
   background: var(--io-accent);
 }
 
-.computer-volume-usage {
-  font-size: 0.92em;
+progressbar.computer-volume-progress.usage-high > trough > progress {
+  background: var(--io-warning);
 }
 
-.computer-section-title {
-  margin: 12px 0 4px;
-  font-weight: 700;
+progressbar.computer-volume-progress.usage-critical > trough > progress {
+  background: var(--io-danger);
+}
+
+.computer-volume-usage {
+  color: var(--io-text-dim);
+  font-size: 0.9em;
+  font-feature-settings: "tnum";
 }
 
 /* Unmounted volumes read as available-but-idle next to the mounted ones. */
-.computer-volume-row-unmounted .computer-volume-icon {
-  opacity: 0.55;
+.computer-volume-row-unmounted .computer-volume-icon,
+.computer-volume-row-unmounted .computer-volume-name {
+  opacity: 0.6;
 }
 
 button.computer-volume-action {
-  padding: 4px 12px;
+  padding: 4px 14px;
   border: 1px solid var(--io-separator);
+  background: var(--io-control-bg);
+  font-weight: 600;
 }
 
-.computer-stats-separator {
-  margin: 4px 0 2px;
-  background: var(--io-separator);
+button.computer-volume-action:hover {
+  border-color: alpha(var(--io-accent), 0.5);
+  background: var(--io-accent-soft);
 }
 
-.computer-stats {
-  padding: 2px 2px 0;
+.computer-stats,
+.computer-stats > flowboxchild {
+  padding: 0;
+  background: transparent;
 }
 
-.computer-stats-title {
-  font-weight: 700;
+.computer-stat-card {
+  padding: 14px 16px;
+  border: 1px solid var(--io-separator);
+  border-radius: var(--io-radius-lg);
+  background: var(--io-card-bg);
 }
 
-.computer-stat-row {
-  min-height: 28px;
+.computer-stat-icon {
+  color: var(--io-accent-text);
 }
 
 .computer-stat-name {
+  font-size: 0.85em;
   font-weight: 700;
+  color: var(--io-text-dim);
 }
 
 .computer-stat-value {
-  font-size: 0.94em;
+  font-size: 0.95em;
 }
 
 /* ============================================================

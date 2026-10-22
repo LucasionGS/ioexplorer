@@ -2427,13 +2427,12 @@ impl AppWindow {
     fn update_computer_status(&self) {
         let count = self.computer_page.volume_count();
         let unmounted = self.computer_page.unmounted_count();
+        let mounted = plural(count, "drive mounted", "drives mounted");
         if unmounted > 0 {
-            self.status_label.set_text(&format!(
-                "{count} mounted volume(s), {unmounted} not mounted - This PC"
-            ));
-        } else {
             self.status_label
-                .set_text(&format!("{count} mounted volume(s) - This PC"));
+                .set_text(&format!("{mounted}, {unmounted} not mounted"));
+        } else {
+            self.status_label.set_text(&mounted);
         }
     }
 
@@ -2466,6 +2465,8 @@ impl AppWindow {
     }
 
     fn set_file_topbar_state(&self) {
+        self.topbar.search_entry.set_sensitive(true);
+        self.topbar.sort_menu.button.set_sensitive(true);
         self.topbar.new_folder_button.set_sensitive(true);
         self.topbar.location_button.set_sensitive(true);
         self.topbar.list_button.set_sensitive(true);
@@ -2486,6 +2487,11 @@ impl AppWindow {
     }
 
     fn set_computer_topbar_state(&self) {
+        // The search, sort and free space all describe a folder, and these
+        // pages are not one.
+        self.topbar.search_entry.set_sensitive(false);
+        self.topbar.sort_menu.button.set_sensitive(false);
+        self.free_space_label.set_text("");
         self.topbar.back_button.set_sensitive(false);
         self.topbar.forward_button.set_sensitive(false);
         self.topbar.up_button.set_sensitive(false);
@@ -2500,6 +2506,11 @@ impl AppWindow {
     }
 
     fn set_settings_topbar_state(&self) {
+        // The search, sort and free space all describe a folder, and these
+        // pages are not one.
+        self.topbar.search_entry.set_sensitive(false);
+        self.topbar.sort_menu.button.set_sensitive(false);
+        self.free_space_label.set_text("");
         self.topbar.back_button.set_sensitive(false);
         self.topbar.forward_button.set_sensitive(false);
         self.topbar.up_button.set_sensitive(false);

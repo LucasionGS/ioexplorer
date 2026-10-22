@@ -12,9 +12,11 @@ const UNMOUNTED_ROW_CLASS: &str = "computer-volume-row-unmounted";
 pub struct ComputerPage {
     pub root: gtk::ScrolledWindow,
     pub list: gtk::ListBox,
+    subtitle_label: gtk::Label,
     cpu_label: gtk::Label,
     gpu_label: gtk::Label,
     ram_label: gtk::Label,
+    ram_bar: gtk::ProgressBar,
     entries: Rc<RefCell<Vec<VolumeEntry>>>,
     volumes: Rc<Volumes>,
 }
@@ -37,54 +39,98 @@ impl ComputerPage {
         let header_icon = gtk::Image::builder()
             .icon_name("computer-symbolic")
             .pixel_size(28)
+            .width_request(56)
+            .height_request(56)
+            .valign(gtk::Align::Center)
+            .css_classes(["file-glyph", "file-glyph-tile", "ft-folder"])
             .build();
         let header_label = gtk::Label::builder()
             .label("This PC")
             .xalign(0.0)
-            .hexpand(true)
             .css_classes(["computer-page-title"])
             .build();
+        let subtitle_label = gtk::Label::builder()
+            .xalign(0.0)
+            .css_classes(["computer-page-subtitle"])
+            .build();
+        let header_text = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(2)
+            .valign(gtk::Align::Center)
+            .build();
+        header_text.append(&header_label);
+        header_text.append(&subtitle_label);
         let header = gtk::Box::builder()
             .orientation(gtk::Orientation::Horizontal)
-            .spacing(10)
+            .spacing(14)
+            .css_classes(["computer-header"])
             .build();
         header.append(&header_icon);
-        header.append(&header_label);
+        header.append(&header_text);
 
         let cpu_label = system_stat_value_label();
         let gpu_label = system_stat_value_label();
         let ram_label = system_stat_value_label();
-        let stats_section = system_stats_section(&cpu_label, &gpu_label, &ram_label);
-        let stats_separator = gtk::Separator::builder()
-            .orientation(gtk::Orientation::Horizontal)
-            .css_classes(["computer-stats-separator"])
+        let ram_bar = gtk::ProgressBar::builder()
+            .css_classes(["computer-volume-progress"])
             .build();
+        let stats = gtk::FlowBox::builder()
+            .selection_mode(gtk::SelectionMode::None)
+            .homogeneous(true)
+            .min_children_per_line(1)
+            .max_children_per_line(3)
+            .column_spacing(10)
+            .row_spacing(10)
+            .css_classes(["computer-stats"])
+            .build();
+        stats.append(&system_stat_card(
+            "CPU",
+            &["cpu-symbolic", "computer-symbolic"],
+            &cpu_label,
+            None,
+        ));
+        stats.append(&system_stat_card(
+            "Graphics",
+            &["video-display-symbolic"],
+            &gpu_label,
+            None,
+        ));
+        stats.append(&system_stat_card(
+            "Memory",
+            &["memory-symbolic", "media-flash-symbolic"],
+            &ram_label,
+            Some(&ram_bar),
+        ));
 
         let content = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
-            .spacing(12)
-            .margin_top(18)
-            .margin_bottom(18)
-            .margin_start(18)
-            .margin_end(18)
+            .spacing(10)
+            .margin_top(22)
+            .margin_bottom(22)
+            .margin_start(22)
+            .margin_end(22)
             .css_classes(["computer-page"])
             .build();
         content.append(&header);
+        content.append(&section_header("Drives"));
         content.append(&list);
-        content.append(&stats_separator);
-        content.append(&stats_section);
+        content.append(&section_header("System"));
+        content.append(&stats);
 
         let root = gtk::ScrolledWindow::builder()
             .child(&content)
+            .hscrollbar_policy(gtk::PolicyType::Never)
             .css_classes(["content-scroll", "computer-page-scroll"])
             .build();
 
         let page = Self {
             root,
             list,
+            subtitle_label,
             cpu_label,
             gpu_label,
             ram_label,
+            ram_bar,
             entries: Rc::new(RefCell::new(Vec::new())),
             volumes,
         };
@@ -163,6 +209,13 @@ impl ComputerPage {
         self.cpu_label.set_text(&specs.cpu);
         self.gpu_label.set_text(&specs.gpu);
         self.ram_label.set_text(&specs.ram);
+        self.subtitle_label.set_text(&machine_summary());
+
+        let usage = fs::read_to_string("/proc/meminfo")
+            .ok()
+            .and_then(|meminfo| memory_used_fraction(&meminfo));
+        self.ram_bar.set_visible(usage.is_some());
+        self.ram_bar.set_fraction(usage.unwrap_or_default());
     }
 
     pub fn volume_count(&self) -> usize {
@@ -187,28 +240,29 @@ fn volume_row(entry: &VolumeEntry, volumes: &Rc<Volumes>) -> gtk::ListBoxRow {
 
     let actions = volume_action_buttons(entry, volumes);
     let (icon, details) = match entry {
-        VolumeEntry::Mounted(volume) => (&volume.icon, mounted_details(volume, &actions)),
+        VolumeEntry::Mounted(volume) => (&volume.icon, mounted_details(volume)),
         VolumeEntry::Unmounted(volume) => {
             row.add_css_class(UNMOUNTED_ROW_CLASS);
-            (&volume.icon, unmounted_details(volume, &actions))
+            (&volume.icon, unmounted_details(volume))
         }
     };
 
     let icon = gtk::Image::from_gicon(icon);
-    icon.set_pixel_size(32);
-    icon.set_valign(gtk::Align::Start);
+    icon.set_pixel_size(40);
+    icon.set_valign(gtk::Align::Center);
     icon.add_css_class("computer-volume-icon");
 
     let content = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
-        .spacing(14)
-        .margin_top(10)
-        .margin_bottom(10)
-        .margin_start(12)
-        .margin_end(12)
+        .spacing(16)
+        .margin_top(14)
+        .margin_bottom(14)
+        .margin_start(16)
+        .margin_end(16)
         .build();
     content.append(&icon);
     content.append(&details);
+    content.append(&actions);
     row.set_child(Some(&content));
 
     row
@@ -264,62 +318,72 @@ fn volume_action_buttons(entry: &VolumeEntry, volumes: &Rc<Volumes>) -> gtk::Box
     buttons
 }
 
-fn unmounted_details(volume: &UnmountedVolume, actions: &gtk::Box) -> gtk::Box {
-    let name_label = gtk::Label::builder()
-        .label(&volume.name)
+fn volume_name_label(name: &str) -> gtk::Label {
+    gtk::Label::builder()
+        .label(name)
         .xalign(0.0)
-        .hexpand(true)
         .ellipsize(gtk::pango::EllipsizeMode::End)
         .css_classes(["computer-volume-name"])
-        .build();
+        .build()
+}
 
-    let mut parts = vec![volume.device.clone(), volume.fs_type.clone()];
-    if let Some(size) = volume.size.filter(|size| *size > 0) {
-        parts.push(format_bytes(size));
-    }
-    let device_label = gtk::Label::builder()
-        .label(join_non_empty(parts))
-        .xalign(0.0)
-        .ellipsize(gtk::pango::EllipsizeMode::End)
-        .css_classes(["dim-label"])
+/// The name with small chips for the filesystem and device after it.
+fn volume_title(name: &str, chips: &[&str]) -> gtk::Box {
+    let title = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
         .build();
+    title.append(&volume_name_label(name));
+    for chip in chips.iter().filter(|chip| !chip.is_empty()) {
+        title.append(
+            &gtk::Label::builder()
+                .label(*chip)
+                .valign(gtk::Align::Center)
+                .css_classes(["computer-chip"])
+                .build(),
+        );
+    }
+    title
+}
+
+fn unmounted_details(volume: &UnmountedVolume) -> gtk::Box {
+    let size = volume
+        .size
+        .filter(|size| *size > 0)
+        .map(format_bytes)
+        .unwrap_or_default();
     let state_label = gtk::Label::builder()
-        .label("Not mounted - open to mount")
+        .label(join_non_empty(vec![
+            "Not mounted".to_string(),
+            volume.device.clone(),
+            size,
+        ]))
         .xalign(0.0)
         .ellipsize(gtk::pango::EllipsizeMode::End)
-        .css_classes(["dim-label"])
+        .css_classes(["computer-volume-detail"])
         .build();
 
     let details = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
-        .spacing(5)
+        .spacing(4)
         .hexpand(true)
+        .valign(gtk::Align::Center)
         .build();
-    details.append(&title_row(&name_label, actions));
-    details.append(&device_label);
+    details.append(&volume_title(&volume.name, &[&volume.fs_type]));
     details.append(&state_label);
     details
 }
 
-fn mounted_details(volume: &MountVolume, actions: &gtk::Box) -> gtk::Box {
-    let name_label = gtk::Label::builder()
-        .label(&volume.name)
-        .xalign(0.0)
-        .hexpand(true)
-        .ellipsize(gtk::pango::EllipsizeMode::End)
-        .css_classes(["computer-volume-name"])
-        .build();
-    let device_label = gtk::Label::builder()
-        .label(device_summary(volume))
-        .xalign(0.0)
-        .ellipsize(gtk::pango::EllipsizeMode::End)
-        .css_classes(["dim-label"])
-        .build();
+fn mounted_details(volume: &MountVolume) -> gtk::Box {
+    let readonly = if volume.readonly { "read-only" } else { "" };
     let mount_label = gtk::Label::builder()
-        .label(format!("Mounted at {}", volume.mount_path.display()))
+        .label(join_non_empty(vec![
+            volume.mount_path.display().to_string(),
+            volume.device.clone(),
+        ]))
         .xalign(0.0)
         .ellipsize(gtk::pango::EllipsizeMode::Middle)
-        .css_classes(["dim-label"])
+        .css_classes(["computer-volume-detail"])
         .build();
 
     let progress = gtk::ProgressBar::builder()
@@ -329,45 +393,38 @@ fn mounted_details(volume: &MountVolume, actions: &gtk::Box) -> gtk::Box {
         .build();
     if let Some(fraction) = usage_fraction(volume.used, volume.size) {
         progress.set_fraction(fraction);
+        if fraction >= 0.9 {
+            progress.add_css_class("usage-critical");
+        } else if fraction >= 0.75 {
+            progress.add_css_class("usage-high");
+        }
     }
 
     let usage_label = gtk::Label::builder()
         .label(usage_summary(volume.used, volume.size))
         .xalign(1.0)
-        .width_chars(25)
         .ellipsize(gtk::pango::EllipsizeMode::End)
-        .css_classes(["dim-label", "computer-volume-usage"])
+        .css_classes(["computer-volume-usage"])
         .build();
 
     let usage = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
-        .spacing(12)
+        .spacing(14)
+        .margin_top(4)
         .build();
     usage.append(&progress);
     usage.append(&usage_label);
 
     let details = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
-        .spacing(5)
+        .spacing(4)
         .hexpand(true)
+        .valign(gtk::Align::Center)
         .build();
-    details.append(&title_row(&name_label, actions));
-    details.append(&device_label);
+    details.append(&volume_title(&volume.name, &[&volume.fs_type, readonly]));
     details.append(&mount_label);
     details.append(&usage);
     details
-}
-
-/// The volume name with its action buttons beside it, so the buttons do not
-/// squeeze the usage bar below.
-fn title_row(name_label: &gtk::Label, actions: &gtk::Box) -> gtk::Box {
-    let row = gtk::Box::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .spacing(12)
-        .build();
-    row.append(name_label);
-    row.append(actions);
-    row
 }
 
 fn section_header(title: &str) -> gtk::Label {
@@ -378,56 +435,79 @@ fn section_header(title: &str) -> gtk::Label {
         .build()
 }
 
-fn system_stats_section(
-    cpu_label: &gtk::Label,
-    gpu_label: &gtk::Label,
-    ram_label: &gtk::Label,
+/// One of the System cards: a glyph and a name over the value, with an
+/// optional bar under it.
+fn system_stat_card(
+    title: &str,
+    icon_names: &[&str],
+    value: &gtk::Label,
+    bar: Option<&gtk::ProgressBar>,
 ) -> gtk::Box {
-    let title = gtk::Label::builder()
-        .label("System specs")
-        .xalign(0.0)
-        .css_classes(["computer-stats-title"])
-        .build();
-
-    let stats = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(8)
-        .css_classes(["computer-stats"])
-        .build();
-    stats.append(&title);
-    stats.append(&system_stat_row("CPU", cpu_label));
-    stats.append(&system_stat_row("GPU", gpu_label));
-    stats.append(&system_stat_row("RAM", ram_label));
-    stats
-}
-
-fn system_stat_row(label: &str, value: &gtk::Label) -> gtk::Box {
+    // Fallbacks, since not every icon theme draws a CPU or a memory stick.
+    let icon = gtk::Image::from_gicon(&gio::ThemedIcon::from_names(icon_names));
+    icon.set_pixel_size(16);
+    icon.add_css_class("computer-stat-icon");
     let name = gtk::Label::builder()
-        .label(label)
+        .label(title)
         .xalign(0.0)
-        .width_chars(5)
         .css_classes(["computer-stat-name"])
         .build();
-
-    let row = gtk::Box::builder()
+    let heading = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
-        .spacing(14)
-        .css_classes(["computer-stat-row"])
+        .spacing(8)
         .build();
-    row.append(&name);
-    row.append(value);
-    row
+    heading.append(&icon);
+    heading.append(&name);
+
+    let card = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(8)
+        .css_classes(["computer-stat-card"])
+        .build();
+    card.append(&heading);
+    card.append(value);
+    if let Some(bar) = bar {
+        card.append(bar);
+    }
+    card
 }
 
 fn system_stat_value_label() -> gtk::Label {
     gtk::Label::builder()
         .xalign(0.0)
-        .hexpand(true)
+        .yalign(0.0)
+        .vexpand(true)
         .selectable(true)
         .wrap(true)
         .wrap_mode(gtk::pango::WrapMode::WordChar)
-        .css_classes(["dim-label", "computer-stat-value"])
+        .css_classes(["computer-stat-value"])
         .build()
+}
+
+/// "ionix - Arch Linux": the host name and the distribution's own name.
+fn machine_summary() -> String {
+    let host = read_trimmed("/etc/hostname")
+        .or_else(|| read_trimmed("/proc/sys/kernel/hostname"))
+        .unwrap_or_default();
+    let os = fs::read_to_string("/etc/os-release")
+        .ok()
+        .and_then(|contents| os_pretty_name(&contents))
+        .unwrap_or_default();
+    join_non_empty(vec![host, os])
+}
+
+fn os_pretty_name(os_release: &str) -> Option<String> {
+    os_release.lines().find_map(|line| {
+        let value = line.strip_prefix("PRETTY_NAME=")?;
+        Some(value.trim_matches('"').to_string())
+    })
+}
+
+/// How much of the memory is in use, from `MemTotal` and `MemAvailable`.
+fn memory_used_fraction(meminfo: &str) -> Option<f64> {
+    let total = meminfo_kib(meminfo, "MemTotal").filter(|total| *total > 0)?;
+    let available = meminfo_kib(meminfo, "MemAvailable")?;
+    Some((total.saturating_sub(available) as f64 / total as f64).clamp(0.0, 1.0))
 }
 
 fn system_specs() -> SystemSpecs {
@@ -681,14 +761,6 @@ fn empty_row() -> gtk::ListBoxRow {
     row
 }
 
-fn device_summary(volume: &MountVolume) -> String {
-    let mut parts = vec![volume.device.clone(), volume.fs_type.clone()];
-    if volume.readonly {
-        parts.push("read-only".to_string());
-    }
-    join_non_empty(parts)
-}
-
 fn join_non_empty(parts: Vec<String>) -> String {
     parts
         .into_iter()
@@ -699,9 +771,11 @@ fn join_non_empty(parts: Vec<String>) -> String {
 
 fn usage_summary(used: Option<u64>, total: Option<u64>) -> String {
     match (used, total) {
-        (Some(used), Some(total)) if total > 0 => {
-            format!("{} used of {}", format_bytes(used), format_bytes(total))
-        }
+        (Some(used), Some(total)) if total > 0 => format!(
+            "{} free of {}",
+            format_bytes(total.saturating_sub(used)),
+            format_bytes(total)
+        ),
         (_, Some(total)) if total > 0 => format!("{} total", format_bytes(total)),
         _ => "Usage unavailable".to_string(),
     }
@@ -735,14 +809,28 @@ fn format_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        cpu_specs_from_cpuinfo, format_bytes, gpu_specs_from_lspci, ram_specs_from_meminfo,
-        usage_fraction, usage_summary,
+        cpu_specs_from_cpuinfo, format_bytes, gpu_specs_from_lspci, memory_used_fraction,
+        os_pretty_name, ram_specs_from_meminfo, usage_fraction, usage_summary,
     };
+
+    #[test]
+    fn reads_the_distribution_name() {
+        let os_release = "NAME=\"Arch Linux\"\nPRETTY_NAME=\"Arch Linux\"\nID=arch\n";
+
+        assert_eq!(os_pretty_name(os_release).as_deref(), Some("Arch Linux"));
+    }
+
+    #[test]
+    fn memory_in_use_is_what_is_not_available() {
+        let meminfo = "MemTotal: 1000 kB\nMemAvailable: 250 kB\n";
+
+        assert_eq!(memory_used_fraction(meminfo), Some(0.75));
+    }
 
     #[test]
     fn formats_volume_usage() {
         assert_eq!(format_bytes(1536), "1.5 KB");
-        assert_eq!(usage_summary(Some(512), Some(1024)), "512 B used of 1.0 KB");
+        assert_eq!(usage_summary(Some(256), Some(1024)), "768 B free of 1.0 KB");
         assert_eq!(usage_fraction(Some(256), Some(1024)), Some(0.25));
     }
 
