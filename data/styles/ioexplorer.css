@@ -712,6 +712,30 @@ button.list-header-button.list-header-active {
   background: var(--io-muted-bg);
 }
 
+/* Type glyphs (the symbolic icon style). The glyph takes its family's
+   tint; at tile size it sits on a soft backing of the same tint. */
+.file-glyph.ft-folder { color: var(--io-ft-folder); }
+.file-glyph.ft-image { color: var(--io-ft-image); }
+.file-glyph.ft-video { color: var(--io-ft-video); }
+.file-glyph.ft-audio { color: var(--io-ft-audio); }
+.file-glyph.ft-archive { color: var(--io-ft-archive); }
+.file-glyph.ft-document { color: var(--io-ft-document); }
+.file-glyph.ft-spreadsheet { color: var(--io-ft-spreadsheet); }
+.file-glyph.ft-presentation { color: var(--io-ft-presentation); }
+.file-glyph.ft-pdf { color: var(--io-ft-pdf); }
+.file-glyph.ft-code { color: var(--io-ft-code); }
+.file-glyph.ft-text { color: var(--io-ft-text); }
+.file-glyph.ft-executable { color: var(--io-ft-executable); }
+.file-glyph.ft-disk { color: var(--io-ft-disk); }
+.file-glyph.ft-font { color: var(--io-ft-font); }
+.file-glyph.ft-other { color: var(--io-ft-other); }
+
+.file-glyph-tile {
+  border-radius: var(--io-radius-lg);
+  background: alpha(currentColor, 0.13);
+  box-shadow: inset 0 0 0 1px alpha(currentColor, 0.16);
+}
+
 /* Bottom-left, where every desktop puts an emblem. The disc is drawn here
  * rather than baked into the symbolic so the badge stays readable over a photo
  * thumbnail as well as over a flat folder icon. */

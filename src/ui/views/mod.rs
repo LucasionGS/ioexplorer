@@ -1,3 +1,4 @@
+pub mod file_type;
 pub mod icon;
 pub mod list;
 pub mod thumbnail;
@@ -11,8 +12,9 @@ use std::{
 use gtk::prelude::*;
 
 use crate::{
+    config::IconStyle,
     providers::{FileIcon, FileItem, FileKind},
-    ui::dnd::DropPayload,
+    ui::{dnd::DropPayload, views::file_type::FileCategory},
 };
 
 pub type FolderDropHandler = Rc<dyn Fn(PathBuf, DropPayload)>;
@@ -89,16 +91,89 @@ pub fn image_for_item(item: &FileItem, pixel_size: i32) -> gtk::Image {
 /// emblem has to be a sibling of it rather than part of it.
 ///
 /// Callers keep the returned image: it is what a `ThumbnailTarget` wraps.
-pub fn icon_widget_for_item(item: &FileItem, pixel_size: i32) -> (gtk::Widget, gtk::Image) {
-    let image = image_for_item(item, pixel_size);
+pub fn icon_widget_for_item(
+    item: &FileItem,
+    pixel_size: i32,
+    style: IconStyle,
+) -> (gtk::Widget, gtk::Image) {
+    let image = gtk::Image::builder()
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Center)
+        .build();
+    set_view_icon(&image, item, pixel_size, style);
     let Some(link) = item.link.as_ref() else {
         return (image.clone().upcast(), image);
     };
 
-    let overlay = gtk::Overlay::builder().child(&image).build();
+    // Centred around the image, so the emblem's corner is the icon's corner
+    // and not the corner of a tile-wide slot.
+    let overlay = gtk::Overlay::builder()
+        .child(&image)
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Center)
+        .build();
     overlay.add_overlay(&link_emblem(pixel_size, link.resolved.is_none()));
     (overlay.upcast(), image)
 }
+
+/// The glyph's share of its slot in the symbolic style. A symbolic drawn at
+/// the full slot reads as heavy clip-art; at half, inside a tinted tile, it
+/// reads as a badge for the file's type.
+const GLYPH_SCALE: f64 = 0.5;
+
+/// Draws `item` into `image` the way the file views do: its own icon if it
+/// has one, otherwise a type icon in `style`, filling a `pixel_size` slot.
+///
+/// In the symbolic style the glyph is smaller than the slot and tinted by its
+/// category (`.file-glyph` plus an `ft-*` class); slots of tile size also get
+/// a tinted backing (`.file-glyph-tile`). A thumbnail landing on the image
+/// later drops those classes again.
+pub fn set_view_icon(image: &gtk::Image, item: &FileItem, pixel_size: i32, style: IconStyle) {
+    for class in FileCategory::ALL_CLASSES {
+        image.remove_css_class(class);
+    }
+    image.remove_css_class("file-glyph");
+    image.remove_css_class("file-glyph-tile");
+
+    match &item.icon {
+        Some(FileIcon::Path(path)) => image.set_from_file(Some(path)),
+        Some(FileIcon::Themed(icon_name)) => image.set_icon_name(Some(icon_name)),
+        None => image.set_from_gicon(&file_type::icon(item, style)),
+    }
+
+    if item.icon.is_some() || style != IconStyle::Symbolic {
+        image.set_pixel_size(pixel_size);
+        return;
+    }
+
+    image.add_css_class("file-glyph");
+    image.add_css_class(FileCategory::of(item).css_class());
+    image.set_size_request(pixel_size, pixel_size);
+    if pixel_size >= GLYPH_TILE_MIN_SIZE {
+        image.add_css_class("file-glyph-tile");
+        image.set_pixel_size((f64::from(pixel_size) * GLYPH_SCALE).round() as i32);
+    } else {
+        image.set_pixel_size((pixel_size * 3 / 4).max(12));
+    }
+}
+
+/// A glyph in a tinted tile for something that is not a file, like the
+/// details pane's "nothing selected", tinted by `category_class`.
+pub fn set_glyph_tile(image: &gtk::Image, icon_name: &str, pixel_size: i32, category_class: &str) {
+    for class in FileCategory::ALL_CLASSES {
+        image.remove_css_class(class);
+    }
+    image.set_icon_name(Some(icon_name));
+    image.set_size_request(pixel_size, pixel_size);
+    image.set_pixel_size((f64::from(pixel_size) * GLYPH_SCALE).round() as i32);
+    image.add_css_class("file-glyph");
+    image.add_css_class("file-glyph-tile");
+    image.add_css_class(category_class);
+}
+
+/// Below this a slot is a row icon, where a tile behind the glyph would only
+/// be a smudge.
+const GLYPH_TILE_MIN_SIZE: i32 = 40;
 
 /// The `gtk::Image` inside whatever [`icon_widget_for_item`] built.
 ///

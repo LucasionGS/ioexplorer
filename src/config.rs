@@ -19,6 +19,17 @@ pub enum ViewMode {
     Icon,
 }
 
+/// How the file views draw an entry that has no thumbnail or icon of its own.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum IconStyle {
+    /// Symbolic glyphs tinted by file type, so the icons follow the theme.
+    #[default]
+    Symbolic,
+    /// The icon theme's full-colour icons.
+    Color,
+}
+
 #[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ListColumns {
     pub size: bool,
@@ -882,6 +893,8 @@ pub struct AppConfig {
     pub sidebar_width: i32,
     pub custom_css: Option<PathBuf>,
     pub list_columns: ListColumns,
+    #[serde(default)]
+    pub icon_style: IconStyle,
     /// The order a freshly opened window starts in. The window then owns its
     /// sort the way it owns its view mode, persisted in [`crate::state`].
     #[serde(default)]
@@ -912,6 +925,7 @@ impl Default for AppConfig {
                 modified: true,
                 created: false,
             },
+            icon_style: IconStyle::default(),
             sort: SortOrder::default(),
             actions: Vec::new(),
             spotlight: SpotlightConfig::default(),
@@ -1176,6 +1190,7 @@ filters = ["*.txt", "*.md"]
         .expect("valid config");
 
         assert_eq!(parsed.default_view, ViewMode::List);
+        assert_eq!(parsed.icon_style, IconStyle::Symbolic);
         assert!(parsed.show_hidden);
         assert!(!parsed.list_columns.kind);
         assert_eq!(parsed.actions.len(), 1);

@@ -128,6 +128,9 @@ impl ThumbnailTarget {
             Self::Icon(image) => {
                 image.set_paintable(Some(&render.texture));
                 image.set_pixel_size(render.pixel_size);
+                // The picture replaces the type glyph, tint and tile with it.
+                image.remove_css_class("file-glyph");
+                image.remove_css_class("file-glyph-tile");
                 image.add_css_class("image-thumbnail");
             }
             Self::Picture(picture) => {

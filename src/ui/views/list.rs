@@ -3,14 +3,14 @@ use std::rc::Rc;
 use gtk::prelude::*;
 
 use crate::{
-    config::ListColumns,
+    config::{IconStyle, ListColumns},
     providers::{FileItem, FileKind},
     sorting::{SortKey, SortOrder},
     ui::{
         dnd,
         views::{
             EntryContextMenuHandler, EntrySelectionHandler, FileDragHandler, FolderDropHandler,
-            entry_icon, format_size, format_timestamp, icon_widget_for_item,
+            entry_icon, file_type, format_size, format_timestamp, icon_widget_for_item,
             thumbnail::{self, ThumbnailCache, ThumbnailSpec, ThumbnailTarget},
         },
     },
@@ -48,7 +48,7 @@ struct MetaColumn {
 }
 
 fn kind_value(item: &FileItem) -> String {
-    item.kind_label().to_string()
+    file_type::kind_description(item)
 }
 
 fn size_value(item: &FileItem) -> String {
@@ -65,7 +65,7 @@ fn created_value(item: &FileItem) -> String {
 
 const KIND_COLUMN: MetaColumn = MetaColumn {
     title: "Kind",
-    width: 96,
+    width: 150,
     // The kind itself is Folder/File/Link, which "folders first" already
     // separates out. Extension is the ordering someone clicking a type column
     // is actually after: every .txt together, every .rs together.
@@ -213,12 +213,14 @@ fn header_button(
 pub struct ListViewOptions {
     pub columns: ListColumns,
     pub thumbnail_cache: ThumbnailCache,
+    pub icon_style: IconStyle,
 }
 
 /// What every row in one pass shares, resolved once rather than per row.
 struct RowContext<'a> {
     columns: &'a [MetaColumn],
     thumbnail_cache: &'a ThumbnailCache,
+    icon_style: IconStyle,
 }
 
 pub fn populate(
@@ -238,6 +240,7 @@ pub fn populate(
     let context = RowContext {
         columns: &columns,
         thumbnail_cache: &options.thumbnail_cache,
+        icon_style: options.icon_style,
     };
     for (index, item) in items.iter().enumerate() {
         list.append(&row_for(
@@ -321,7 +324,7 @@ fn row_for(
         .css_classes(["file-row"])
         .build();
 
-    let (icon_widget, icon) = icon_widget_for_item(item, ICON_SIZE);
+    let (icon_widget, icon) = icon_widget_for_item(item, ICON_SIZE, context.icon_style);
     icon.add_css_class("file-row-icon");
     thumbnail::apply_cached(
         item,
@@ -398,6 +401,9 @@ fn meta_label(text: &str, width: i32) -> gtk::Label {
         .label(text)
         .xalign(0.0)
         .width_request(width)
+        // Without a cap the label asks for its whole text, and a long kind
+        // like "Microsoft PowerPoint Presentation" pushes into the name.
+        .max_width_chars(1)
         .ellipsize(gtk::pango::EllipsizeMode::End)
         .css_classes(["dim-label"])
         .build()

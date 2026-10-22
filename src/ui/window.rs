@@ -16,7 +16,7 @@ use url::Url;
 
 use crate::{
     bookmarks,
-    config::{AppConfig, CustomActionConfig, ViewMode, clamp_icon_size},
+    config::{AppConfig, CustomActionConfig, IconStyle, ViewMode, clamp_icon_size},
     custom_actions::{self, ActionTarget},
     file_ops::{
         self, ArchivePath, FileClipboardOperation, archive_paths, broken_link_message,
@@ -105,10 +105,11 @@ struct DetailsPanel {
     subtitle_label: gtk::Label,
     rows: gtk::Box,
     thumbnail_cache: views::thumbnail::ThumbnailCache,
+    icon_style: Rc<Cell<IconStyle>>,
 }
 
 impl DetailsPanel {
-    fn new(thumbnail_cache: views::thumbnail::ThumbnailCache) -> Self {
+    fn new(thumbnail_cache: views::thumbnail::ThumbnailCache, icon_style: IconStyle) -> Self {
         let icon = gtk::Image::builder()
             .pixel_size(56)
             .halign(gtk::Align::Start)
@@ -205,6 +206,7 @@ impl DetailsPanel {
             subtitle_label,
             rows,
             thumbnail_cache,
+            icon_style: Rc::new(Cell::new(icon_style)),
         }
     }
 
@@ -239,8 +241,7 @@ impl DetailsPanel {
     }
 
     fn clear(&self) {
-        self.icon.set_icon_name(Some("dialog-information-symbolic"));
-        self.icon.set_pixel_size(56);
+        views::set_glyph_tile(&self.icon, "dialog-information-symbolic", 56, "ft-folder");
         self.title_label.set_text("No item selected");
         self.subtitle_label.set_text("");
         self.set_preview(None);
@@ -249,20 +250,17 @@ impl DetailsPanel {
 
     fn set_single_item(&self, item: &FileItem, media_details_cache: &MediaDetailsCache) {
         views::clear_box_children(&self.rows);
-        views::set_image_for_item(&self.icon, item, 56);
+        views::set_view_icon(&self.icon, item, 56, self.icon_style.get());
         self.set_preview(Some(item));
         let media = media_details_for_item(item, media_details_cache);
-        let type_label = media
-            .as_ref()
-            .map(|details| details.kind.label())
-            .unwrap_or(item.kind_label());
+        let type_label = views::file_type::kind_description(item);
         self.title_label.set_text(item.display_name());
-        self.subtitle_label.set_text(type_label);
+        self.subtitle_label.set_text(&type_label);
 
         if item.display_name() != item.name {
             self.append_row("File name", &item.name);
         }
-        self.append_row("Type", type_label);
+        self.append_row("Type", &type_label);
         if let Some(size) = item.size {
             self.append_row("Size", &views::format_bytes(size));
         }
@@ -292,8 +290,7 @@ impl DetailsPanel {
 
     fn set_multiple_items(&self, items: &[FileItem], media_details_cache: &MediaDetailsCache) {
         views::clear_box_children(&self.rows);
-        self.icon.set_icon_name(Some("edit-select-all-symbolic"));
-        self.icon.set_pixel_size(56);
+        views::set_glyph_tile(&self.icon, "edit-select-all-symbolic", 56, "ft-folder");
         self.set_preview(None);
         self.title_label
             .set_text(&format!("{} items selected", items.len()));
@@ -489,16 +486,6 @@ enum MediaKind {
     Image,
     Audio,
     Video,
-}
-
-impl MediaKind {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Image => "Image",
-            Self::Audio => "Audio",
-            Self::Video => "Video",
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -817,7 +804,7 @@ impl AppWindow {
         // One cache behind all three views, so a photo the grid has already
         // decoded costs a list row or the details panel nothing but a resize.
         let thumbnail_cache = views::thumbnail::new_cache();
-        let details_panel = DetailsPanel::new(Rc::clone(&thumbnail_cache));
+        let details_panel = DetailsPanel::new(Rc::clone(&thumbnail_cache), config.icon_style);
         details_panel.clear();
         let selection_changed = selection_changed_handler(
             &selected_indices,
@@ -1744,7 +1731,8 @@ impl AppWindow {
             self.refresh_action_editor();
         }
 
-        if change.list_columns_changed() {
+        if change.list_columns_changed() || change.icon_style_changed() {
+            self.details_panel.icon_style.set(change.config.icon_style);
             self.render_list_header();
             self.render_entries();
         }
@@ -2504,6 +2492,7 @@ impl AppWindow {
             &views::list::ListViewOptions {
                 columns: list_columns,
                 thumbnail_cache: Rc::clone(&self.thumbnail_cache),
+                icon_style: self.config.borrow().icon_style,
             },
             folder_drop_handler.clone(),
             list_drag_handler,
@@ -2516,6 +2505,7 @@ impl AppWindow {
             views::icon::IconViewOptions {
                 icon_size: self.icon_size.get(),
                 thumbnail_cache: Rc::clone(&self.thumbnail_cache),
+                icon_style: self.config.borrow().icon_style,
             },
             folder_drop_handler,
             grid_drag_handler,
@@ -2562,6 +2552,7 @@ impl AppWindow {
             views::icon::IconViewOptions {
                 icon_size: self.icon_size.get(),
                 thumbnail_cache: Rc::clone(&self.thumbnail_cache),
+                icon_style: self.config.borrow().icon_style,
             },
         );
     }

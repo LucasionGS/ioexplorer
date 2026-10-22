@@ -50,6 +50,10 @@ impl ConfigChange {
         self.config.actions != self.previous.actions
     }
 
+    pub fn icon_style_changed(&self) -> bool {
+        self.config.icon_style != self.previous.icon_style
+    }
+
     pub fn sidebar_width_changed(&self) -> bool {
         self.config.sidebar_width != self.previous.sidebar_width
     }
