@@ -629,6 +629,7 @@ fn open_theme_color_dialog(control: &ThemeColorControl) {
         .default_width(520)
         .default_height(440)
         .build();
+    dialog.add_css_class("io-file-manager");
     if let Some(parent) = parent.as_ref() {
         dialog.set_transient_for(Some(parent));
     }

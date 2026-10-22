@@ -979,6 +979,7 @@ impl AppWindow {
             .default_height(760)
             .child(&root)
             .build();
+        window.add_css_class("io-file-manager");
 
         let chooser = chooser_request
             .zip(chooser_controls)
@@ -3229,6 +3230,7 @@ impl AppWindow {
             .default_width(default_width)
             .default_height(default_height)
             .build();
+        viewer_window.add_css_class("io-file-manager");
         viewer_window.set_focusable(true);
 
         let root = gtk::Box::builder()
@@ -3517,6 +3519,7 @@ impl AppWindow {
             .default_width(520)
             .resizable(false)
             .build();
+        editor_window.add_css_class("io-file-manager");
 
         let content = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
@@ -3845,6 +3848,7 @@ impl AppWindow {
             .default_width(420)
             .resizable(false)
             .build();
+        rename_window.add_css_class("io-file-manager");
 
         let content = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
@@ -4159,6 +4163,7 @@ impl AppWindow {
             .default_width(420)
             .resizable(false)
             .build();
+        create_window.add_css_class("io-file-manager");
 
         let content = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
@@ -4424,6 +4429,7 @@ impl AppWindow {
             .default_width(420)
             .resizable(false)
             .build();
+        overwrite_window.add_css_class("io-file-manager");
 
         let content = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)

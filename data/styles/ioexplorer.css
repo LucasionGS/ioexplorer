@@ -1,108 +1,336 @@
-window {
-  background: rgba(10, 12, 16, 0.74);
-  color: rgba(244, 247, 252, 0.94);
+/* ============================================================
+   Theme tokens
+
+   Everything below paints with these. A theme (Settings -> Theme, or a
+   theme.css next to config.toml) only has to set the first block on
+   `window`; every other tone is mixed from it, and any of those can be
+   overridden too. The defaults are the Ionix palette.
+   ============================================================ */
+
+window,
+tooltip {
+  /* Base palette: what Settings -> Theme writes */
+  --io-window-bg: rgba(15, 10, 24, 0.74);
+  --io-panel-bg: rgba(26, 16, 37, 0.86);
+  --io-muted-bg: rgba(15, 10, 24, 0.32);
+  --io-accent: rgb(168, 85, 247);
+  --io-selection: rgba(168, 85, 247, 0.34);
+  --io-text: rgba(226, 217, 243, 0.94);
+  --io-border: rgba(168, 85, 247, 0.2);
+  --io-radius: 8px;
+
+  /* Surfaces */
+  --io-view-bg: var(--io-panel-bg);
+  --io-popover-bg: alpha(var(--io-panel-bg), 1.14);
+  --io-card-bg: alpha(var(--io-text), 0.04);
+  --io-control-bg: alpha(var(--io-text), 0.06);
+  --io-hover-bg: alpha(var(--io-text), 0.07);
+  --io-active-bg: alpha(var(--io-text), 0.12);
+  --io-separator: alpha(var(--io-text), 0.08);
+  --io-shadow: rgba(0, 0, 0, 0.38);
+
+  /* Accent */
+  --io-accent-fg: rgb(255, 255, 255);
+  --io-accent-soft: alpha(var(--io-accent), 0.16);
+  --io-accent-text: color-mix(in srgb, var(--io-accent) 70%, white);
+  --io-selection-hover: alpha(var(--io-accent), 0.44);
+
+  /* Text */
+  --io-text-dim: alpha(var(--io-text), 0.68);
+  --io-text-faint: alpha(var(--io-text), 0.45);
+
+  /* Geometry */
+  --io-radius-sm: calc(var(--io-radius) * 0.75);
+  --io-radius-lg: calc(var(--io-radius) + 4px);
+
+  /* Meaning. Kept out of the palette so a warning never takes the accent. */
+  --io-success: rgb(74, 222, 128);
+  --io-warning: rgb(251, 191, 36);
+  --io-danger: rgb(248, 113, 113);
+
+  /* File type tints, for the symbolic icon style */
+  --io-ft-folder: var(--io-accent-text);
+  --io-ft-image: rgb(244, 114, 182);
+  --io-ft-video: rgb(251, 146, 60);
+  --io-ft-audio: rgb(45, 212, 191);
+  --io-ft-archive: rgb(250, 204, 21);
+  --io-ft-document: rgb(96, 165, 250);
+  --io-ft-spreadsheet: rgb(74, 222, 128);
+  --io-ft-presentation: rgb(251, 113, 133);
+  --io-ft-pdf: rgb(248, 113, 113);
+  --io-ft-code: rgb(56, 189, 248);
+  --io-ft-executable: rgb(163, 230, 53);
+  --io-ft-disk: rgb(148, 163, 184);
+  --io-ft-font: rgb(253, 186, 116);
+  --io-ft-text: var(--io-text-dim);
+  --io-ft-other: var(--io-text-faint);
 }
 
+window {
+  background: var(--io-window-bg);
+  color: var(--io-text);
+}
+
+/* ============================================================
+   File manager: generic widgets
+
+   Scoped to `.io-file-manager` (the browser window, its dialogs and the
+   file chooser) so the other ioexplorer programs keep their own look.
+   ============================================================ */
+
+.io-file-manager selection {
+  background: alpha(var(--io-accent), 0.4);
+}
+
+.io-file-manager *:focus-visible {
+  outline-color: alpha(var(--io-accent), 0.7);
+}
+
+.io-file-manager button {
+  min-height: 30px;
+  padding: 2px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--io-radius);
+  background: var(--io-control-bg);
+  box-shadow: none;
+  color: inherit;
+  text-shadow: none;
+  transition: background 120ms ease-out, color 120ms ease-out;
+}
+
+.io-file-manager button.image-button {
+  min-width: 30px;
+  padding: 2px;
+}
+
+.io-file-manager button:hover {
+  background: var(--io-hover-bg);
+}
+
+.io-file-manager button:active {
+  background: var(--io-active-bg);
+}
+
+.io-file-manager button:checked {
+  background: var(--io-accent-soft);
+  color: var(--io-accent-text);
+}
+
+.io-file-manager button:disabled {
+  opacity: 0.4;
+}
+
+.io-file-manager button.flat {
+  background: transparent;
+}
+
+.io-file-manager button.flat:hover {
+  background: var(--io-hover-bg);
+}
+
+.io-file-manager button.suggested-action {
+  background: var(--io-accent);
+  color: var(--io-accent-fg);
+  font-weight: 600;
+}
+
+.io-file-manager button.suggested-action:hover {
+  background: color-mix(in srgb, var(--io-accent) 85%, white);
+}
+
+.io-file-manager button.destructive-action {
+  color: var(--io-danger);
+}
+
+.io-file-manager button.suggested-action.destructive-action,
+.io-file-manager .dialog-action-area button.destructive-action {
+  background: alpha(var(--io-danger), 0.2);
+}
+
+.io-file-manager entry {
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--io-separator);
+  border-radius: var(--io-radius);
+  background: var(--io-control-bg);
+  box-shadow: none;
+  color: inherit;
+  outline: none;
+  caret-color: var(--io-accent-text);
+}
+
+.io-file-manager entry:focus-within {
+  border-color: alpha(var(--io-accent), 0.7);
+  box-shadow: 0 0 0 2px alpha(var(--io-accent), 0.22);
+}
+
+.io-file-manager entry > image {
+  color: var(--io-text-dim);
+}
+
+.io-file-manager entry placeholder,
+.io-file-manager entry > text > placeholder {
+  color: var(--io-text-faint);
+}
+
+.io-file-manager checkbutton check,
+.io-file-manager checkbutton radio {
+  border: 1px solid alpha(var(--io-text), 0.3);
+  background: var(--io-control-bg);
+  box-shadow: none;
+}
+
+.io-file-manager checkbutton check:checked,
+.io-file-manager checkbutton radio:checked {
+  border-color: var(--io-accent);
+  background-color: var(--io-accent);
+  color: var(--io-accent-fg);
+}
+
+.io-file-manager switch {
+  border: none;
+  background: var(--io-active-bg);
+}
+
+.io-file-manager switch:checked {
+  background: var(--io-accent);
+}
+
+.io-file-manager switch > slider {
+  border: none;
+  background: white;
+  box-shadow: 0 1px 3px alpha(black, 0.3);
+}
+
+.io-file-manager spinbutton,
+.io-file-manager dropdown > button {
+  border-radius: var(--io-radius);
+}
+
+.io-file-manager spinbutton {
+  border: 1px solid var(--io-separator);
+  background: var(--io-control-bg);
+  box-shadow: none;
+}
+
+.io-file-manager spinbutton > button {
+  border-radius: 0;
+  background: transparent;
+}
+
+.io-file-manager scrollbar {
+  border: none;
+  background: transparent;
+}
+
+.io-file-manager scrollbar slider {
+  min-width: 6px;
+  min-height: 6px;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
+  background-color: alpha(var(--io-text), 0.22);
+}
+
+.io-file-manager scrollbar slider:hover {
+  background-color: alpha(var(--io-text), 0.38);
+}
+
+.io-file-manager scrollbar slider:active {
+  background-color: alpha(var(--io-accent), 0.7);
+}
+
+.io-file-manager popover > contents {
+  padding: 6px;
+  border: 1px solid var(--io-border);
+  border-radius: var(--io-radius-lg);
+  background: var(--io-popover-bg);
+  box-shadow: 0 14px 36px var(--io-shadow);
+  color: var(--io-text);
+}
+
+.io-file-manager popover > arrow {
+  border: 1px solid var(--io-border);
+  background: var(--io-popover-bg);
+}
+
+.io-file-manager separator {
+  background: var(--io-separator);
+}
+
+.io-file-manager paned > separator {
+  min-width: 1px;
+  min-height: 1px;
+  background: transparent;
+}
+
+tooltip {
+  border: 1px solid var(--io-border);
+  border-radius: var(--io-radius);
+  background: var(--io-popover-bg);
+  box-shadow: none;
+  color: var(--io-text);
+}
+
+tooltip > box {
+  padding: 2px 4px;
+}
+
+.dim-label {
+  color: var(--io-text-dim);
+}
+
+/* ============================================================
+   File manager: header
+   ============================================================ */
+
 .topbar {
-  padding: 6px 8px;
-  background: rgba(13, 15, 20, 0.86);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  padding: 8px 10px;
+  background: transparent;
+  border-bottom: 1px solid var(--io-separator);
 }
 
 .toolbar-group {
-  border-radius: 6px;
-  background: rgba(0, 0, 0, 0.24);
+  border-radius: var(--io-radius);
+  background: transparent;
 }
 
 .toolbar-group > button,
 .toolbar-group > togglebutton,
-.breadcrumb-button {
+.toolbar-group > menubutton > button {
   min-width: 34px;
   min-height: 32px;
-  padding: 0 9px;
-  border-radius: 0;
+  padding: 0 8px;
+  background: transparent;
 }
 
-.toolbar-group > button:first-child,
-.toolbar-group > togglebutton:first-child,
-.breadcrumb-button:first-child {
-  border-top-left-radius: 6px;
-  border-bottom-left-radius: 6px;
+.toolbar-group > button:hover,
+.toolbar-group > togglebutton:hover,
+.toolbar-group > menubutton > button:hover {
+  background: var(--io-hover-bg);
 }
 
-.toolbar-group > button:last-child,
-.toolbar-group > togglebutton:last-child,
-.breadcrumb-button:last-child {
-  border-top-right-radius: 6px;
-  border-bottom-right-radius: 6px;
+.toolbar-group > togglebutton:checked {
+  background: var(--io-accent-soft);
+  color: var(--io-accent-text);
 }
 
-.sidebar {
-  background: rgba(10, 12, 16, 0.68);
-  border-right: 1px solid rgba(255, 255, 255, 0.12);
+.breadcrumbs,
+.path-stack {
+  min-width: 260px;
+  border-radius: var(--io-radius);
+  background: var(--io-control-bg);
 }
 
-.sidebar-nav-button {
-  margin: 6px;
-  border-radius: 6px;
-}
-
-.sidebar-nav-button + .sidebar-nav-button {
-  margin-top: 0;
-}
-
-.sidebar-separator {
-  margin: 0 8px 4px;
-  background: rgba(255, 255, 255, 0.12);
-}
-
-.sidebar-list row {
-  border-radius: 6px;
-  margin: 2px 6px;
-}
-
-.sidebar-nav-button:checked,
-.sidebar-list row:selected {
-  background: rgba(67, 123, 214, 0.34);
-}
-
-.sidebar-nav-button:checked:hover,
-.sidebar-list row:selected:hover {
-  background: rgba(82, 145, 238, 0.44);
-}
-
-.sidebar-section-title {
-  margin: 12px 16px 4px;
-  font-size: 0.85em;
-  font-weight: 700;
-  color: alpha(currentColor, 0.6);
-}
-
-/* Unmounted drives read as available-but-idle next to the mounted ones. */
-.sidebar-device-unmounted .sidebar-device-icon {
-  opacity: 0.55;
-}
-
-.sidebar-eject-button {
-  min-width: 0;
-  min-height: 0;
-  padding: 2px;
-}
-
-.breadcrumbs {
-  min-width: 180px;
-  background: rgba(0, 0, 0, 0.16);
-  border-radius: 6px;
-}
-
-.breadcrumb-button {
+button.breadcrumb-button {
+  min-height: 32px;
+  padding: 0 8px;
+  background: transparent;
   font-weight: 600;
 }
 
-.path-stack {
-  min-width: 260px;
-  background: rgba(0, 0, 0, 0.16);
-  border-radius: 6px;
+button.breadcrumb-button:hover {
+  background: var(--io-hover-bg);
 }
 
 .path-entry {
@@ -110,138 +338,117 @@ window {
   min-width: 260px;
 }
 
+/* ============================================================
+   File manager: tabs
+   ============================================================ */
+
 .tab-strip {
   min-height: 38px;
-  padding: 5px 8px 0;
-  background: rgba(10, 12, 16, 0.62);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  padding: 6px 8px 0;
+  background: transparent;
+  border-bottom: 1px solid var(--io-separator);
 }
 
 .file-tab {
-  border-radius: 6px 6px 0 0;
-  background: rgba(0, 0, 0, 0.2);
+  border-radius: var(--io-radius) var(--io-radius) 0 0;
+  background: transparent;
 }
 
-.file-tab-button {
+button.file-tab-button {
   min-height: 32px;
   min-width: 96px;
-  padding: 0 10px;
-  border-radius: 6px 0 0 0;
+  padding: 0 12px;
+  border-radius: var(--io-radius) 0 0 0;
+  background: transparent;
 }
 
-.file-tab-button:checked {
-  background: rgba(82, 145, 238, 0.28);
+button.file-tab-button:checked {
+  background: var(--io-accent-soft);
+  color: var(--io-text);
 }
 
-.file-tab-close,
-.tab-new-button {
+button.file-tab-close,
+button.tab-new-button {
   min-height: 32px;
   min-width: 32px;
   padding: 0;
-  border-radius: 0 6px 0 0;
-}
-
-.tab-new-button {
-  border-radius: 6px 6px 0 0;
-}
-
-.list-header {
-  padding: 6px 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
-}
-
-/* No horizontal padding: the title has to start exactly where the cell text
-   below it does, and the row supplies the inset already. */
-.list-header-button {
-  min-height: 0;
-  min-width: 0;
-  padding: 3px 0;
-  border: none;
+  border-radius: 0 var(--io-radius) 0 0;
   background: transparent;
-  box-shadow: none;
-  border-radius: 4px;
-  font-size: 0.92em;
+}
+
+button.tab-new-button {
+  border-radius: var(--io-radius);
+}
+
+/* ============================================================
+   File manager: sidebar
+   ============================================================ */
+
+.sidebar {
+  background: transparent;
+  border-right: 1px solid var(--io-separator);
+}
+
+.sidebar-list {
+  background: transparent;
+}
+
+button.sidebar-nav-button {
+  margin: 6px 8px 0;
+  border-radius: var(--io-radius);
+  background: transparent;
+}
+
+button.sidebar-nav-button:checked,
+.sidebar-list row:selected {
+  background: var(--io-selection);
+  color: var(--io-text);
+}
+
+button.sidebar-nav-button:checked:hover,
+.sidebar-list row:selected:hover {
+  background: var(--io-selection-hover);
+}
+
+.sidebar-separator {
+  margin: 8px 12px 4px;
+  background: var(--io-separator);
+}
+
+.sidebar-list row {
+  margin: 1px 8px;
+  border-radius: var(--io-radius);
+}
+
+.sidebar-list row:hover {
+  background: var(--io-hover-bg);
+}
+
+.sidebar-section-title {
+  margin: 14px 18px 4px;
+  font-size: 0.8em;
   font-weight: 700;
-  opacity: 0.72;
+  color: var(--io-text-faint);
 }
 
-.list-header-button:hover {
-  opacity: 1;
+/* Unmounted drives read as available-but-idle next to the mounted ones. */
+.sidebar-device-unmounted .sidebar-device-icon {
+  opacity: 0.55;
 }
 
-.list-header-button.list-header-active {
-  opacity: 1;
+button.sidebar-eject-button {
+  min-width: 0;
+  min-height: 0;
+  padding: 2px;
 }
 
-.content-list row {
-  border-radius: 6px;
-  margin: 1px 6px;
-}
-
-.content-list row:hover,
-.content-grid flowboxchild:hover {
-  background: rgba(255, 255, 255, 0.08);
-}
-
-.content-list row.entry-selected,
-.content-grid flowboxchild.entry-selected {
-  background: rgba(67, 123, 214, 0.34);
-}
-
-.content-list row.entry-selected:hover,
-.content-grid flowboxchild.entry-selected:hover {
-  background: rgba(82, 145, 238, 0.44);
-}
-
-.rubberband-selection {
-  background: rgba(67, 123, 214, 0.2);
-  border: 1px solid rgba(146, 188, 255, 0.78);
-  border-radius: 3px;
-}
-
-.context-menu {
-  background: rgba(18, 21, 28, 0.96);
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  border-radius: 6px;
-}
-
-.context-menu-item {
-  min-width: 170px;
-  padding: 7px 10px;
-  border-radius: 5px;
-}
-
-.context-menu-item:hover {
-  background: rgba(255, 255, 255, 0.09);
-}
-
-.context-menu-item.destructive-action {
-  color: rgb(255, 128, 128);
-}
-
-.sort-menu-item {
-  min-width: 170px;
-  padding: 6px 8px;
-  border-radius: 5px;
-}
-
-.sort-menu-item:hover {
-  background: rgba(255, 255, 255, 0.09);
-}
-
-.sort-menu-heading {
-  padding: 4px 8px 2px 8px;
-  font-size: 0.86em;
-  font-weight: 700;
-}
-
-.sort-menu-separator {
-  margin: 4px 6px;
-}
+/* ============================================================
+   File manager: content
+   ============================================================ */
 
 .content-scroll,
 .content-scroll > viewport {
-  background: rgba(10, 12, 16, 0.54);
+  background: var(--io-view-bg);
 }
 
 .content-list,
@@ -249,9 +456,102 @@ window {
   background: transparent;
 }
 
+.list-header {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--io-separator);
+}
+
+/* No horizontal padding: the title has to start exactly where the cell text
+   below it does, and the row supplies the inset already. */
+button.list-header-button {
+  min-height: 0;
+  min-width: 0;
+  padding: 3px 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  border-radius: var(--io-radius-sm);
+  font-size: 0.86em;
+  font-weight: 700;
+  color: var(--io-text-faint);
+}
+
+button.list-header-button:hover,
+button.list-header-button.list-header-active {
+  background: transparent;
+  color: var(--io-text);
+}
+
+.content-list row {
+  margin: 1px 6px;
+  border-radius: var(--io-radius);
+}
+
+.content-list row:hover,
+.content-grid flowboxchild:hover {
+  background: var(--io-hover-bg);
+}
+
+.content-list row.entry-selected,
+.content-grid flowboxchild.entry-selected {
+  background: var(--io-selection);
+}
+
+.content-list row.entry-selected:hover,
+.content-grid flowboxchild.entry-selected:hover {
+  background: var(--io-selection-hover);
+}
+
+.rubberband-selection {
+  border: 1px solid alpha(var(--io-accent), 0.78);
+  border-radius: var(--io-radius-sm);
+  background: alpha(var(--io-accent), 0.2);
+}
+
+.content-grid flowboxchild {
+  border-radius: var(--io-radius-lg);
+}
+
+.file-tile {
+  padding: 8px;
+}
+
+.file-tile-icon.image-thumbnail {
+  border-radius: var(--io-radius);
+  background: var(--io-muted-bg);
+}
+
+.file-row-icon.image-thumbnail {
+  border-radius: 4px;
+  background: var(--io-muted-bg);
+}
+
+/* Bottom-left, where every desktop puts an emblem. The disc is drawn here
+ * rather than baked into the symbolic so the badge stays readable over a photo
+ * thumbnail as well as over a flat folder icon. */
+.link-emblem {
+  padding: 1px;
+  border-radius: 999px;
+  background: var(--io-popover-bg);
+  color: var(--io-text);
+}
+
+.link-emblem-broken {
+  color: var(--io-warning);
+}
+
+/* Dimmed: a link to nothing is still listed, but nothing can be done with it. */
+.file-broken-link {
+  opacity: 0.55;
+}
+
+/* ============================================================
+   File manager: details pane
+   ============================================================ */
+
 .details-panel {
-  background: rgba(13, 15, 20, 0.78);
-  border-left: 1px solid rgba(255, 255, 255, 0.12);
+  background: var(--io-view-bg);
+  border-left: 1px solid var(--io-separator);
 }
 
 .details-scroll,
@@ -270,37 +570,99 @@ window {
 
 .details-preview-frame {
   padding: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 8px;
-  background: rgba(0, 0, 0, 0.24);
+  border: 1px solid var(--io-separator);
+  border-radius: var(--io-radius-lg);
+  background: var(--io-muted-bg);
 }
 
 .details-preview {
-  border-radius: 4px;
+  border-radius: var(--io-radius-sm);
 }
 
 .details-rows {
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  border-top: 1px solid var(--io-separator);
 }
 
 .details-row {
   min-height: 32px;
   padding: 7px 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  border-bottom: 1px solid var(--io-separator);
 }
 
 .details-row-name {
   font-weight: 700;
-  color: alpha(currentColor, 0.76);
+  color: var(--io-text-dim);
 }
 
 .details-row-value {
-  color: alpha(currentColor, 0.92);
+  color: var(--io-text);
 }
+
+/* ============================================================
+   File manager: status and filter bars
+   ============================================================ */
+
+.status-label {
+  padding: 6px 12px;
+  background: transparent;
+  border-top: 1px solid var(--io-separator);
+  color: var(--io-text-dim);
+}
+
+.filter-bar {
+  padding: 5px 10px;
+  background: var(--io-accent-soft);
+  border-top: 1px solid var(--io-border);
+}
+
+.filter-label {
+  font-style: italic;
+}
+
+/* ============================================================
+   File manager: menus
+   ============================================================ */
+
+button.context-menu-item,
+.sort-menu-item {
+  min-width: 180px;
+  min-height: 0;
+  padding: 7px 10px;
+  border-radius: var(--io-radius-sm);
+  background: transparent;
+}
+
+button.context-menu-item:hover,
+.sort-menu-item:hover {
+  background: var(--io-hover-bg);
+}
+
+button.context-menu-item.destructive-action {
+  color: var(--io-danger);
+}
+
+button.context-menu-item.destructive-action:hover {
+  background: alpha(var(--io-danger), 0.14);
+}
+
+.sort-menu-heading {
+  padding: 4px 8px 2px 8px;
+  font-size: 0.8em;
+  font-weight: 700;
+  color: var(--io-text-faint);
+}
+
+.sort-menu-separator {
+  margin: 4px 6px;
+}
+
+/* ============================================================
+   File manager: This PC
+   ============================================================ */
 
 .computer-page-scroll,
 .computer-page-scroll > viewport {
-  background: rgba(10, 12, 16, 0.54);
+  background: var(--io-view-bg);
 }
 
 .computer-page-title {
@@ -313,12 +675,12 @@ window {
 }
 
 .computer-volume-list row {
-  border-radius: 6px;
   margin: 2px 0;
+  border-radius: var(--io-radius);
 }
 
 .computer-volume-list row:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--io-hover-bg);
 }
 
 .computer-volume-name {
@@ -328,12 +690,13 @@ window {
 .computer-volume-progress trough {
   min-height: 8px;
   border-radius: 999px;
+  background: var(--io-muted-bg);
 }
 
 .computer-volume-progress progress {
   min-height: 8px;
   border-radius: 999px;
-  background: rgb(82, 145, 238);
+  background: var(--io-accent);
 }
 
 .computer-volume-usage {
@@ -341,8 +704,8 @@ window {
 }
 
 .computer-section-title {
-  font-weight: 700;
   margin: 12px 0 4px;
+  font-weight: 700;
 }
 
 /* Unmounted volumes read as available-but-idle next to the mounted ones. */
@@ -350,14 +713,14 @@ window {
   opacity: 0.55;
 }
 
-.computer-volume-action {
+button.computer-volume-action {
   padding: 4px 12px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 1px solid var(--io-separator);
 }
 
 .computer-stats-separator {
   margin: 4px 0 2px;
-  background: rgba(255, 255, 255, 0.12);
+  background: var(--io-separator);
 }
 
 .computer-stats {
@@ -380,9 +743,13 @@ window {
   font-size: 0.94em;
 }
 
+/* ============================================================
+   File manager: settings
+   ============================================================ */
+
 .settings-page-scroll,
 .settings-page-scroll > viewport {
-  background: rgba(10, 12, 16, 0.54);
+  background: var(--io-view-bg);
 }
 
 .settings-title {
@@ -393,7 +760,7 @@ window {
 .settings-tabs button {
   min-height: 32px;
   padding: 0 12px;
-  border-radius: 6px;
+  border-radius: var(--io-radius);
 }
 
 .settings-tab {
@@ -410,13 +777,13 @@ window {
 }
 
 .settings-value {
-  color: alpha(currentColor, 0.72);
+  color: var(--io-text-dim);
 }
 
-.settings-color-button {
+button.settings-color-button {
   min-width: 58px;
   min-height: 32px;
-  border-radius: 6px;
+  border-radius: var(--io-radius);
 }
 
 .settings-actions-list {
@@ -424,8 +791,8 @@ window {
 }
 
 .settings-actions-list row {
-  border-radius: 6px;
   margin: 2px 0;
+  border-radius: var(--io-radius);
 }
 
 .settings-action-row {
@@ -441,7 +808,7 @@ window {
 }
 
 .settings-action-command {
-  color: alpha(currentColor, 0.82);
+  color: var(--io-text-dim);
   font-family: monospace;
 }
 
@@ -449,13 +816,13 @@ window {
   min-height: 30px;
   min-width: 30px;
   padding: 0;
-  border-radius: 6px;
+  border-radius: var(--io-radius);
 }
 
 .action-editor-help {
   padding: 8px 10px;
-  border-radius: 6px;
-  background: alpha(currentColor, 0.06);
+  border-radius: var(--io-radius);
+  background: var(--io-card-bg);
 }
 
 .action-editor-variable-row {
@@ -467,103 +834,93 @@ window {
   font-weight: 700;
 }
 
-.content-grid flowboxchild {
-  border-radius: 6px;
-}
-
-.file-tile {
-  padding: 8px;
-}
-
-.file-tile-icon.image-thumbnail {
-  border-radius: 6px;
-  background: rgba(0, 0, 0, 0.2);
-}
-
-.file-row-icon.image-thumbnail {
-  border-radius: 3px;
-  background: rgba(0, 0, 0, 0.2);
-}
-
-/* Bottom-left, where every desktop puts an emblem. The disc is drawn here
- * rather than baked into the symbolic so the badge stays readable over a photo
- * thumbnail as well as over a flat folder icon. */
-.link-emblem {
-  padding: 1px;
-  border-radius: 999px;
-  background: rgba(18, 21, 28, 0.9);
-  color: #ffffff;
-}
-
-.link-emblem-broken {
-  color: #f5a623;
-}
-
-/* Dimmed: a link to nothing is still listed, but nothing can be done with it. */
-.file-broken-link {
-  opacity: 0.55;
-}
-
-.dim-label,
-.status-label {
-  color: alpha(currentColor, 0.68);
-}
-
-.status-label {
-  padding: 6px 10px;
-  background: rgba(10, 12, 16, 0.72);
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
-}
-
-.filter-bar {
-  padding: 5px 10px;
-  background: rgba(13, 15, 20, 0.86);
-  border-top: 1px solid rgba(255, 255, 255, 0.12);
-}
-
-.filter-label {
-  font-style: italic;
-}
+/* ============================================================
+   File manager: image viewer and file chooser
+   ============================================================ */
 
 .image-viewer {
-  background: rgba(7, 8, 11, 0.98);
+  background: alpha(var(--io-window-bg), 1.3);
 }
 
 .image-viewer-toolbar {
   padding: 7px 8px;
-  background: rgba(13, 15, 20, 0.92);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  background: var(--io-panel-bg);
+  border-bottom: 1px solid var(--io-separator);
 }
+
+button.image-viewer-button {
+  min-width: 34px;
+  min-height: 32px;
+  border-radius: var(--io-radius);
+}
+
+.image-viewer-title {
+  font-weight: 600;
+}
+
+.image-viewer-counter {
+  min-width: 64px;
+}
+
+.image-viewer-scroll,
+.image-viewer-scroll > viewport {
+  background: rgba(0, 0, 0, 0.32);
+}
+
+.image-viewer-picture {
+  padding: 12px;
+  background: rgba(0, 0, 0, 0.32);
+}
+
+.selector-window {
+  background: var(--io-window-bg);
+}
+
+.selector-actions {
+  padding: 8px 10px;
+  background: var(--io-panel-bg);
+  border-top: 1px solid var(--io-separator);
+}
+
+.selector-status {
+  padding: 0 4px;
+  background: transparent;
+  border-top: 0;
+}
+
+/* ============================================================
+   Start menu
+   ============================================================ */
 
 .start-menu-window {
   background: transparent;
 }
 
 .start-menu-backdrop {
-  background: rgba(10, 12, 16, 0.28);
+  background: alpha(var(--io-window-bg), 0.4);
 }
 
 .start-menu-surface {
   padding: 26px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
+  border: 1px solid var(--io-border);
   border-radius: 24px;
-  background: rgba(13, 15, 20, 0.9);
+  background: var(--io-panel-bg);
   box-shadow: 0 28px 62px rgba(0, 0, 0, 0.34);
 }
 
 .start-menu-search {
   min-height: 48px;
   padding: 0 14px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
+  border: 1px solid var(--io-border);
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--io-control-bg);
   font-size: 1.04em;
   font-weight: 600;
 }
 
 .start-menu-search:focus {
-  border-color: rgba(82, 145, 238, 0.72);
-  background: rgba(82, 145, 238, 0.12);
+  border-color: alpha(var(--io-accent), 0.72);
+  background: alpha(var(--io-accent), 0.12);
 }
 
 .start-menu-scroll,
@@ -592,14 +949,14 @@ window {
 
 .start-menu-launcher,
 .start-menu-result {
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--io-hover-bg);
+  background: var(--io-control-bg);
 }
 
 .start-menu-launcher:hover,
 .start-menu-result:hover,
 .start-menu-power:hover {
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--io-active-bg);
 }
 
 .start-menu-launcher {
@@ -627,9 +984,9 @@ window {
 
 .start-menu-footer {
   padding: 12px 14px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--io-hover-bg);
   border-radius: 18px;
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--io-control-bg);
 }
 
 .start-menu-power {
@@ -637,22 +994,26 @@ window {
   min-height: 38px;
   padding: 0;
   border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--io-hover-bg);
 }
+
+/* ============================================================
+   Spotlight
+   ============================================================ */
 
 .spotlight-window {
   background: transparent;
 }
 
 .spotlight-backdrop {
-  background: rgba(10, 12, 16, 0.3);
+  background: alpha(var(--io-window-bg), 0.4);
 }
 
 .spotlight-surface {
   padding: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
+  border: 1px solid var(--io-border);
   border-radius: 18px;
-  background: rgba(13, 15, 20, 0.9);
+  background: var(--io-panel-bg);
   box-shadow: 0 28px 62px rgba(0, 0, 0, 0.34);
 }
 
@@ -667,7 +1028,7 @@ window {
 .spotlight-prefix-badge {
   padding: 3px 10px;
   border-radius: 999px;
-  background: rgba(82, 145, 238, 0.24);
+  background: alpha(var(--io-accent), 0.24);
   font-size: 0.86em;
   font-weight: 700;
 }
@@ -691,7 +1052,7 @@ window {
 
 .spotlight-hint {
   padding: 2px 8px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
+  border: 1px solid var(--io-border);
   border-radius: 5px;
   font-size: 0.8em;
   font-weight: 700;
@@ -713,15 +1074,15 @@ window {
 }
 
 .spotlight-row:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--io-hover-bg);
 }
 
 .spotlight-row:selected {
-  background: rgba(67, 123, 214, 0.34);
+  background: var(--io-selection);
 }
 
 .spotlight-row:selected:hover {
-  background: rgba(82, 145, 238, 0.44);
+  background: alpha(var(--io-accent), 0.44);
 }
 
 .spotlight-row-title {
@@ -745,9 +1106,9 @@ window {
    read as one object rather than a card with something stuck to it. */
 .spotlight-preview {
   padding: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
+  border: 1px solid var(--io-border);
   border-radius: 18px;
-  background: rgba(13, 15, 20, 0.9);
+  background: var(--io-panel-bg);
   box-shadow: 0 28px 62px rgba(0, 0, 0, 0.34);
 }
 
@@ -781,15 +1142,15 @@ window {
 
 .spotlight-footer {
   padding: 8px 12px 4px;
-  border-top: 1px solid rgba(255, 255, 255, 0.09);
+  border-top: 1px solid var(--io-hover-bg);
 }
 
 .spotlight-footer-key {
   min-width: 20px;
   padding: 1px 6px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
+  border: 1px solid var(--io-border);
   border-radius: 5px;
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--io-control-bg);
   font-size: 0.76em;
   font-weight: 700;
 }
@@ -814,7 +1175,7 @@ window {
 .spotlight-chat-user {
   padding: 8px 12px;
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--io-control-bg);
 }
 
 .spotlight-chat-assistant {
@@ -871,13 +1232,13 @@ window {
 
 .spotlight-chat-quote {
   padding-left: 10px;
-  border-left: 2px solid rgba(255, 255, 255, 0.22);
+  border-left: 2px solid alpha(var(--io-text), 0.22);
   font-style: italic;
 }
 
 .spotlight-chat-rule {
   margin: 4px 0;
-  background: rgba(255, 255, 255, 0.14);
+  background: var(--io-border);
 }
 
 .spotlight-chat-status {
@@ -916,45 +1277,9 @@ window {
   min-height: 16px;
 }
 
-.image-viewer-button {
-  min-width: 34px;
-  min-height: 32px;
-  border-radius: 6px;
-}
-
-.image-viewer-title {
-  font-weight: 600;
-}
-
-.image-viewer-counter {
-  min-width: 64px;
-}
-
-.image-viewer-scroll,
-.image-viewer-scroll > viewport {
-  background: rgba(0, 0, 0, 0.32);
-}
-
-.image-viewer-picture {
-  padding: 12px;
-  background: rgba(0, 0, 0, 0.32);
-}
-
-.selector-window {
-  background: rgba(10, 12, 16, 0.74);
-}
-
-.selector-actions {
-  padding: 8px 10px;
-  background: rgba(13, 15, 20, 0.86);
-  border-top: 1px solid rgba(255, 255, 255, 0.12);
-}
-
-.selector-status {
-  padding: 0 4px;
-  background: transparent;
-  border-top: 0;
-}
+/* ============================================================
+   Desktop
+   ============================================================ */
 
 /* Desktop surface.
  *
@@ -974,7 +1299,7 @@ window {
 }
 
 .desktop-tile:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--io-hover-bg);
 }
 
 /* Legibility over an arbitrary wallpaper needs both of these. A shadow alone
@@ -993,11 +1318,11 @@ window {
 /* The same selection colours as the icon view, so the desktop reads as part of
  * ioexplorer rather than a separate program. */
 .desktop-tile.entry-selected {
-  background: rgba(67, 123, 214, 0.34);
+  background: var(--io-selection);
 }
 
 .desktop-tile.entry-selected .desktop-tile-label {
-  background: rgba(82, 145, 238, 0.55);
+  background: alpha(var(--io-accent), 0.55);
   text-shadow: none;
 }
 
@@ -1005,9 +1330,13 @@ window {
   margin-bottom: 28px;
   padding: 8px 14px;
   border-radius: 999px;
-  background: rgba(18, 21, 28, 0.94);
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: var(--io-popover-bg);
+  border: 1px solid var(--io-border);
 }
+
+/* ============================================================
+   Screenshots
+   ============================================================ */
 
 /* ioexplorer-shot. The window is entirely covered by the frozen frame; black
  * rather than the translucent theme wash, so nothing live shows through for
@@ -1019,8 +1348,8 @@ window {
 .shot-toolbar {
   padding: 5px;
   border-radius: 14px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  background: rgba(13, 15, 20, 0.92);
+  border: 1px solid var(--io-border);
+  background: var(--io-panel-bg);
   box-shadow: 0 14px 36px rgba(0, 0, 0, 0.45);
 }
 
@@ -1036,11 +1365,11 @@ window {
 }
 
 .shot-toolbar button:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--io-hover-bg);
 }
 
 .shot-toolbar button:checked {
-  background: rgba(82, 145, 238, 0.36);
+  background: alpha(var(--io-accent), 0.36);
 }
 
 .shot-toolbar button:disabled {
@@ -1059,7 +1388,7 @@ window {
 .shot-toolbar separator {
   min-width: 1px;
   margin: 6px 3px;
-  background: rgba(255, 255, 255, 0.12);
+  background: var(--io-border);
 }
 
 /* The picker popover is a child of a toolbar button, so the toolbar's compact
@@ -1089,8 +1418,8 @@ window {
 .shot-indicator {
   padding: 4px 4px 4px 12px;
   border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  background: rgba(13, 15, 20, 0.92);
+  border: 1px solid var(--io-border);
+  background: var(--io-panel-bg);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
 }
 
@@ -1122,13 +1451,17 @@ window {
   background: rgb(239, 68, 68);
 }
 
+/* ============================================================
+   Quick menu
+   ============================================================ */
+
 /* ioexplorer-quick: the symbol and emoji menu that opens at the pointer. The
    surface itself is kept transparent in code; only the card is painted. */
 .quick-card {
   padding: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
+  border: 1px solid var(--io-border);
   border-radius: 14px;
-  background: rgba(13, 15, 20, 0.94);
+  background: var(--io-panel-bg);
   box-shadow: 0 18px 44px rgba(0, 0, 0, 0.4);
 }
 
@@ -1143,11 +1476,11 @@ window {
 }
 
 .quick-tab:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--io-hover-bg);
 }
 
 .quick-tab:checked {
-  background: rgba(82, 145, 238, 0.3);
+  background: alpha(var(--io-accent), 0.3);
 }
 
 .quick-entry {
@@ -1168,13 +1501,13 @@ window {
 }
 
 .quick-category:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--io-hover-bg);
   opacity: 1;
 }
 
 .quick-category:checked {
-  background: rgba(82, 145, 238, 0.24);
-  box-shadow: inset 0 -2px rgb(82, 145, 238);
+  background: alpha(var(--io-accent), 0.24);
+  box-shadow: inset 0 -2px var(--io-accent);
   opacity: 1;
 }
 
@@ -1197,11 +1530,11 @@ window {
 }
 
 .quick-grid > child:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--io-hover-bg);
 }
 
 .quick-grid > child:selected {
-  background: rgba(67, 123, 214, 0.4);
+  background: alpha(var(--io-accent), 0.4);
 }
 
 .quick-cell {
@@ -1211,7 +1544,7 @@ window {
 
 .quick-footer {
   padding: 6px 4px 0;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  border-top: 1px solid var(--io-hover-bg);
 }
 
 .quick-preview {
@@ -1225,7 +1558,7 @@ window {
 .quick-queue {
   padding: 2px 8px;
   border-radius: 999px;
-  background: rgba(82, 145, 238, 0.24);
+  background: alpha(var(--io-accent), 0.24);
 }
 
 .quick-tone {
@@ -1240,7 +1573,7 @@ window {
 }
 
 .quick-tone:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--io-hover-bg);
 }
 
 /* The GIF tab: a grid of playing thumbnails, the offer to save what is on the
@@ -1279,8 +1612,8 @@ window {
 .quick-banner {
   padding: 8px;
   border-radius: 10px;
-  border: 1px solid rgba(82, 145, 238, 0.4);
-  background: rgba(82, 145, 238, 0.12);
+  border: 1px solid alpha(var(--io-accent), 0.4);
+  background: alpha(var(--io-accent), 0.12);
 }
 
 .quick-banner-picture {

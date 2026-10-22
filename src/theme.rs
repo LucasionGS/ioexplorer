@@ -24,16 +24,17 @@ pub struct ThemeSettings {
 }
 
 impl Default for ThemeSettings {
+    /// The Ionix palette, matching the tokens at the top of the bundled sheet.
     fn default() -> Self {
         Self {
-            window_background: rgba255(10, 12, 16, 0.74),
-            panel_background: rgba255(13, 15, 20, 0.86),
-            muted_background: rgba255(0, 0, 0, 0.24),
-            accent: rgba255(82, 145, 238, 1.0),
-            selection: rgba255(67, 123, 214, 0.34),
-            text: rgba255(244, 247, 252, 0.94),
-            border: rgba255(255, 255, 255, 0.12),
-            corner_radius: 6,
+            window_background: rgba255(15, 10, 24, 0.74),
+            panel_background: rgba255(26, 16, 37, 0.86),
+            muted_background: rgba255(15, 10, 24, 0.32),
+            accent: rgba255(168, 85, 247, 1.0),
+            selection: rgba255(168, 85, 247, 0.34),
+            text: rgba255(226, 217, 243, 0.94),
+            border: rgba255(168, 85, 247, 0.2),
+            corner_radius: 8,
         }
     }
 }
@@ -211,6 +212,9 @@ pub fn replace_auto_generated_css(existing: &str, generated_css: &str) -> String
     }
 }
 
+/// The generated block: the eight base tokens, set where the bundled sheet
+/// declares them. Every surface in the bundled sheet is painted from these, so
+/// the block never has to name a widget.
 pub fn generated_theme_css(settings: &ThemeSettings) -> String {
     let radius = settings.corner_radius.clamp(0, 18);
     let window_background = rgba_css(&settings.window_background);
@@ -231,150 +235,16 @@ pub fn generated_theme_css(settings: &ThemeSettings) -> String {
 /* theme.border={border} */\n\
 /* theme.corner_radius={radius} */\n\
 \n\
-window {{\n\
-  background: {window_background};\n\
-  color: {text};\n\
-}}\n\
-\n\
-.topbar,\n\
-.tab-strip,\n\
-.sidebar,\n\
-.start-menu-surface,\n\
-.spotlight-surface,\n\
-.spotlight-preview {{\n\
-  background: {panel_background};\n\
-  border-color: {border};\n\
-}}\n\
-\n\
-.toolbar-group,\n\
-.breadcrumbs,\n\
-.path-stack,\n\
-.file-tab,\n\
-.start-menu-search,\n\
-.start-menu-launcher,\n\
-.start-menu-result,\n\
-.start-menu-power,\n\
-.start-menu-footer,\n\
-.spotlight-row,\n\
-.spotlight-prefix-badge,\n\
-.spotlight-footer-key,\n\
-.spotlight-chat-user,\n\
-.spotlight-chat-code {{\n\
-  background: {muted_background};\n\
-}}\n\
-\n\
-.toolbar-group,\n\
-.breadcrumbs,\n\
-.path-stack,\n\
-.sidebar-nav-button,\n\
-.content-list row,\n\
-.computer-volume-list row,\n\
-.settings-tabs button,\n\
-.settings-actions-list row,\n\
-.context-menu,\n\
-.context-menu-item,\n\
-.file-tab,\n\
-.tab-new-button,\n\
-.start-menu-surface,\n\
-.start-menu-search,\n\
-.start-menu-launcher,\n\
-.start-menu-result,\n\
-.start-menu-power,\n\
-.spotlight-surface,\n\
-.spotlight-preview,\n\
-.spotlight-row,\n\
-.spotlight-chat-user,\n\
-.spotlight-chat-code {{\n\
-  border-radius: {radius}px;\n\
-}}\n\
-\n\
-.file-tab-button:checked,\n\
-.sidebar-nav-button:checked,\n\
-.sidebar-list row:selected,\n\
-.content-list row.entry-selected,\n\
-.content-grid flowboxchild.entry-selected,\n\
-.start-menu-launcher:active,\n\
-.start-menu-result:active,\n\
-.spotlight-row:selected {{\n\
-  background: {selection};\n\
-}}\n\
-\n\
-.start-menu-window,\n\
-.start-menu-surface,\n\
-.start-menu-search,\n\
-.start-menu-launcher,\n\
-.start-menu-result,\n\
-.start-menu-user,\n\
-.start-menu-section-title,\n\
-.spotlight-surface,\n\
-.spotlight-entry,\n\
-.spotlight-row-title,\n\
-.spotlight-section-label,\n\
-.spotlight-chat-text,\n\
-.spotlight-chat-code-text,\n\
-.spotlight-chat-heading,\n\
-.spotlight-preview-text {{\n\
-    color: {text};\n\
-}}\n\
-\n\
-.start-menu-surface {{\n\
-    box-shadow: 0 26px 58px alpha(black, 0.36);\n\
-}}\n\
-\n\
-.spotlight-surface,\n\
-.spotlight-preview {{\n\
-    box-shadow: 0 26px 58px alpha(black, 0.36);\n\
-}}\n\
-\n\
-.start-menu-backdrop {{\n\
-    background: alpha({window_background}, 0.4);\n\
-}}\n\
-\n\
-.spotlight-backdrop {{\n\
-    background: alpha({window_background}, 0.34);\n\
-}}\n\
-\n\
-.start-menu-search,\n\
-.start-menu-launcher,\n\
-.start-menu-result,\n\
-.start-menu-power,\n\
-.start-menu-footer,\n\
-.spotlight-hint,\n\
-.spotlight-footer-key,\n\
-.spotlight-chat-code {{\n\
-    border: 1px solid alpha({border}, 0.9);\n\
-}}\n\
-\n\
-.spotlight-footer {{\n\
-    border-top: 1px solid alpha({border}, 0.9);\n\
-}}\n\
-\n\
-.spotlight-prefix-badge {{\n\
-    background: alpha({accent}, 0.24);\n\
-}}\n\
-\n\
-.start-menu-launcher:hover,\n\
-.start-menu-result:hover,\n\
-.start-menu-power:hover,\n\
-.spotlight-row:hover {{\n\
-    background: alpha({accent}, 0.18);\n\
-}}\n\
-\n\
-.computer-volume-progress progress {{\n\
-  background: {accent};\n\
-}}\n\
-\n\
-.status-label,\n\
-.settings-value,\n\
-.settings-action-command,\n\
-.spotlight-row-subtitle,\n\
-.spotlight-hint,\n\
-.spotlight-chat-role,\n\
-.spotlight-chat-status,\n\
-.spotlight-preview-status,\n\
-.spotlight-preview-caption,\n\
-.spotlight-chat-tool {{\n\
-  color: alpha({text}, 0.72);\n\
+window,\n\
+tooltip {{\n\
+  --io-window-bg: {window_background};\n\
+  --io-panel-bg: {panel_background};\n\
+  --io-muted-bg: {muted_background};\n\
+  --io-accent: {accent};\n\
+  --io-selection: {selection};\n\
+  --io-text: {text};\n\
+  --io-border: {border};\n\
+  --io-radius: {radius}px;\n\
 }}"
     )
 }
@@ -531,72 +401,77 @@ mod tests {
         let parsed = generated_settings_from_css(&wrapped).expect("theme metadata");
 
         assert!(css.contains("/* theme.panel_background=rgba(255,0,0,0) */"));
-        assert!(css.contains("background: rgba(255,0,0,0);"));
+        assert!(css.contains("--io-panel-bg: rgba(255,0,0,0);"));
         assert_eq!(parsed.panel_background, settings.panel_background);
     }
 
     #[test]
-    fn generated_theme_css_applies_selection_to_sidebar() {
+    fn generated_theme_css_sets_every_base_token() {
         let css = generated_theme_css(&ThemeSettings::default());
 
-        assert!(css.contains(".sidebar-nav-button:checked,"));
-        assert!(css.contains(".sidebar-list row:selected,"));
+        for token in [
+            "--io-window-bg:",
+            "--io-panel-bg:",
+            "--io-muted-bg:",
+            "--io-accent:",
+            "--io-selection:",
+            "--io-text:",
+            "--io-border:",
+            "--io-radius: 8px;",
+        ] {
+            assert!(css.contains(token), "missing {token}");
+        }
+    }
+
+    /// The generated block only sets tokens, so it reaches a surface only if the
+    /// bundled sheet paints that surface from them.
+    #[test]
+    fn the_bundled_sheet_declares_the_tokens_the_theme_sets() {
+        let defaults = generated_theme_css(&ThemeSettings::default());
+        let declarations = defaults
+            .lines()
+            .filter_map(|line| line.trim().split_once(':'))
+            .map(|(name, _)| name)
+            .filter(|name| name.starts_with("--io-"));
+
+        for name in declarations {
+            assert!(
+                BUNDLED_CSS.contains(&format!("  {name}: ")),
+                "the bundled sheet does not declare {name}"
+            );
+        }
     }
 
     #[test]
-    fn generated_theme_css_applies_theme_to_start_menu() {
-        let css = generated_theme_css(&ThemeSettings::default());
-
-        assert!(css.contains(".start-menu-surface {"));
-        assert!(css.contains(".start-menu-search,"));
-        assert!(css.contains(".start-menu-launcher:hover,"));
-    }
-
-    #[test]
-    fn generated_theme_css_applies_theme_to_spotlight() {
-        let css = generated_theme_css(&ThemeSettings::default());
-
-        assert!(css.contains(".spotlight-surface,"));
-        assert!(css.contains(".spotlight-row:selected {"));
-        assert!(css.contains(".spotlight-backdrop {"));
-        assert!(css.contains(".spotlight-row:hover {"));
-    }
-
-    #[test]
-    fn generated_theme_css_applies_theme_to_the_preview_panel() {
-        let css = generated_theme_css(&ThemeSettings::default());
-
-        // The panel has to track the card exactly — the two sit side by side,
-        // so a palette that reached one but not the other would be obvious.
-        assert!(css.contains(".spotlight-preview {"));
-        assert!(css.contains(".spotlight-preview-text {"));
-        assert!(css.contains(".spotlight-preview-status,"));
-        assert!(css.contains(".spotlight-preview-caption,"));
-        assert!(css.contains(".spotlight-chat-tool {"));
-    }
-
-    #[test]
-    fn generated_theme_css_applies_theme_to_the_chat_view() {
-        let css = generated_theme_css(&ThemeSettings::default());
-
-        assert!(css.contains(".spotlight-chat-user,"));
-        assert!(css.contains(".spotlight-chat-code {"));
-        assert!(css.contains(".spotlight-chat-text,"));
-        assert!(css.contains(".spotlight-chat-role,"));
-        assert!(css.contains(".spotlight-chat-status,"));
-        // Markdown blocks follow the palette too.
-        assert!(css.contains(".spotlight-chat-code-text,"));
-        assert!(css.contains(".spotlight-chat-heading,"));
+    fn the_bundled_sheet_paints_every_program_from_the_tokens() {
+        for rule in [
+            ".sidebar-list row:selected",
+            ".start-menu-surface",
+            ".spotlight-surface",
+            ".spotlight-preview",
+            ".spotlight-row:selected",
+            ".quick-card",
+        ] {
+            let body = rule_body(rule).unwrap_or_else(|| panic!("no rule for {rule}"));
+            assert!(body.contains("var(--io-"), "{rule} is not themed: {body}");
+        }
     }
 
     /// The error bubble keeps its own red so it stays legible under any
     /// palette; if someone themes it later this test should fail loudly.
     #[test]
-    fn generated_theme_css_leaves_the_chat_error_untouched() {
-        let css = generated_theme_css(&ThemeSettings::default());
+    fn the_chat_error_and_approval_keep_their_own_colours() {
+        for rule in [".spotlight-chat-error", ".spotlight-chat-approval"] {
+            let body = rule_body(rule).unwrap_or_else(|| panic!("no rule for {rule}"));
+            assert!(!body.contains("var(--io-"), "{rule} follows the palette");
+        }
+    }
 
-        assert!(!css.contains(".spotlight-chat-error"));
-        // Same reasoning: a permission prompt must not blend into the palette.
-        assert!(!css.contains(".spotlight-chat-approval"));
+    /// The body of the first rule whose selector list ends with `selector`.
+    fn rule_body(selector: &str) -> Option<&'static str> {
+        let start = BUNDLED_CSS.find(&format!("{selector} {{"))?;
+        let body = &BUNDLED_CSS[start..];
+        let end = body.find('}')?;
+        Some(&body[..end])
     }
 }
