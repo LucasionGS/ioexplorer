@@ -95,6 +95,72 @@ const DETAILS_PREVIEW_SPEC: views::thumbnail::ThumbnailSpec = views::thumbnail::
     thumbnail_width: 258,
 };
 
+/// The notice over the file views when a folder, or a search, shows nothing.
+#[derive(Clone)]
+struct EmptyState {
+    root: gtk::Box,
+    icon: gtk::Image,
+    title: gtk::Label,
+    subtitle: gtk::Label,
+}
+
+impl EmptyState {
+    fn new() -> Self {
+        let icon = gtk::Image::builder().halign(gtk::Align::Center).build();
+        let title = gtk::Label::builder()
+            .css_classes(["empty-state-title"])
+            .build();
+        let subtitle = gtk::Label::builder()
+            .justify(gtk::Justification::Center)
+            .wrap(true)
+            .max_width_chars(36)
+            .css_classes(["empty-state-subtitle"])
+            .build();
+        let root = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(6)
+            .halign(gtk::Align::Center)
+            .valign(gtk::Align::Center)
+            .can_target(false)
+            .visible(false)
+            .css_classes(["empty-state"])
+            .build();
+        root.append(&icon);
+        root.append(&title);
+        root.append(&subtitle);
+        icon.set_margin_bottom(10);
+        Self {
+            root,
+            icon,
+            title,
+            subtitle,
+        }
+    }
+
+    fn show(&self, icon_name: &str, title: &str, subtitle: &str) {
+        views::set_glyph_tile(&self.icon, icon_name, 88, "ft-folder");
+        self.title.set_text(title);
+        self.subtitle.set_text(subtitle);
+        self.root.set_visible(true);
+    }
+
+    fn hide(&self) {
+        self.root.set_visible(false);
+    }
+}
+
+/// What the details pane says about the open folder while nothing in it is
+/// selected.
+#[derive(Clone, Debug)]
+struct FolderDetails {
+    item: FileItem,
+    contents: String,
+    free_space: Option<String>,
+}
+
+/// The size the details pane draws its hero icon at.
+const DETAILS_ICON_SIZE: i32 = 96;
+
 #[derive(Clone)]
 struct DetailsPanel {
     root: gtk::Box,
@@ -106,44 +172,31 @@ struct DetailsPanel {
     rows: gtk::Box,
     thumbnail_cache: views::thumbnail::ThumbnailCache,
     icon_style: Rc<Cell<IconStyle>>,
+    folder: Rc<RefCell<Option<FolderDetails>>>,
 }
 
 impl DetailsPanel {
     fn new(thumbnail_cache: views::thumbnail::ThumbnailCache, icon_style: IconStyle) -> Self {
         let icon = gtk::Image::builder()
-            .pixel_size(56)
-            .halign(gtk::Align::Start)
-            .valign(gtk::Align::Start)
+            .pixel_size(DETAILS_ICON_SIZE)
+            .halign(gtk::Align::Center)
+            .valign(gtk::Align::Center)
+            .css_classes(["details-icon"])
             .build();
         let title_label = gtk::Label::builder()
-            .xalign(0.0)
+            .justify(gtk::Justification::Center)
             .wrap(true)
             .wrap_mode(gtk::pango::WrapMode::WordChar)
             .lines(3)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
             .css_classes(["details-title"])
             .build();
         let subtitle_label = gtk::Label::builder()
-            .xalign(0.0)
+            .justify(gtk::Justification::Center)
             .wrap(true)
             .wrap_mode(gtk::pango::WrapMode::WordChar)
-            .css_classes(["details-subtitle", "dim-label"])
+            .css_classes(["details-subtitle"])
             .build();
-
-        let title_box = gtk::Box::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .spacing(3)
-            .hexpand(true)
-            .build();
-        title_box.append(&title_label);
-        title_box.append(&subtitle_label);
-
-        let header = gtk::Box::builder()
-            .orientation(gtk::Orientation::Horizontal)
-            .spacing(12)
-            .css_classes(["details-header"])
-            .build();
-        header.append(&icon);
-        header.append(&title_box);
 
         // ScaleDown rather than a fixed size: the render already fits the
         // panel, so the picture should take the shape of the image itself
@@ -152,6 +205,7 @@ impl DetailsPanel {
             .content_fit(gtk::ContentFit::ScaleDown)
             .can_shrink(true)
             .halign(gtk::Align::Center)
+            .overflow(gtk::Overflow::Hidden)
             .css_classes(["details-preview"])
             .build();
         let preview_frame = gtk::Box::builder()
@@ -161,6 +215,19 @@ impl DetailsPanel {
             .build();
         preview_frame.append(&preview);
 
+        // The picture, or the icon standing in for it, then the name under it.
+        let hero = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(4)
+            .css_classes(["details-hero"])
+            .build();
+        hero.append(&icon);
+        hero.append(&preview_frame);
+        hero.append(&title_label);
+        hero.append(&subtitle_label);
+        icon.set_margin_bottom(8);
+        preview_frame.set_margin_bottom(8);
+
         let rows = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(0)
@@ -169,15 +236,14 @@ impl DetailsPanel {
 
         let content = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
-            .spacing(12)
-            .margin_top(14)
-            .margin_bottom(14)
-            .margin_start(14)
-            .margin_end(14)
+            .spacing(16)
+            .margin_top(18)
+            .margin_bottom(16)
+            .margin_start(16)
+            .margin_end(16)
             .css_classes(["details-content"])
             .build();
-        content.append(&header);
-        content.append(&preview_frame);
+        content.append(&hero);
         content.append(&rows);
 
         let scroll = gtk::ScrolledWindow::builder()
@@ -207,6 +273,7 @@ impl DetailsPanel {
             rows,
             thumbnail_cache,
             icon_style: Rc::new(Cell::new(icon_style)),
+            folder: Rc::new(RefCell::new(None)),
         }
     }
 
@@ -220,10 +287,12 @@ impl DetailsPanel {
 
         let Some(item) = item.filter(|item| views::thumbnail::has_preview(item)) else {
             self.preview_frame.set_visible(false);
+            self.icon.set_visible(true);
             return;
         };
 
         self.preview_frame.set_visible(true);
+        self.icon.set_visible(false);
         views::thumbnail::request(
             item,
             &views::thumbnail::ThumbnailTarget::picture(&self.preview),
@@ -240,17 +309,53 @@ impl DetailsPanel {
         }
     }
 
+    /// Remembers what to show for the open folder, and shows it if nothing
+    /// is selected.
+    fn set_folder(&self, folder: Option<FolderDetails>, nothing_selected: bool) {
+        *self.folder.borrow_mut() = folder;
+        if nothing_selected {
+            self.clear();
+        }
+    }
+
+    /// Nothing selected: the open folder itself, or a plain notice where
+    /// there is no folder to describe.
     fn clear(&self) {
-        views::set_glyph_tile(&self.icon, "dialog-information-symbolic", 56, "ft-folder");
-        self.title_label.set_text("No item selected");
-        self.subtitle_label.set_text("");
         self.set_preview(None);
         views::clear_box_children(&self.rows);
+
+        let folder = self.folder.borrow().clone();
+        let Some(folder) = folder else {
+            views::set_glyph_tile(
+                &self.icon,
+                "dialog-information-symbolic",
+                DETAILS_ICON_SIZE,
+                "ft-folder",
+            );
+            self.title_label.set_text("No item selected");
+            self.subtitle_label.set_text("");
+            return;
+        };
+
+        views::set_view_icon(
+            &self.icon,
+            &folder.item,
+            DETAILS_ICON_SIZE,
+            self.icon_style.get(),
+        );
+        self.title_label.set_text(folder_title(&folder.item));
+        self.subtitle_label.set_text("This folder");
+        self.append_row("Contains", &folder.contents);
+        if let Some(free_space) = &folder.free_space {
+            self.append_row("Free space", free_space);
+        }
+        self.append_row("Modified", &views::format_timestamp(folder.item.modified));
+        self.append_row("Location", &item_location(&folder.item));
     }
 
     fn set_single_item(&self, item: &FileItem, media_details_cache: &MediaDetailsCache) {
         views::clear_box_children(&self.rows);
-        views::set_view_icon(&self.icon, item, 56, self.icon_style.get());
+        views::set_view_icon(&self.icon, item, DETAILS_ICON_SIZE, self.icon_style.get());
         self.set_preview(Some(item));
         let media = media_details_for_item(item, media_details_cache);
         let type_label = views::file_type::kind_description(item);
@@ -290,7 +395,12 @@ impl DetailsPanel {
 
     fn set_multiple_items(&self, items: &[FileItem], media_details_cache: &MediaDetailsCache) {
         views::clear_box_children(&self.rows);
-        views::set_glyph_tile(&self.icon, "edit-select-all-symbolic", 56, "ft-folder");
+        views::set_glyph_tile(
+            &self.icon,
+            "edit-select-all-symbolic",
+            DETAILS_ICON_SIZE,
+            "ft-folder",
+        );
         self.set_preview(None);
         self.title_label
             .set_text(&format!("{} items selected", items.len()));
@@ -350,22 +460,21 @@ impl DetailsPanel {
             return;
         }
 
+        // Name over value: the pane is narrow, and a value beside a fixed
+        // name column wraps after a word or two.
         let row = gtk::Box::builder()
-            .orientation(gtk::Orientation::Horizontal)
-            .spacing(10)
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(1)
             .css_classes(["details-row"])
             .build();
         let name_label = gtk::Label::builder()
             .label(name)
             .xalign(0.0)
-            .width_chars(9)
-            .valign(gtk::Align::Start)
             .css_classes(["details-row-name"])
             .build();
         let value_label = gtk::Label::builder()
             .label(value)
             .xalign(0.0)
-            .hexpand(true)
             .wrap(true)
             .wrap_mode(gtk::pango::WrapMode::WordChar)
             .selectable(true)
@@ -410,8 +519,32 @@ fn item_location(item: &FileItem) -> String {
     item.uri
         .local_path()
         .ok()
-        .and_then(|path| path.parent().map(|parent| parent.display().to_string()))
+        .and_then(|path| path.parent().map(display_location))
         .unwrap_or_else(|| item.uri.display_path())
+}
+
+/// A path as the details pane shows it, with the home folder written `~`.
+fn display_location(path: &Path) -> String {
+    let home = directories::UserDirs::new().map(|dirs| dirs.home_dir().to_path_buf());
+    match home
+        .as_deref()
+        .and_then(|home| path.strip_prefix(home).ok())
+    {
+        Some(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    }
+}
+
+/// A folder's name as a title: "Home" for the home folder, "Filesystem" for `/`.
+fn folder_title(item: &FileItem) -> &str {
+    if item.uri.path() == "/" {
+        "Filesystem"
+    } else if is_home(&item.uri) {
+        "Home"
+    } else {
+        item.display_name()
+    }
 }
 
 fn common_item_location(items: &[FileItem]) -> Option<String> {
@@ -431,7 +564,7 @@ fn common_item_location(items: &[FileItem]) -> Option<String> {
 
     let first = parents.first()?;
     if parents.iter().all(|parent| parent == first) {
-        Some(first.display().to_string())
+        Some(display_location(first))
     } else {
         Some("Multiple locations".to_string())
     }
@@ -716,6 +849,7 @@ pub struct AppWindow {
     anchor_index: Rc<Cell<Option<usize>>>,
     status_label: gtk::Label,
     free_space_label: gtk::Label,
+    empty_state: EmptyState,
     all_entries: RefCell<Vec<FileItem>>,
     filter_text: RefCell<String>,
     pending_filter: RefCell<Option<glib::SourceId>>,
@@ -885,8 +1019,17 @@ impl AppWindow {
             .hexpand(true)
             .vexpand(true)
             .build();
+        // Over the views rather than in place of them, so the list header and
+        // a right-click on the empty folder (New Folder, Paste) still work.
+        let empty_state = EmptyState::new();
+        let stack_overlay = gtk::Overlay::builder()
+            .child(&stack)
+            .hexpand(true)
+            .vexpand(true)
+            .build();
+        stack_overlay.add_overlay(&empty_state.root);
         content_area.append(&tab_bar);
-        content_area.append(&stack);
+        content_area.append(&stack_overlay);
 
         let browser_area = gtk::Box::builder()
             .orientation(gtk::Orientation::Horizontal)
@@ -1016,6 +1159,7 @@ impl AppWindow {
             anchor_index,
             status_label,
             free_space_label,
+            empty_state,
             all_entries: RefCell::new(Vec::new()),
             filter_text: RefCell::new(String::new()),
             pending_filter: RefCell::new(None),
@@ -2120,14 +2264,26 @@ impl AppWindow {
             .set_text(&folder_summary(&self.all_entries.borrow()));
     }
 
-    /// The free space on the drive holding `uri`, beside the status text.
+    /// The free space on the drive holding `uri`, beside the status text,
+    /// and the folder overview the details pane shows with nothing selected.
     fn update_free_space(&self, uri: &ProviderUri) {
-        let text = uri
+        let free_space = uri
             .local_path()
             .ok()
-            .and_then(|path| free_space_text(&path))
-            .unwrap_or_default();
-        self.free_space_label.set_text(&text);
+            .and_then(|path| free_space_text(&path));
+        self.free_space_label
+            .set_text(free_space.as_deref().unwrap_or_default());
+
+        let folder = self.provider.metadata(uri).ok().map(|item| FolderDetails {
+            item,
+            contents: folder_summary(&self.all_entries.borrow()),
+            free_space,
+        });
+        let nothing_selected = self
+            .selected_indices
+            .try_borrow()
+            .is_ok_and(|selection| selection.is_empty());
+        self.details_panel.set_folder(folder, nothing_selected);
     }
 
     fn navigate_from_input(self: &Rc<Self>, input: &str) {
@@ -2205,6 +2361,7 @@ impl AppWindow {
     fn show_computer_page(self: &Rc<Self>) {
         self.active_page.set(AppPage::Computer);
         self.sidebar.set_active_section(SidebarSection::Computer);
+        self.empty_state.hide();
         self.cancel_pending_filter();
         self.cancel_pending_folder_reload();
         if let Some(monitor) = self.folder_monitor.borrow_mut().take() {
@@ -2233,6 +2390,7 @@ impl AppWindow {
     fn show_settings_page(self: &Rc<Self>) {
         self.active_page.set(AppPage::Settings);
         self.sidebar.set_active_section(SidebarSection::Settings);
+        self.empty_state.hide();
         self.cancel_pending_filter();
         self.cancel_pending_folder_reload();
         if let Some(monitor) = self.folder_monitor.borrow_mut().take() {
@@ -2456,7 +2614,34 @@ impl AppWindow {
             .is_ok_and(|current| current == path)
     }
 
+    /// Shows the empty-folder or no-matches notice when the open folder
+    /// lists nothing, and hides it everywhere else.
+    fn update_empty_state(&self) {
+        if self.active_page.get() != AppPage::Files || !self.entries.borrow().is_empty() {
+            self.empty_state.hide();
+            return;
+        }
+
+        let filter = self.filter_text.borrow().clone();
+        if !filter.is_empty() {
+            self.empty_state.show(
+                "edit-find-symbolic",
+                "No matches",
+                &format!("Nothing in this folder matches \u{201c}{filter}\u{201d}."),
+            );
+        } else if self.all_entries.borrow().is_empty() {
+            self.empty_state.show(
+                "folder-symbolic",
+                "This folder is empty",
+                "Drop files here, or right-click to create a folder.",
+            );
+        } else {
+            self.empty_state.hide();
+        }
+    }
+
     fn render_entries(self: &Rc<Self>) {
+        self.update_empty_state();
         let entries = self.entries.borrow().clone();
         let folder_drop_handler: views::FolderDropHandler = {
             let this = Rc::clone(self);
