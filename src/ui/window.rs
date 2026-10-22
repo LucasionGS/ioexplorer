@@ -1655,6 +1655,27 @@ impl AppWindow {
                     this.activate_selection_from_keyboard();
                     glib::Propagation::Stop
                 }
+                // Ahead of the plain arrows, which would otherwise take these
+                // as moving the selection. Alt+arrows navigate even from the
+                // search or path field.
+                gtk::gdk::Key::Left | gtk::gdk::Key::KP_Left
+                    if alt && this.active_page.get() == AppPage::Files =>
+                {
+                    this.go_back();
+                    glib::Propagation::Stop
+                }
+                gtk::gdk::Key::Right | gtk::gdk::Key::KP_Right
+                    if alt && this.active_page.get() == AppPage::Files =>
+                {
+                    this.go_forward();
+                    glib::Propagation::Stop
+                }
+                gtk::gdk::Key::Up | gtk::gdk::Key::KP_Up
+                    if alt && this.active_page.get() == AppPage::Files =>
+                {
+                    this.go_up();
+                    glib::Propagation::Stop
+                }
                 gtk::gdk::Key::Up | gtk::gdk::Key::KP_Up if this.file_shortcuts_enabled() => {
                     this.move_selection_by(-1);
                     glib::Propagation::Stop
@@ -1677,14 +1698,6 @@ impl AppWindow {
                 }
                 gtk::gdk::Key::F5 => {
                     this.refresh();
-                    glib::Propagation::Stop
-                }
-                gtk::gdk::Key::BackSpace if alt => {
-                    this.go_up();
-                    glib::Propagation::Stop
-                }
-                gtk::gdk::Key::BackSpace if this.file_shortcuts_enabled() => {
-                    this.go_up();
                     glib::Propagation::Stop
                 }
                 gtk::gdk::Key::F2 if this.file_shortcuts_enabled() => {

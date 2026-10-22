@@ -29,9 +29,9 @@ impl TopBar {
             .css_classes(["topbar"])
             .build();
 
-        let back_button = icon_button("go-previous-symbolic", "Back");
-        let forward_button = icon_button("go-next-symbolic", "Forward");
-        let up_button = icon_button("go-up-symbolic", "Up");
+        let back_button = icon_button("go-previous-symbolic", "Back (Alt+Left)");
+        let forward_button = icon_button("go-next-symbolic", "Forward (Alt+Right)");
+        let up_button = icon_button("go-up-symbolic", "Up (Alt+Up)");
         let refresh_button = icon_button("view-refresh-symbolic", "Refresh");
         let new_folder_button = icon_button("folder-new-symbolic", "New Folder");
         let location_button = icon_button("document-edit-symbolic", "Edit Location");
