@@ -1513,16 +1513,17 @@ impl AppWindow {
         self.install_address_callbacks();
     }
 
-    /// The header's search field filters the folder, through the same filter
-    /// that typing over the files builds up.
+    /// The header's search field filters the folder. Typing over the files
+    /// does not: only the field edits the filter.
     fn install_search_callbacks(self: &Rc<Self>) {
         let search = &self.topbar.search_entry;
 
         let this = Rc::clone(self);
         search.connect_search_changed(move |entry| {
             let text = entry.text().to_string();
-            // Typing over the files mirrors the filter into the entry, and the
-            // change that fires a moment later is that same text coming back.
+            // Clearing the filter from elsewhere (Escape, navigating) empties
+            // the entry, and the change that fires a moment later is that same
+            // text coming back.
             if text == *this.filter_text.borrow() {
                 return;
             }
@@ -1682,25 +1683,8 @@ impl AppWindow {
                     this.go_up();
                     glib::Propagation::Stop
                 }
-                gtk::gdk::Key::BackSpace
-                    if this.file_shortcuts_enabled() && !this.is_filtering() =>
-                {
+                gtk::gdk::Key::BackSpace if this.file_shortcuts_enabled() => {
                     this.go_up();
-                    glib::Propagation::Stop
-                }
-                gtk::gdk::Key::BackSpace
-                    if this.file_shortcuts_enabled() && this.is_filtering() =>
-                {
-                    let empty = {
-                        let mut filter = this.filter_text.borrow_mut();
-                        filter.pop();
-                        filter.is_empty()
-                    };
-                    if empty {
-                        this.clear_filter();
-                    } else {
-                        this.trigger_filter();
-                    }
                     glib::Propagation::Stop
                 }
                 gtk::gdk::Key::F2 if this.file_shortcuts_enabled() => {
@@ -1772,16 +1756,6 @@ impl AppWindow {
                         this.show_breadcrumbs();
                     }
                     glib::Propagation::Stop
-                }
-                _ if this.file_shortcuts_enabled() && !ctrl && !alt => {
-                    if let Some(c) = key.to_unicode()
-                        && !c.is_control()
-                    {
-                        this.filter_text.borrow_mut().push(c);
-                        this.trigger_filter();
-                        return glib::Propagation::Stop;
-                    }
-                    glib::Propagation::Proceed
                 }
                 _ => glib::Propagation::Proceed,
             }
@@ -2232,7 +2206,8 @@ impl AppWindow {
         self.update_filter_bar();
     }
 
-    /// Shows the current filter in the search field, however it was typed.
+    /// Keeps the search field in step with the filter, which navigating and
+    /// Escape clear from outside it.
     fn update_filter_bar(&self) {
         let filter = self.filter_text.borrow().clone();
         let search = &self.topbar.search_entry;
