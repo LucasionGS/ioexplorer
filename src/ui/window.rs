@@ -903,6 +903,7 @@ impl AppWindow {
             state.layout,
             state.show_hidden,
             state.icon_size,
+            config.icon_style,
             state.sort,
             &theme_settings,
             theme_css_path.as_deref(),
@@ -1312,6 +1313,24 @@ impl AppWindow {
         self.settings_page
             .show_hidden_check
             .connect_toggled(move |button| this.set_show_hidden(button.is_active()));
+
+        for (button, style) in [
+            (
+                &self.settings_page.icon_style_symbolic_button,
+                IconStyle::Symbolic,
+            ),
+            (
+                &self.settings_page.icon_style_color_button,
+                IconStyle::Color,
+            ),
+        ] {
+            let this = Rc::clone(self);
+            button.connect_toggled(move |button| {
+                if button.is_active() {
+                    this.set_icon_style(style);
+                }
+            });
+        }
 
         let this = Rc::clone(self);
         self.settings_page
@@ -1877,6 +1896,7 @@ impl AppWindow {
 
         if change.list_columns_changed() || change.icon_style_changed() {
             self.details_panel.icon_style.set(change.config.icon_style);
+            self.settings_page.set_icon_style(change.config.icon_style);
             self.render_list_header();
             self.render_entries();
         }
@@ -4046,6 +4066,30 @@ impl AppWindow {
 
         actions.swap(index, next_index);
         self.save_custom_action_changes(actions, "Reordered actions".to_string());
+    }
+
+    /// Switches the file icons between tinted symbols and the icon theme's own,
+    /// saved to the config so new windows and the next start follow it.
+    fn set_icon_style(self: &Rc<Self>, style: IconStyle) {
+        if self.config.borrow().icon_style == style {
+            return;
+        }
+
+        let mut config = self.config.borrow().clone();
+        config.icon_style = style;
+        if let Err(error) = config.save() {
+            self.status_label
+                .set_text(&format!("Failed to save the icon style: {error}"));
+            self.settings_page
+                .set_icon_style(self.config.borrow().icon_style);
+            return;
+        }
+        if let Some(live) = self.live_config.borrow().as_ref() {
+            live.note_config_written(&config);
+        }
+        *self.config.borrow_mut() = config;
+        self.details_panel.icon_style.set(style);
+        self.render_entries();
     }
 
     fn save_custom_action_changes(

@@ -222,6 +222,38 @@ window {
   background: transparent;
 }
 
+.io-file-manager scale > trough {
+  min-height: 4px;
+  border: none;
+  border-radius: 999px;
+  background: var(--io-active-bg);
+}
+
+.io-file-manager scale > trough > highlight {
+  border: none;
+  border-radius: 999px;
+  background: var(--io-accent);
+}
+
+.io-file-manager scale > trough > slider {
+  min-width: 16px;
+  min-height: 16px;
+  margin: -7px;
+  border: none;
+  border-radius: 999px;
+  background: white;
+  box-shadow: 0 1px 4px alpha(black, 0.35);
+}
+
+.io-file-manager scale > marks > indicator {
+  background: var(--io-text-faint);
+}
+
+.io-file-manager dropdown > button {
+  padding: 2px 10px;
+  border: 1px solid var(--io-separator);
+}
+
 .io-file-manager scrollbar {
   border: none;
   background: transparent;
@@ -1044,6 +1076,9 @@ button.computer-volume-action:hover {
 
 /* ============================================================
    File manager: settings
+
+   Groups of rows on cards, each row a name with what it does under it and
+   its control on the right.
    ============================================================ */
 
 .settings-page-scroll,
@@ -1052,36 +1087,89 @@ button.computer-volume-action:hover {
 }
 
 .settings-title {
-  font-size: 1.15em;
+  font-size: 1.45em;
   font-weight: 700;
 }
 
-.settings-tabs button {
-  min-height: 32px;
-  padding: 0 12px;
+/* The tabs read as one segmented switch. */
+stackswitcher.settings-tabs {
+  padding: 3px;
   border-radius: var(--io-radius);
+  background: var(--io-control-bg);
 }
 
-.settings-tab {
-  margin-top: 4px;
+stackswitcher.settings-tabs > button {
+  min-height: 28px;
+  padding: 0 14px;
+  border-radius: var(--io-radius-sm);
+  background: transparent;
+  color: var(--io-text-dim);
+  font-weight: 600;
+}
+
+stackswitcher.settings-tabs > button:hover {
+  background: var(--io-hover-bg);
+  color: var(--io-text);
+}
+
+stackswitcher.settings-tabs > button:checked {
+  background: var(--io-accent);
+  color: var(--io-accent-fg);
+  box-shadow: 0 1px 3px alpha(black, 0.25);
+}
+
+.settings-group-title {
+  margin: 0 4px;
+  font-size: 0.8em;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--io-text-faint);
+}
+
+.settings-card {
+  border: 1px solid var(--io-separator);
+  border-radius: var(--io-radius-lg);
+  background: var(--io-card-bg);
 }
 
 .settings-row {
-  min-height: 42px;
-  padding: 8px 0;
+  min-height: 52px;
+  padding: 10px 16px;
+}
+
+.settings-card > .settings-row + .settings-row {
+  border-top: 1px solid var(--io-separator);
 }
 
 .settings-row-label {
   font-weight: 600;
 }
 
+.settings-row-description,
 .settings-value {
   color: var(--io-text-dim);
+  font-size: 0.9em;
+}
+
+.settings-path {
+  font-family: monospace;
+  font-size: 0.85em;
+}
+
+.toolbar-group.settings-text-switcher > button {
+  padding: 0 12px;
+}
+
+button.settings-button {
+  padding: 4px 14px;
+  font-weight: 600;
 }
 
 button.settings-color-button {
   min-width: 58px;
   min-height: 32px;
+  padding: 3px;
+  border: 1px solid var(--io-separator);
   border-radius: var(--io-radius);
 }
 
@@ -1090,12 +1178,16 @@ button.settings-color-button {
 }
 
 .settings-actions-list row {
-  margin: 2px 0;
-  border-radius: var(--io-radius);
+  margin: 0;
+  border-radius: 0;
+}
+
+.settings-actions-list row + row {
+  border-top: 1px solid var(--io-separator);
 }
 
 .settings-action-row {
-  padding: 9px 10px;
+  padding: 12px 16px;
 }
 
 .settings-action-details {

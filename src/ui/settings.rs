@@ -3,7 +3,7 @@ use std::{cell::RefCell, path::Path, rc::Rc};
 use gtk::prelude::*;
 
 use crate::{
-    config::{CustomActionConfig, MAX_ICON_SIZE, MIN_ICON_SIZE, ViewMode},
+    config::{CustomActionConfig, IconStyle, MAX_ICON_SIZE, MIN_ICON_SIZE, ViewMode},
     sorting::{SortKey, SortOrder},
     theme::ThemeSettings,
 };
@@ -21,6 +21,8 @@ pub struct SettingsPage {
     pub show_hidden_check: gtk::CheckButton,
     pub list_button: gtk::ToggleButton,
     pub icon_button: gtk::ToggleButton,
+    pub icon_style_symbolic_button: gtk::ToggleButton,
+    pub icon_style_color_button: gtk::ToggleButton,
     pub icon_size_down_button: gtk::Button,
     pub icon_size_up_button: gtk::Button,
     pub icon_size_scale: gtk::Scale,
@@ -80,26 +82,31 @@ impl ThemeColorControl {
 }
 
 impl SettingsPage {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         layout: ViewMode,
         show_hidden: bool,
         icon_size: i32,
+        icon_style: IconStyle,
         sort: SortOrder,
         theme_settings: &ThemeSettings,
         theme_css_path: Option<&Path>,
         actions: &[CustomActionConfig],
     ) -> Self {
         let show_hidden_check = gtk::CheckButton::builder()
-            .label("Show hidden files")
             .active(show_hidden)
+            .valign(gtk::Align::Center)
             .build();
 
-        let general = gtk::Box::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .spacing(12)
-            .css_classes(["settings-tab"])
-            .build();
-        general.append(&settings_row("Files", &show_hidden_check));
+        let general = settings_tab(&[settings_group(
+            "Files",
+            None,
+            &[settings_row(
+                "Show hidden files",
+                Some("Dotfiles and other hidden entries. Ctrl+H toggles it from anywhere."),
+                &show_hidden_check,
+            )],
+        )]);
 
         let list_button = gtk::ToggleButton::builder()
             .icon_name("view-list-symbolic")
@@ -113,8 +120,9 @@ impl SettingsPage {
         icon_button.set_focusable(false);
         let layout_group = gtk::Box::builder()
             .orientation(gtk::Orientation::Horizontal)
-            .spacing(0)
-            .css_classes(["toolbar-group"])
+            .spacing(2)
+            .valign(gtk::Align::Center)
+            .css_classes(["toolbar-group", "view-switcher"])
             .build();
         layout_group.append(&list_button);
         layout_group.append(&icon_button);
@@ -165,8 +173,8 @@ impl SettingsPage {
             sort_direction_button("view-sort-descending-symbolic", "Descending");
         let sort_direction_group = gtk::Box::builder()
             .orientation(gtk::Orientation::Horizontal)
-            .spacing(0)
-            .css_classes(["toolbar-group"])
+            .spacing(2)
+            .css_classes(["toolbar-group", "view-switcher"])
             .build();
         sort_direction_group.append(&sort_ascending_button);
         sort_direction_group.append(&sort_descending_button);
@@ -179,19 +187,72 @@ impl SettingsPage {
         sort_controls.append(&sort_direction_group);
 
         let folders_first_check = gtk::CheckButton::builder()
-            .label("Folders before files")
             .active(sort.folders_first)
+            .valign(gtk::Align::Center)
             .build();
 
-        let view = gtk::Box::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .spacing(12)
-            .css_classes(["settings-tab"])
+        let icon_style_symbolic_button = gtk::ToggleButton::builder()
+            .label("Tinted")
+            .tooltip_text("Symbols tinted by file type, following the theme")
+            .active(icon_style == IconStyle::Symbolic)
             .build();
-        view.append(&settings_row("Layout", &layout_group));
-        view.append(&settings_row("Icon size", &icon_size_controls));
-        view.append(&settings_row("Sort by", &sort_controls));
-        view.append(&settings_row("Grouping", &folders_first_check));
+        icon_style_symbolic_button.set_focusable(false);
+        let icon_style_color_button = gtk::ToggleButton::builder()
+            .label("Icon theme")
+            .tooltip_text("The icon theme's full-colour icons")
+            .active(icon_style == IconStyle::Color)
+            .group(&icon_style_symbolic_button)
+            .build();
+        icon_style_color_button.set_focusable(false);
+        let icon_style_group = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(2)
+            .valign(gtk::Align::Center)
+            .css_classes(["toolbar-group", "view-switcher", "settings-text-switcher"])
+            .build();
+        icon_style_group.append(&icon_style_symbolic_button);
+        icon_style_group.append(&icon_style_color_button);
+        icon_size_controls.set_width_request(320);
+        icon_size_controls.set_hexpand(false);
+        icon_size_controls.set_valign(gtk::Align::Center);
+
+        let view = settings_tab(&[
+            settings_group(
+                "Appearance",
+                None,
+                &[
+                    settings_row(
+                        "Layout",
+                        Some("How a folder opens in a new window."),
+                        &layout_group,
+                    ),
+                    settings_row(
+                        "Icon size",
+                        Some("Tile size in the icon view. Ctrl+scroll changes it too."),
+                        &icon_size_controls,
+                    ),
+                    settings_row(
+                        "File icons",
+                        Some(
+                            "Tinted symbols follow the theme; the icon theme brings its own colours.",
+                        ),
+                        &icon_style_group,
+                    ),
+                ],
+            ),
+            settings_group(
+                "Sorting",
+                None,
+                &[
+                    settings_row("Sort by", None, &sort_controls),
+                    settings_row(
+                        "Folders first",
+                        Some("Keep folders above files whatever the order."),
+                        &folders_first_check,
+                    ),
+                ],
+            ),
+        ]);
 
         let theme_window_background_button = color_button(
             &theme_settings.window_background,
@@ -244,9 +305,10 @@ impl SettingsPage {
         theme_radius_controls.append(&theme_radius_value_label);
 
         let theme_reset_button = gtk::Button::builder()
-            .icon_name("edit-undo-symbolic")
-            .tooltip_text("Reset Theme")
-            .css_classes(["toolbar-button"])
+            .label("Reset to Ionix")
+            .tooltip_text("Reset the theme colours to the built-in Ionix palette")
+            .valign(gtk::Align::Center)
+            .css_classes(["settings-button"])
             .build();
         theme_reset_button.set_focusable(false);
         let theme_css_path_label = gtk::Label::builder()
@@ -255,79 +317,82 @@ impl SettingsPage {
             .selectable(true)
             .wrap(true)
             .wrap_mode(gtk::pango::WrapMode::WordChar)
-            .css_classes(["settings-value"])
+            .css_classes(["settings-value", "settings-path"])
             .build();
+        theme_radius_controls.set_width_request(320);
+        theme_radius_controls.set_hexpand(false);
+        theme_radius_controls.set_valign(gtk::Align::Center);
 
-        let theme_header = gtk::Box::builder()
-            .orientation(gtk::Orientation::Horizontal)
-            .spacing(8)
-            .build();
-        theme_header.append(
-            &gtk::Label::builder()
-                .label("Theme")
-                .xalign(0.0)
-                .hexpand(true)
-                .css_classes(["settings-row-label"])
-                .build(),
-        );
-        theme_header.append(&theme_reset_button);
-
-        let theme = gtk::Box::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .spacing(12)
-            .css_classes(["settings-tab"])
-            .build();
-        theme.append(&theme_header);
-        theme.append(&settings_row(
-            "Window",
-            theme_window_background_button.widget(),
-        ));
-        theme.append(&settings_row(
-            "Panels",
-            theme_panel_background_button.widget(),
-        ));
-        theme.append(&settings_row(
-            "Muted",
-            theme_muted_background_button.widget(),
-        ));
-        theme.append(&settings_row("Accent", theme_accent_button.widget()));
-        theme.append(&settings_row("Selection", theme_selection_button.widget()));
-        theme.append(&settings_row("Text", theme_text_button.widget()));
-        theme.append(&settings_row("Border", theme_border_button.widget()));
-        theme.append(&settings_row("Corner radius", &theme_radius_controls));
-        theme.append(&settings_row("Generated CSS", &theme_css_path_label));
+        let theme = settings_tab(&[
+            settings_group(
+                "Colours",
+                None,
+                &[
+                    settings_row(
+                        "Window",
+                        Some("The wash behind everything. Transparency shows the desktop through."),
+                        theme_window_background_button.widget(),
+                    ),
+                    settings_row(
+                        "Panels",
+                        Some("The browser card, menus and other raised surfaces."),
+                        theme_panel_background_button.widget(),
+                    ),
+                    settings_row(
+                        "Muted",
+                        Some("Wells under thumbnails and progress bars."),
+                        theme_muted_background_button.widget(),
+                    ),
+                    settings_row(
+                        "Accent",
+                        Some("Highlights, focus and the active view."),
+                        theme_accent_button.widget(),
+                    ),
+                    settings_row(
+                        "Selection",
+                        Some("Selected files and the current place."),
+                        theme_selection_button.widget(),
+                    ),
+                    settings_row("Text", None, theme_text_button.widget()),
+                    settings_row(
+                        "Border",
+                        Some("Outlines of cards and menus."),
+                        theme_border_button.widget(),
+                    ),
+                ],
+            ),
+            settings_group(
+                "Shape",
+                None,
+                &[settings_row("Corner radius", None, &theme_radius_controls)],
+            ),
+            settings_group(
+                "Theme file",
+                None,
+                &[settings_row_with_detail(
+                    "Saved to",
+                    &theme_css_path_label,
+                    &theme_reset_button,
+                )],
+            ),
+        ]);
 
         let action_add_button = gtk::Button::builder()
-            .icon_name("list-add-symbolic")
+            .label("Add action")
             .tooltip_text("Add Action")
-            .css_classes(["toolbar-button"])
+            .css_classes(["settings-button", "suggested-action"])
             .build();
         action_add_button.set_focusable(false);
-        let actions_header = gtk::Box::builder()
-            .orientation(gtk::Orientation::Horizontal)
-            .spacing(8)
-            .build();
-        actions_header.append(
-            &gtk::Label::builder()
-                .label("Custom actions")
-                .xalign(0.0)
-                .hexpand(true)
-                .css_classes(["settings-row-label"])
-                .build(),
-        );
-        actions_header.append(&action_add_button);
 
         let actions_list = gtk::ListBox::builder()
             .selection_mode(gtk::SelectionMode::None)
             .css_classes(["settings-actions-list"])
             .build();
-        let actions_tab = gtk::Box::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .spacing(12)
-            .css_classes(["settings-tab"])
-            .build();
-        actions_tab.append(&actions_header);
-        actions_tab.append(&actions_list);
+        let actions_tab = settings_tab(&[settings_group(
+            "Custom actions",
+            Some(action_add_button.upcast_ref()),
+            &[actions_list.clone().upcast()],
+        )]);
 
         let tabs = gtk::Stack::builder()
             .transition_type(gtk::StackTransitionType::Crossfade)
@@ -343,28 +408,35 @@ impl SettingsPage {
             .halign(gtk::Align::Start)
             .css_classes(["settings-tabs"])
             .build();
+        let header = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(16)
+            .build();
 
         let title = gtk::Label::builder()
             .label("Settings")
             .xalign(0.0)
+            .hexpand(true)
             .css_classes(["settings-title"])
             .build();
+        header.append(&title);
+        header.append(&switcher);
 
         let content = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
-            .spacing(16)
-            .margin_top(18)
-            .margin_bottom(18)
-            .margin_start(18)
-            .margin_end(18)
+            .spacing(18)
+            .margin_top(22)
+            .margin_bottom(22)
+            .margin_start(22)
+            .margin_end(22)
             .css_classes(["settings-page"])
             .build();
-        content.append(&title);
-        content.append(&switcher);
+        content.append(&header);
         content.append(&tabs);
 
         let root = gtk::ScrolledWindow::builder()
             .child(&content)
+            .hscrollbar_policy(gtk::PolicyType::Never)
             .css_classes(["content-scroll", "settings-page-scroll"])
             .build();
 
@@ -373,6 +445,8 @@ impl SettingsPage {
             show_hidden_check,
             list_button,
             icon_button,
+            icon_style_symbolic_button,
+            icon_style_color_button,
             icon_size_down_button,
             icon_size_up_button,
             icon_size_scale,
@@ -436,6 +510,13 @@ impl SettingsPage {
     pub fn set_view_mode(&self, layout: ViewMode) {
         self.list_button.set_active(layout == ViewMode::List);
         self.icon_button.set_active(layout == ViewMode::Icon);
+    }
+
+    pub fn set_icon_style(&self, icon_style: IconStyle) {
+        self.icon_style_symbolic_button
+            .set_active(icon_style == IconStyle::Symbolic);
+        self.icon_style_color_button
+            .set_active(icon_style == IconStyle::Color);
     }
 
     pub fn set_icon_size(&self, icon_size: i32) {
@@ -519,21 +600,125 @@ impl SettingsPage {
     }
 }
 
-fn settings_row(label: &str, control: &impl IsA<gtk::Widget>) -> gtk::Box {
-    let label = gtk::Label::builder()
-        .label(label)
-        .xalign(0.0)
-        .hexpand(true)
-        .css_classes(["settings-row-label"])
+/// A tab of the settings page: its groups, one under the other.
+fn settings_tab(groups: &[gtk::Box]) -> gtk::Box {
+    let tab = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(22)
+        .css_classes(["settings-tab"])
         .build();
+    for group in groups {
+        tab.append(group);
+    }
+    tab
+}
+
+/// A titled card of setting rows, with an optional control beside the title.
+fn settings_group(title: &str, suffix: Option<&gtk::Widget>, rows: &[gtk::Widget]) -> gtk::Box {
+    let heading = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .build();
+    heading.append(
+        &gtk::Label::builder()
+            .label(title)
+            .xalign(0.0)
+            .hexpand(true)
+            .valign(gtk::Align::End)
+            .css_classes(["settings-group-title"])
+            .build(),
+    );
+    if let Some(suffix) = suffix {
+        heading.append(suffix);
+    }
+
+    let card = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .css_classes(["settings-card"])
+        .build();
+    for row in rows {
+        card.append(row);
+    }
+
+    let group = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(8)
+        .css_classes(["settings-group"])
+        .build();
+    group.append(&heading);
+    group.append(&card);
+    group
+}
+
+/// A setting's name, and what it does under it, with its control on the right.
+fn settings_row(
+    label: &str,
+    description: Option<&str>,
+    control: &impl IsA<gtk::Widget>,
+) -> gtk::Widget {
+    let text = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(2)
+        .hexpand(true)
+        .valign(gtk::Align::Center)
+        .build();
+    text.append(
+        &gtk::Label::builder()
+            .label(label)
+            .xalign(0.0)
+            .css_classes(["settings-row-label"])
+            .build(),
+    );
+    if let Some(description) = description {
+        text.append(
+            &gtk::Label::builder()
+                .label(description)
+                .xalign(0.0)
+                .wrap(true)
+                .css_classes(["settings-row-description"])
+                .build(),
+        );
+    }
+
     let row = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
-        .spacing(14)
+        .spacing(18)
         .css_classes(["settings-row"])
         .build();
-    row.append(&label);
+    row.append(&text);
     row.append(control);
-    row
+    row.upcast()
+}
+
+/// A row whose description is a widget of its own, like a selectable path.
+fn settings_row_with_detail(
+    label: &str,
+    detail: &impl IsA<gtk::Widget>,
+    control: &impl IsA<gtk::Widget>,
+) -> gtk::Widget {
+    let text = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(2)
+        .hexpand(true)
+        .valign(gtk::Align::Center)
+        .build();
+    text.append(
+        &gtk::Label::builder()
+            .label(label)
+            .xalign(0.0)
+            .css_classes(["settings-row-label"])
+            .build(),
+    );
+    text.append(detail);
+
+    let row = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(18)
+        .css_classes(["settings-row"])
+        .build();
+    row.append(&text);
+    row.append(control);
+    row.upcast()
 }
 
 fn sort_direction_button(icon_name: &str, tooltip: &str) -> gtk::ToggleButton {
