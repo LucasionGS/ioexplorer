@@ -10,7 +10,8 @@ It is developed with customization and ricing in mind, as well as efficiency nav
 - Left sidebar for common local places.
 - Main content area with List View and Icon View.
 - File pane tabs with per-tab navigation history.
-- Top bar with back, forward, up, refresh, breadcrumbs, and an editable path/URL entry.
+- Top bar with back, forward and up, an address bar (breadcrumbs from Home, or an editable path/URL entry), and a folder search.
+- File type icons and kind names (tinted symbols that follow the theme, or the icon theme's own), and a details pane that describes the open folder when nothing is selected.
 - Native GTK/GDK drag-and-drop for local files using standard file-list/URI data.
 - XDG config loading and optional user CSS for distribution theme customization.
 - Desktop integration metadata and packaging scaffolds.
@@ -927,6 +928,7 @@ IoExplorer reads `~/.config/ioexplorer/config.toml` when present.
 default_view = "icon"
 show_hidden = false
 icon_size = 72
+icon_style = "symbolic"   # "symbolic": tinted by file type, follows the theme; "color": the icon theme's own
 sidebar_width = 220
 custom_css = "/home/user/.config/ioexplorer/theme.css"
 
@@ -961,7 +963,29 @@ filters = ["image/*"]
 
 The bundled CSS lives in `data/styles/ioexplorer.css`. Distribution maintainers can override or layer styling through `custom_css`.
 
-Settings -> Theme writes generated CSS to the configured `custom_css` path. Theme color controls support alpha, including fully transparent colors. If `custom_css` is not configured yet, IoExplorer creates `~/.config/ioexplorer/theme.css`, saves that path to `config.toml`, and applies changes immediately to the running UI. The generated CSS is kept inside a managed block so user-authored CSS can live before or after it:
+### Theming
+
+The bundled stylesheet paints everything from CSS variables set on `window`, and its defaults are the Ionix palette. A theme only has to set the eight base tokens; every other tone (hover fills, separators, dimmed text, the accent's soft and text variants) is mixed from them:
+
+```css
+window,
+tooltip {
+  --io-window-bg: rgba(15, 10, 24, 0.74);  /* the wash behind everything */
+  --io-panel-bg: rgba(26, 16, 37, 0.86);   /* the browser card, menus */
+  --io-muted-bg: rgba(15, 10, 24, 0.32);   /* wells under thumbnails and bars */
+  --io-accent: rgb(168, 85, 247);
+  --io-selection: rgba(168, 85, 247, 0.34);
+  --io-text: rgba(226, 217, 243, 0.94);
+  --io-border: rgba(168, 85, 247, 0.2);
+  --io-radius: 8px;
+}
+```
+
+Any derived token can be overridden the same way: `--io-view-bg`, `--io-popover-bg`, `--io-card-bg`, `--io-control-bg`, `--io-hover-bg`, `--io-active-bg`, `--io-separator`, `--io-accent-soft`, `--io-accent-text`, `--io-accent-fg`, `--io-selection-hover`, `--io-text-dim`, `--io-text-faint`, `--io-radius-sm`, `--io-radius-lg`, the meaning colours `--io-success`, `--io-warning` and `--io-danger`, and the file type tints `--io-ft-folder`, `--io-ft-image`, `--io-ft-video`, `--io-ft-audio`, `--io-ft-archive`, `--io-ft-document`, `--io-ft-spreadsheet`, `--io-ft-presentation`, `--io-ft-pdf`, `--io-ft-code`, `--io-ft-text`, `--io-ft-executable`, `--io-ft-disk`, `--io-ft-font` and `--io-ft-other`.
+
+A theme file saved before the stylesheet used tokens still works: when the file has the `theme.*` comments of a managed block but sets no tokens, IoExplorer derives the tokens from those comments.
+
+Settings -> Theme writes the base tokens to the configured `custom_css` path. Theme color controls support alpha, including fully transparent colors. If `custom_css` is not configured yet, IoExplorer creates `~/.config/ioexplorer/theme.css`, saves that path to `config.toml`, and applies changes immediately to the running UI. The generated CSS is kept inside a managed block so user-authored CSS can live before or after it:
 
 ```css
 /* IOEXPLORER AUTO_GEN */
