@@ -71,6 +71,24 @@ window {
   background: rgba(82, 145, 238, 0.44);
 }
 
+.sidebar-section-title {
+  margin: 12px 16px 4px;
+  font-size: 0.85em;
+  font-weight: 700;
+  color: alpha(currentColor, 0.6);
+}
+
+/* Unmounted drives read as available-but-idle next to the mounted ones. */
+.sidebar-device-unmounted .sidebar-device-icon {
+  opacity: 0.55;
+}
+
+.sidebar-eject-button {
+  min-width: 0;
+  min-height: 0;
+  padding: 2px;
+}
+
 .breadcrumbs {
   min-width: 180px;
   background: rgba(0, 0, 0, 0.16);
@@ -320,6 +338,21 @@ window {
 
 .computer-volume-usage {
   font-size: 0.92em;
+}
+
+.computer-section-title {
+  font-weight: 700;
+  margin: 12px 0 4px;
+}
+
+/* Unmounted volumes read as available-but-idle next to the mounted ones. */
+.computer-volume-row-unmounted .computer-volume-icon {
+  opacity: 0.55;
+}
+
+.computer-volume-action {
+  padding: 4px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
 }
 
 .computer-stats-separator {

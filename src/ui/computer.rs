@@ -1,27 +1,13 @@
-use std::{
-    cell::RefCell,
-    collections::BTreeSet,
-    fs,
-    path::{Path, PathBuf},
-    process::Command,
-};
+use std::{cell::RefCell, collections::BTreeSet, fs, path::Path, process::Command, rc::Rc};
 
-use gio::prelude::FileExt;
 use gtk::prelude::*;
 
-const FILESYSTEM_USAGE_ATTRIBUTES: &str = "filesystem::size,filesystem::free,filesystem::used";
+use crate::ui::{
+    context_menu::ContextMenu,
+    volumes::{MountVolume, UnmountedVolume, VolumeAction, VolumeEntry, Volumes},
+};
 
-#[derive(Clone)]
-pub struct MountVolume {
-    pub name: String,
-    pub device: String,
-    pub mount_path: PathBuf,
-    pub fs_type: String,
-    pub size: Option<u64>,
-    pub used: Option<u64>,
-    pub readonly: bool,
-    icon: gio::Icon,
-}
+const UNMOUNTED_ROW_CLASS: &str = "computer-volume-row-unmounted";
 
 pub struct ComputerPage {
     pub root: gtk::ScrolledWindow,
@@ -29,7 +15,8 @@ pub struct ComputerPage {
     cpu_label: gtk::Label,
     gpu_label: gtk::Label,
     ram_label: gtk::Label,
-    volumes: RefCell<Vec<MountVolume>>,
+    entries: Rc<RefCell<Vec<VolumeEntry>>>,
+    volumes: Rc<Volumes>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -40,7 +27,7 @@ struct SystemSpecs {
 }
 
 impl ComputerPage {
-    pub fn new() -> Self {
+    pub fn new(volumes: Rc<Volumes>) -> Self {
         let list = gtk::ListBox::builder()
             .selection_mode(gtk::SelectionMode::Single)
             .activate_on_single_click(false)
@@ -92,31 +79,83 @@ impl ComputerPage {
             .css_classes(["content-scroll", "computer-page-scroll"])
             .build();
 
-        Self {
+        let page = Self {
             root,
             list,
             cpu_label,
             gpu_label,
             ram_label,
-            volumes: RefCell::new(Vec::new()),
-        }
+            entries: Rc::new(RefCell::new(Vec::new())),
+            volumes,
+        };
+        page.install_list_handlers();
+        page
+    }
+
+    fn install_list_handlers(&self) {
+        // A list box drops headers set outside its header func, so the section
+        // title is placed here: above the first unmounted row.
+        self.list.set_header_func(|row, before| {
+            let starts_section = row.has_css_class(UNMOUNTED_ROW_CLASS)
+                && !before.is_some_and(|before| before.has_css_class(UNMOUNTED_ROW_CLASS));
+            if !starts_section {
+                row.set_header(None::<&gtk::Widget>);
+            } else if row.header().is_none() {
+                row.set_header(Some(&section_header("Not mounted")));
+            }
+        });
+
+        let entries = Rc::clone(&self.entries);
+        let volumes = Rc::clone(&self.volumes);
+        self.list.connect_row_activated(move |list, row| {
+            let entry = entries.borrow().get(row.index().max(0) as usize).cloned();
+            if let Some(entry) = entry {
+                volumes.run(VolumeAction::Open, &entry, list.upcast_ref());
+            }
+        });
+
+        let right_click = gtk::GestureClick::new();
+        right_click.set_button(gtk::gdk::BUTTON_SECONDARY);
+        let list = self.list.clone();
+        let entries = Rc::clone(&self.entries);
+        let volumes = Rc::clone(&self.volumes);
+        right_click.connect_pressed(move |gesture, _, x, y| {
+            let Some(row) = list.row_at_y(y as i32) else {
+                return;
+            };
+            let Some(entry) = entries.borrow().get(row.index().max(0) as usize).cloned() else {
+                return;
+            };
+
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            list.select_row(Some(&row));
+            let context = volumes.context_menu(&entry, list.upcast_ref());
+            ContextMenu::popup_at(&list, x, y, &context);
+        });
+        self.list.add_controller(right_click);
     }
 
     pub fn refresh(&self) {
+        self.refresh_volumes();
+        self.refresh_system_specs();
+    }
+
+    /// Rebuild the volume list without re-reading the system specs, which
+    /// spawns `lspci` and is too slow to repeat on every device event.
+    pub fn refresh_volumes(&self) {
         while let Some(row) = self.list.row_at_index(0) {
             self.list.remove(&row);
         }
 
-        let volumes = mounted_volumes();
-        if volumes.is_empty() {
+        let entries = self.volumes.entries();
+
+        if entries.is_empty() {
             self.list.append(&empty_row());
-        } else {
-            for volume in &volumes {
-                self.list.append(&volume_row(volume));
-            }
         }
-        *self.volumes.borrow_mut() = volumes;
-        self.refresh_system_specs();
+        for entry in &entries {
+            self.list.append(&volume_row(entry, &self.volumes));
+        }
+        *self.entries.borrow_mut() = entries;
     }
 
     fn refresh_system_specs(&self) {
@@ -127,160 +166,142 @@ impl ComputerPage {
     }
 
     pub fn volume_count(&self) -> usize {
-        self.volumes.borrow().len()
-    }
-
-    pub fn mount_path_at(&self, index: usize) -> Option<PathBuf> {
-        self.volumes
+        self.entries
             .borrow()
-            .get(index)
-            .map(|volume| volume.mount_path.clone())
+            .iter()
+            .filter(|entry| matches!(entry, VolumeEntry::Mounted(_)))
+            .count()
+    }
+
+    pub fn unmounted_count(&self) -> usize {
+        self.entries.borrow().len() - self.volume_count()
     }
 }
 
-pub fn mounted_volumes() -> Vec<MountVolume> {
-    let (mounts, _) = gio::UnixMountEntry::mounts();
-    let mut volumes: Vec<MountVolume> = mounts
-        .into_iter()
-        .filter(should_show_mount_entry)
-        .map(|mount| mount_volume(&mount))
-        .collect();
-
-    volumes.sort_by_key(mount_sort_key);
-    volumes.dedup_by(|left, right| left.mount_path == right.mount_path);
-    volumes
-}
-
-fn should_show_mount_entry(mount: &gio::UnixMountEntry) -> bool {
-    should_show_mount(
-        &mount.mount_path(),
-        &mount.device_path().to_string_lossy(),
-        mount.fs_type().as_str(),
-        mount.guess_should_display(),
-    )
-}
-
-fn should_show_mount(
-    mount_path: &Path,
-    device_path: &str,
-    fs_type: &str,
-    should_display: bool,
-) -> bool {
-    if mount_path == Path::new("/") {
-        return true;
-    }
-
-    if pseudo_filesystem(fs_type) {
-        return false;
-    }
-
-    should_display || device_backed_partition(device_path)
-}
-
-fn device_backed_partition(device_path: &str) -> bool {
-    device_path.starts_with("/dev/") && !device_path.starts_with("/dev/loop")
-}
-
-fn pseudo_filesystem(fs_type: &str) -> bool {
-    matches!(
-        fs_type,
-        "autofs"
-            | "binfmt_misc"
-            | "bpf"
-            | "cgroup"
-            | "cgroup2"
-            | "configfs"
-            | "debugfs"
-            | "devpts"
-            | "devtmpfs"
-            | "fusectl"
-            | "hugetlbfs"
-            | "mqueue"
-            | "nsfs"
-            | "proc"
-            | "pstore"
-            | "securityfs"
-            | "sysfs"
-            | "tracefs"
-            | "tmpfs"
-    )
-}
-
-fn mount_volume(mount: &gio::UnixMountEntry) -> MountVolume {
-    let mount_path = mount.mount_path();
-    let fs_type = mount.fs_type().to_string();
-    let device = mount.device_path().display().to_string();
-    let (size, free, queried_used) = filesystem_usage(&mount_path);
-    let used = queried_used.or_else(|| match (size, free) {
-        (Some(size), Some(free)) => Some(size.saturating_sub(free)),
-        _ => None,
-    });
-
-    MountVolume {
-        name: mount_display_name(mount, &mount_path),
-        device,
-        mount_path,
-        fs_type,
-        size,
-        used,
-        readonly: mount.is_readonly(),
-        icon: mount.guess_symbolic_icon(),
-    }
-}
-
-fn filesystem_usage(mount_path: &std::path::Path) -> (Option<u64>, Option<u64>, Option<u64>) {
-    let file = gio::File::for_path(mount_path);
-    match file.query_filesystem_info(FILESYSTEM_USAGE_ATTRIBUTES, None::<&gio::Cancellable>) {
-        Ok(info) => (
-            optional_uint64(&info, "filesystem::size"),
-            optional_uint64(&info, "filesystem::free"),
-            optional_uint64(&info, "filesystem::used"),
-        ),
-        Err(error) => {
-            tracing::warn!(path = %mount_path.display(), %error, "failed to query filesystem usage");
-            (None, None, None)
-        }
-    }
-}
-
-fn optional_uint64(info: &gio::FileInfo, attribute: &str) -> Option<u64> {
-    info.has_attribute(attribute)
-        .then(|| info.attribute_uint64(attribute))
-}
-
-fn mount_display_name(mount: &gio::UnixMountEntry, mount_path: &std::path::Path) -> String {
-    if mount_path == Path::new("/") {
-        return "Root".to_string();
-    }
-
-    let name = mount.guess_name().to_string();
-    if name.trim().is_empty() {
-        mount_path.display().to_string()
-    } else {
-        name
-    }
-}
-
-fn mount_sort_key(volume: &MountVolume) -> (u8, String) {
-    let priority = if volume.mount_path == std::path::Path::new("/") {
-        0
-    } else {
-        1
-    };
-    (priority, volume.mount_path.display().to_string())
-}
-
-fn volume_row(volume: &MountVolume) -> gtk::ListBoxRow {
+fn volume_row(entry: &VolumeEntry, volumes: &Rc<Volumes>) -> gtk::ListBoxRow {
     let row = gtk::ListBoxRow::builder()
         .activatable(true)
         .selectable(true)
         .css_classes(["computer-volume-row"])
         .build();
 
-    let icon = gtk::Image::from_gicon(&volume.icon);
+    let actions = volume_action_buttons(entry, volumes);
+    let (icon, details) = match entry {
+        VolumeEntry::Mounted(volume) => (&volume.icon, mounted_details(volume, &actions)),
+        VolumeEntry::Unmounted(volume) => {
+            row.add_css_class(UNMOUNTED_ROW_CLASS);
+            (&volume.icon, unmounted_details(volume, &actions))
+        }
+    };
+
+    let icon = gtk::Image::from_gicon(icon);
     icon.set_pixel_size(32);
     icon.set_valign(gtk::Align::Start);
+    icon.add_css_class("computer-volume-icon");
 
+    let content = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(14)
+        .margin_top(10)
+        .margin_bottom(10)
+        .margin_start(12)
+        .margin_end(12)
+        .build();
+    content.append(&icon);
+    content.append(&details);
+    row.set_child(Some(&content));
+
+    row
+}
+
+fn volume_action_buttons(entry: &VolumeEntry, volumes: &Rc<Volumes>) -> gtk::Box {
+    let buttons = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(6)
+        .valign(gtk::Align::Center)
+        .css_classes(["computer-volume-actions"])
+        .build();
+
+    let actions = [
+        (
+            entry.can_mount(),
+            VolumeAction::Mount,
+            "Mount",
+            "Mount this volume",
+        ),
+        (
+            entry.can_unmount(),
+            VolumeAction::Unmount,
+            "Unmount",
+            "Unmount this volume",
+        ),
+        (
+            entry.can_eject(),
+            VolumeAction::Eject,
+            "Eject",
+            "Eject the drive so it can be safely removed",
+        ),
+    ];
+    for (available, action, label, tooltip) in actions {
+        if !available {
+            continue;
+        }
+
+        let button = gtk::Button::builder()
+            .label(label)
+            .tooltip_text(tooltip)
+            .css_classes(["flat", "computer-volume-action"])
+            .build();
+        button.set_focusable(false);
+        let entry = entry.clone();
+        let volumes = Rc::clone(volumes);
+        button.connect_clicked(move |button| {
+            volumes.run(action, &entry, button.upcast_ref());
+        });
+        buttons.append(&button);
+    }
+
+    buttons
+}
+
+fn unmounted_details(volume: &UnmountedVolume, actions: &gtk::Box) -> gtk::Box {
+    let name_label = gtk::Label::builder()
+        .label(&volume.name)
+        .xalign(0.0)
+        .hexpand(true)
+        .ellipsize(gtk::pango::EllipsizeMode::End)
+        .css_classes(["computer-volume-name"])
+        .build();
+
+    let mut parts = vec![volume.device.clone(), volume.fs_type.clone()];
+    if let Some(size) = volume.size.filter(|size| *size > 0) {
+        parts.push(format_bytes(size));
+    }
+    let device_label = gtk::Label::builder()
+        .label(join_non_empty(parts))
+        .xalign(0.0)
+        .ellipsize(gtk::pango::EllipsizeMode::End)
+        .css_classes(["dim-label"])
+        .build();
+    let state_label = gtk::Label::builder()
+        .label("Not mounted - open to mount")
+        .xalign(0.0)
+        .ellipsize(gtk::pango::EllipsizeMode::End)
+        .css_classes(["dim-label"])
+        .build();
+
+    let details = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(5)
+        .hexpand(true)
+        .build();
+    details.append(&title_row(&name_label, actions));
+    details.append(&device_label);
+    details.append(&state_label);
+    details
+}
+
+fn mounted_details(volume: &MountVolume, actions: &gtk::Box) -> gtk::Box {
     let name_label = gtk::Label::builder()
         .label(&volume.name)
         .xalign(0.0)
@@ -330,24 +351,31 @@ fn volume_row(volume: &MountVolume) -> gtk::ListBoxRow {
         .spacing(5)
         .hexpand(true)
         .build();
-    details.append(&name_label);
+    details.append(&title_row(&name_label, actions));
     details.append(&device_label);
     details.append(&mount_label);
     details.append(&usage);
+    details
+}
 
-    let content = gtk::Box::builder()
+/// The volume name with its action buttons beside it, so the buttons do not
+/// squeeze the usage bar below.
+fn title_row(name_label: &gtk::Label, actions: &gtk::Box) -> gtk::Box {
+    let row = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
-        .spacing(14)
-        .margin_top(10)
-        .margin_bottom(10)
-        .margin_start(12)
-        .margin_end(12)
+        .spacing(12)
         .build();
-    content.append(&icon);
-    content.append(&details);
-    row.set_child(Some(&content));
-
+    row.append(name_label);
+    row.append(actions);
     row
+}
+
+fn section_header(title: &str) -> gtk::Label {
+    gtk::Label::builder()
+        .label(title)
+        .xalign(0.0)
+        .css_classes(["computer-section-title"])
+        .build()
 }
 
 fn system_stats_section(
@@ -658,6 +686,10 @@ fn device_summary(volume: &MountVolume) -> String {
     if volume.readonly {
         parts.push("read-only".to_string());
     }
+    join_non_empty(parts)
+}
+
+fn join_non_empty(parts: Vec<String>) -> String {
     parts
         .into_iter()
         .filter(|part| !part.is_empty())
@@ -702,57 +734,10 @@ fn format_bytes(bytes: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use super::{
         cpu_specs_from_cpuinfo, format_bytes, gpu_specs_from_lspci, ram_specs_from_meminfo,
-        should_show_mount, usage_fraction, usage_summary,
+        usage_fraction, usage_summary,
     };
-
-    #[test]
-    fn always_shows_root_mount() {
-        assert!(should_show_mount(
-            Path::new("/"),
-            "overlay",
-            "overlay",
-            false
-        ));
-    }
-
-    #[test]
-    fn shows_device_backed_non_internal_mounts() {
-        assert!(should_show_mount(
-            Path::new("/home"),
-            "/dev/nvme0n1p2",
-            "ext4",
-            false
-        ));
-    }
-
-    #[test]
-    fn shows_device_backed_system_mounts() {
-        assert!(should_show_mount(
-            Path::new("/boot"),
-            "/dev/nvme0n1p1",
-            "vfat",
-            false
-        ));
-    }
-
-    #[test]
-    fn hides_loopback_devices() {
-        assert!(!should_show_mount(
-            Path::new("/snap/example"),
-            "/dev/loop3",
-            "squashfs",
-            false
-        ));
-    }
-
-    #[test]
-    fn hides_pseudo_filesystems() {
-        assert!(!should_show_mount(Path::new("/proc"), "proc", "proc", true));
-    }
 
     #[test]
     fn formats_volume_usage() {

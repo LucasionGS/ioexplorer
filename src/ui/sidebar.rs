@@ -1,12 +1,21 @@
 use std::{
     cell::RefCell,
     path::{Path, PathBuf},
+    rc::Rc,
 };
 
 use directories::UserDirs;
 use gtk::prelude::*;
 
-use crate::providers::ProviderUri;
+use crate::{
+    providers::ProviderUri,
+    ui::{
+        context_menu::ContextMenu,
+        volumes::{VolumeAction, VolumeEntry, Volumes},
+    },
+};
+
+const DEVICE_ROW_CLASS: &str = "sidebar-device-row";
 
 #[derive(Debug, Clone)]
 pub struct SidebarPlace {
@@ -24,7 +33,10 @@ pub struct Sidebar {
     /// Retained so the width can follow a config reload; the root alone is not
     /// enough, since the scroller carries the minimum content width.
     scroll: gtk::ScrolledWindow,
-    places: RefCell<Vec<SidebarPlace>>,
+    places: Rc<RefCell<Vec<SidebarPlace>>>,
+    /// Drives listed under Devices, whose rows follow the places in `list`.
+    devices: Rc<RefCell<Vec<VolumeEntry>>>,
+    volumes: Rc<Volumes>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -35,7 +47,7 @@ pub enum SidebarSection {
 }
 
 impl Sidebar {
-    pub fn new(width: i32, bookmarks: &[PathBuf]) -> Self {
+    pub fn new(width: i32, bookmarks: &[PathBuf], volumes: Rc<Volumes>) -> Self {
         let list = gtk::ListBox::builder()
             .selection_mode(gtk::SelectionMode::Single)
             .vexpand(true)
@@ -88,10 +100,57 @@ impl Sidebar {
             settings_button,
             list,
             scroll,
-            places: RefCell::new(Vec::new()),
+            places: Rc::new(RefCell::new(Vec::new())),
+            devices: Rc::new(RefCell::new(Vec::new())),
+            volumes,
         };
+        sidebar.install_device_handlers();
         sidebar.set_bookmarks(bookmarks);
         sidebar
+    }
+
+    fn install_device_handlers(&self) {
+        // A list box drops headers set outside its header func, so the section
+        // title is placed here: above the first device row.
+        self.list.set_header_func(|row, before| {
+            let starts_section = row.has_css_class(DEVICE_ROW_CLASS)
+                && !before.is_some_and(|before| before.has_css_class(DEVICE_ROW_CLASS));
+            if !starts_section {
+                row.set_header(None::<&gtk::Widget>);
+            } else if row.header().is_none() {
+                row.set_header(Some(&section_header("Devices")));
+            }
+        });
+
+        let places = Rc::clone(&self.places);
+        let devices = Rc::clone(&self.devices);
+        let volumes = Rc::clone(&self.volumes);
+        self.list.connect_row_activated(move |list, row| {
+            let entry = device_at(&places, &devices, row.index());
+            if let Some(entry) = entry {
+                volumes.run(VolumeAction::Open, &entry, list.upcast_ref());
+            }
+        });
+
+        let right_click = gtk::GestureClick::new();
+        right_click.set_button(gtk::gdk::BUTTON_SECONDARY);
+        let list = self.list.clone();
+        let places = Rc::clone(&self.places);
+        let devices = Rc::clone(&self.devices);
+        let volumes = Rc::clone(&self.volumes);
+        right_click.connect_pressed(move |gesture, _, x, y| {
+            let Some(row) = list.row_at_y(y as i32) else {
+                return;
+            };
+            let Some(entry) = device_at(&places, &devices, row.index()) else {
+                return;
+            };
+
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            let context = volumes.context_menu(&entry, list.upcast_ref());
+            ContextMenu::popup_at(&list, x, y, &context);
+        });
+        self.list.add_controller(right_click);
     }
 
     pub fn set_width(&self, width: i32) {
@@ -123,6 +182,45 @@ impl Sidebar {
             self.list.append(&place_row(place));
         }
         *self.places.borrow_mut() = places;
+        self.refresh_devices();
+    }
+
+    /// Re-list the Devices section, leaving the place rows (and whichever of
+    /// them is selected) untouched.
+    pub fn refresh_devices(&self) {
+        let place_count = self.places.borrow().len() as i32;
+        let selected = self.list.selected_row().map(|row| row.index());
+        let selected_device = selected
+            .and_then(|index| device_at(&self.places, &self.devices, index))
+            .map(|entry| entry.name().to_string());
+
+        while let Some(row) = self.list.row_at_index(place_count) {
+            self.list.remove(&row);
+        }
+
+        let devices: Vec<VolumeEntry> = self
+            .volumes
+            .entries()
+            .into_iter()
+            .filter(is_sidebar_device)
+            .collect();
+        for entry in &devices {
+            self.list.append(&device_row(entry, &self.volumes));
+        }
+
+        // Removing the selected row moves the list's cursor, and with it the
+        // selection, onto another row (usually Home), so put it back.
+        let reselect = match selected {
+            Some(index) if index < place_count => self.list.row_at_index(index),
+            _ => selected_device
+                .and_then(|name| devices.iter().position(|entry| entry.name() == name))
+                .and_then(|position| self.list.row_at_index(place_count + position as i32)),
+        };
+        match reselect {
+            Some(row) => self.list.select_row(Some(&row)),
+            None => self.list.unselect_all(),
+        }
+        *self.devices.borrow_mut() = devices;
     }
 }
 
@@ -231,6 +329,101 @@ fn place_exists(places: &[SidebarPlace], path: &Path) -> bool {
             .local_path()
             .is_ok_and(|uri_path| uri_path == path)
     })
+}
+
+/// Removable media and user-mountable partitions, mounted or not. System
+/// mounts like `/` stay out, since Filesystem already covers them.
+fn is_sidebar_device(entry: &VolumeEntry) -> bool {
+    match entry {
+        VolumeEntry::Mounted(volume) => volume.mount.is_some(),
+        VolumeEntry::Unmounted(_) => true,
+    }
+}
+
+/// The device behind the sidebar row at `index`, if it is past the places.
+fn device_at(
+    places: &RefCell<Vec<SidebarPlace>>,
+    devices: &RefCell<Vec<VolumeEntry>>,
+    index: i32,
+) -> Option<VolumeEntry> {
+    let index = usize::try_from(index).ok()?;
+    let device_index = index.checked_sub(places.borrow().len())?;
+    devices.borrow().get(device_index).cloned()
+}
+
+fn device_row(entry: &VolumeEntry, volumes: &Rc<Volumes>) -> gtk::ListBoxRow {
+    let row = gtk::ListBoxRow::builder()
+        .activatable(true)
+        .selectable(true)
+        .css_classes([DEVICE_ROW_CLASS])
+        .build();
+
+    let item = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(10)
+        .margin_top(6)
+        .margin_bottom(6)
+        .margin_start(10)
+        .margin_end(10)
+        .build();
+    let (icon, tooltip) = match entry {
+        VolumeEntry::Mounted(volume) => (
+            &volume.icon,
+            format!("{} - {}", volume.name, volume.mount_path.display()),
+        ),
+        VolumeEntry::Unmounted(volume) => {
+            row.add_css_class("sidebar-device-unmounted");
+            (&volume.icon, format!("{} - not mounted", volume.name))
+        }
+    };
+    row.set_tooltip_text(Some(&tooltip));
+
+    let icon = gtk::Image::from_gicon(icon);
+    icon.set_pixel_size(18);
+    icon.add_css_class("sidebar-device-icon");
+    let label = gtk::Label::builder()
+        .label(entry.name())
+        .xalign(0.0)
+        .hexpand(true)
+        .ellipsize(gtk::pango::EllipsizeMode::End)
+        .build();
+    item.append(&icon);
+    item.append(&label);
+
+    // Eject takes the whole drive away safely, so it wins over a plain unmount
+    // whenever the drive supports it.
+    let mounted = matches!(entry, VolumeEntry::Mounted(_));
+    let eject_action = if mounted && entry.can_eject() {
+        Some((VolumeAction::Eject, "Eject"))
+    } else if entry.can_unmount() {
+        Some((VolumeAction::Unmount, "Unmount"))
+    } else {
+        None
+    };
+    if let Some((action, tooltip)) = eject_action {
+        let button = gtk::Button::builder()
+            .icon_name("media-eject-symbolic")
+            .tooltip_text(tooltip)
+            .valign(gtk::Align::Center)
+            .css_classes(["flat", "sidebar-eject-button"])
+            .build();
+        button.set_focusable(false);
+        let entry = entry.clone();
+        let volumes = Rc::clone(volumes);
+        button.connect_clicked(move |button| volumes.run(action, &entry, button.upcast_ref()));
+        item.append(&button);
+    }
+
+    row.set_child(Some(&item));
+    row
+}
+
+fn section_header(title: &str) -> gtk::Label {
+    gtk::Label::builder()
+        .label(title)
+        .xalign(0.0)
+        .css_classes(["sidebar-section-title"])
+        .build()
 }
 
 fn place_row(place: &SidebarPlace) -> gtk::ListBoxRow {

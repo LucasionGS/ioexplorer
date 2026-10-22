@@ -36,6 +36,7 @@ use crate::{
         sidebar::{Sidebar, SidebarSection},
         topbar::TopBar,
         views,
+        volumes::Volumes,
     },
 };
 
@@ -709,6 +710,7 @@ pub struct AppWindow {
     tab_bar: gtk::Box,
     stack: gtk::Stack,
     computer_page: ComputerPage,
+    volumes: Rc<Volumes>,
     settings_page: SettingsPage,
     theme_css_path: RefCell<Option<PathBuf>>,
     /// The process-wide config watcher, which also owns the user CSS provider.
@@ -773,8 +775,9 @@ impl AppWindow {
         let state = AppState::load(&config);
         let topbar = TopBar::new(state.layout, state.show_hidden, state.sort);
         let bookmarks = bookmarks::load();
-        let sidebar = Sidebar::new(config.sidebar_width, &bookmarks);
-        let computer_page = ComputerPage::new();
+        let volumes = Volumes::new();
+        let sidebar = Sidebar::new(config.sidebar_width, &bookmarks, Rc::clone(&volumes));
+        let computer_page = ComputerPage::new(Rc::clone(&volumes));
         let theme_css_path = theme::effective_custom_css_path(&config);
         let theme_settings = theme::load_generated_settings(theme_css_path.as_deref());
         let settings_page = SettingsPage::new(
@@ -1007,6 +1010,7 @@ impl AppWindow {
             tab_bar,
             stack,
             computer_page,
+            volumes,
             settings_page,
             theme_css_path: RefCell::new(theme_css_path),
             live_config: RefCell::new(None),
@@ -1238,24 +1242,23 @@ impl AppWindow {
             .connect_clicked(move |_| this.show_action_editor_dialog(None));
 
         let this = Rc::clone(self);
-        self.computer_page
-            .list
-            .connect_row_activated(move |_, row| {
-                if let Some(path) = this
-                    .computer_page
-                    .mount_path_at(row.index().max(0) as usize)
-                {
-                    this.load_uri(ProviderUri::local(path), true);
-                }
-            });
+        self.volumes
+            .connect_open(move |path| this.load_uri(ProviderUri::local(path), true));
+
+        let this = Rc::clone(self);
+        self.volumes
+            .connect_status(move |message| this.status_label.set_text(&message));
+
+        let this = Rc::clone(self);
+        self.volumes.connect_changed(move || this.refresh_volumes());
 
         let this = Rc::clone(self);
         self.mount_monitor
-            .connect_mounts_changed(move |_| this.refresh_computer_page_if_visible());
+            .connect_mounts_changed(move |_| this.refresh_volumes());
 
         let this = Rc::clone(self);
         self.mount_monitor
-            .connect_mountpoints_changed(move |_| this.refresh_computer_page_if_visible());
+            .connect_mountpoints_changed(move |_| this.refresh_volumes());
 
         let this = Rc::clone(self);
         self.sidebar.list.connect_row_activated(move |_, row| {
@@ -2162,17 +2165,26 @@ impl AppWindow {
         self.focus_content();
     }
 
-    fn refresh_computer_page_if_visible(&self) {
+    /// Bring the sidebar's Devices section, and the This PC page when it is
+    /// showing, up to date after a drive or mount changed.
+    fn refresh_volumes(&self) {
+        self.sidebar.refresh_devices();
         if self.active_page.get() == AppPage::Computer {
-            self.computer_page.refresh();
-            self.update_computer_status();
+            self.computer_page.refresh_volumes();
         }
     }
 
     fn update_computer_status(&self) {
         let count = self.computer_page.volume_count();
-        self.status_label
-            .set_text(&format!("{count} mounted volume(s) - This PC"));
+        let unmounted = self.computer_page.unmounted_count();
+        if unmounted > 0 {
+            self.status_label.set_text(&format!(
+                "{count} mounted volume(s), {unmounted} not mounted - This PC"
+            ));
+        } else {
+            self.status_label
+                .set_text(&format!("{count} mounted volume(s) - This PC"));
+        }
     }
 
     fn render_computer_breadcrumb(&self) {

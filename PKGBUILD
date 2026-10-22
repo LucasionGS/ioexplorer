@@ -18,6 +18,8 @@ optdepends=(
   'libpulse: recording audio and mixing in the microphone'
   'wtype: typing symbols and emoji picked in ioexplorer-quick'
   'ydotool: pasting ioexplorer-quick picks when wtype is missing'
+  'gvfs: list unmounted drives in the sidebar and on the This PC page, and mount, unmount or eject them'
+  'udisks2: mounting removable and internal drives without root, used by gvfs'
 )
 source=("$pkgname::git+https://github.com/LucasionGS/ioexplorer.git")
 sha256sums=('SKIP')

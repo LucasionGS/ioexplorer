@@ -6,4 +6,5 @@ pub mod sidebar;
 pub mod sort_menu;
 pub mod topbar;
 pub mod views;
+pub mod volumes;
 pub mod window;

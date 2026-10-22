@@ -216,6 +216,59 @@ impl ContextMenuContext for SidebarBookmarkContext {
     }
 }
 
+pub struct VolumeContext {
+    open: MenuAction,
+    mount: Option<MenuAction>,
+    unmount: Option<MenuAction>,
+    eject: Option<MenuAction>,
+}
+
+impl VolumeContext {
+    pub fn new(
+        open: MenuAction,
+        mount: Option<MenuAction>,
+        unmount: Option<MenuAction>,
+        eject: Option<MenuAction>,
+    ) -> Self {
+        Self {
+            open,
+            mount,
+            unmount,
+            eject,
+        }
+    }
+}
+
+impl ContextMenuContext for VolumeContext {
+    fn actions(&self) -> Vec<ContextMenuAction> {
+        let open = Rc::clone(&self.open);
+        let mut actions = vec![ContextMenuAction::new(
+            "Open",
+            Some("folder-open-symbolic"),
+            false,
+            Rc::new(move || open()),
+        )];
+
+        let optional = [
+            (&self.mount, "Mount", "drive-harddisk-symbolic"),
+            (&self.unmount, "Unmount", "media-eject-symbolic"),
+            (&self.eject, "Eject", "media-eject-symbolic"),
+        ];
+        for (action, label, icon_name) in optional {
+            if let Some(action) = action {
+                let action = Rc::clone(action);
+                actions.push(ContextMenuAction::new(
+                    label,
+                    Some(icon_name),
+                    false,
+                    Rc::new(move || action()),
+                ));
+            }
+        }
+        actions
+    }
+}
+
 pub enum FileEntryContext {
     Single(FileSingleSelectionContext),
     Multi(FileMultiSelectionContext),

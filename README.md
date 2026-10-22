@@ -18,6 +18,7 @@ It is developed with customization and ricing in mind, as well as efficiency nav
 - Custom configurable context-menu actions for files and folders.
 - Symlinks that behave as what they point at, with an emblem and Enter linked folder.
 - Theme editor with live UI updates and managed local CSS generation.
+- Drives in the sidebar's Devices section and on the This PC page, including unmounted ones that mount when opened, with unmount and eject.
 - A freeze-frame screenshot tool with window picking and a pen, and screen recording with audio.
 
 ## Dependencies
@@ -30,6 +31,10 @@ sudo pacman -S rust gtk4 gtk4-layer-shell glib2 pkgconf desktop-file-utils appst
 
 `ioexplorer-shot` additionally uses `grim`, `wl-clipboard` and `libnotify` at runtime, and
 `wf-recorder`, `ffmpeg` and `libpulse` for recording.
+
+The sidebar's Devices section and the This PC page find unmounted drives, and mount,
+unmount and eject them, through `gvfs` with `udisks2`. Without them only drives that are
+already mounted are listed.
 
 `ioexplorer-quick` types with `wtype` and copies with `wl-clipboard` when they are
 installed. Its clipboard history needs `wl-clipboard`.
