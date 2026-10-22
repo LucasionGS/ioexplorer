@@ -2816,10 +2816,13 @@ impl AppWindow {
             button.add_css_class("breadcrumb-current");
         }
         button.set_focusable(false);
-        button.set_child(Some(&breadcrumb_content_with_icon(
-            &crumb.label,
-            crumb.icon_name,
-        )));
+        let content = breadcrumb_content_with_icon(&crumb.label, crumb.icon_name);
+        // The folder you are in keeps its whole name; the crumbs above it
+        // give way first when the bar runs short.
+        if current && let Some(label) = content.last_child().and_downcast::<gtk::Label>() {
+            label.set_ellipsize(gtk::pango::EllipsizeMode::None);
+        }
+        button.set_child(Some(&content));
 
         let this = Rc::clone(self);
         let click_uri = crumb.uri.clone();

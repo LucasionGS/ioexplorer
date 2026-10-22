@@ -74,7 +74,7 @@ impl TopBar {
 
         let search_entry = gtk::SearchEntry::builder()
             .placeholder_text("Search folder")
-            .width_chars(18)
+            .width_chars(14)
             .css_classes(["header-search"])
             .build();
         search_entry.set_tooltip_text(Some("Search this folder (Ctrl+F)"));

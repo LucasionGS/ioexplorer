@@ -388,7 +388,7 @@ tooltip > box {
 
 .breadcrumbs,
 .path-stack {
-  min-width: 200px;
+  min-width: 160px;
   background: transparent;
 }
 
@@ -454,7 +454,7 @@ button.breadcrumb-button.breadcrumb-current {
 
 entry.header-search {
   min-height: 34px;
-  min-width: 200px;
+  min-width: 150px;
 }
 
 /* ============================================================
