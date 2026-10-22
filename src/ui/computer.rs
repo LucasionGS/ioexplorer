@@ -81,6 +81,7 @@ impl ComputerPage {
             .max_children_per_line(3)
             .column_spacing(10)
             .row_spacing(10)
+            .valign(gtk::Align::Start)
             .css_classes(["computer-stats"])
             .build();
         stats.append(&system_stat_card(
@@ -480,6 +481,8 @@ fn system_stat_value_label() -> gtk::Label {
         .selectable(true)
         .wrap(true)
         .wrap_mode(gtk::pango::WrapMode::WordChar)
+        // Kept from asking for its whole line, so three cards fit a row.
+        .max_width_chars(24)
         .css_classes(["computer-stat-value"])
         .build()
 }

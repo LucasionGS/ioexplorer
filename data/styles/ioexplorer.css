@@ -164,6 +164,10 @@ window {
   box-shadow: 0 0 0 2px alpha(var(--io-accent), 0.22);
 }
 
+.io-file-manager entry:disabled {
+  opacity: 0.45;
+}
+
 .io-file-manager entry > image {
   color: var(--io-text-dim);
 }
