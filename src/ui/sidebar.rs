@@ -11,11 +11,13 @@ use crate::{
     providers::ProviderUri,
     ui::{
         context_menu::ContextMenu,
+        views::format_bytes,
         volumes::{VolumeAction, VolumeEntry, Volumes},
     },
 };
 
 const DEVICE_ROW_CLASS: &str = "sidebar-device-row";
+const BOOKMARK_ROW_CLASS: &str = "sidebar-bookmark-row";
 
 #[derive(Debug, Clone)]
 pub struct SidebarPlace {
@@ -63,7 +65,7 @@ impl Sidebar {
 
         let settings_button = gtk::ToggleButton::builder()
             .tooltip_text("Settings")
-            .css_classes(["sidebar-nav-button"])
+            .css_classes(["sidebar-nav-button", "sidebar-settings-button"])
             .build();
         settings_button.set_focusable(false);
         settings_button.set_child(Some(&place_content(
@@ -72,11 +74,6 @@ impl Sidebar {
             18,
         )));
 
-        let separator = gtk::Separator::builder()
-            .orientation(gtk::Orientation::Horizontal)
-            .css_classes(["sidebar-separator"])
-            .build();
-
         let scroll = gtk::ScrolledWindow::builder()
             .min_content_width(width)
             .vexpand(true)
@@ -84,15 +81,22 @@ impl Sidebar {
             .child(&list)
             .build();
 
+        // Settings is pinned under the scrolling list, so a long run of
+        // bookmarks and drives never pushes it out of reach.
+        let footer = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .css_classes(["sidebar-footer"])
+            .build();
+        footer.append(&settings_button);
+
         let root = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .css_classes(["sidebar"])
             .build();
         root.set_size_request(width, -1);
         root.append(&computer_button);
-        root.append(&settings_button);
-        root.append(&separator);
         root.append(&scroll);
+        root.append(&footer);
 
         let sidebar = Self {
             root,
@@ -113,12 +117,26 @@ impl Sidebar {
         // A list box drops headers set outside its header func, so the section
         // title is placed here: above the first device row.
         self.list.set_header_func(|row, before| {
-            let starts_section = row.has_css_class(DEVICE_ROW_CLASS)
-                && !before.is_some_and(|before| before.has_css_class(DEVICE_ROW_CLASS));
-            if !starts_section {
-                row.set_header(None::<&gtk::Widget>);
-            } else if row.header().is_none() {
-                row.set_header(Some(&section_header("Devices")));
+            let section = [
+                (BOOKMARK_ROW_CLASS, "Bookmarks"),
+                (DEVICE_ROW_CLASS, "Devices"),
+            ]
+            .into_iter()
+            .find(|(class, _)| {
+                row.has_css_class(class)
+                    && !before.is_some_and(|before| before.has_css_class(class))
+            });
+            match section {
+                None => row.set_header(None::<&gtk::Widget>),
+                Some((_, title)) => {
+                    let current = row
+                        .header()
+                        .and_downcast::<gtk::Label>()
+                        .map(|label| label.label());
+                    if current.as_deref() != Some(title) {
+                        row.set_header(Some(&section_header(title)));
+                    }
+                }
             }
         });
 
@@ -169,6 +187,24 @@ impl Sidebar {
             .set_active(section == SidebarSection::Settings);
         if section != SidebarSection::Files {
             self.list.unselect_all();
+        }
+    }
+
+    /// Highlights the place that is exactly `uri`, so the sidebar follows
+    /// navigation from anywhere (address bar, back, a folder double-click).
+    /// A folder that is no place clears the highlight.
+    pub fn select_place_for(&self, uri: &ProviderUri) {
+        let index = self
+            .places
+            .borrow()
+            .iter()
+            .position(|place| &place.uri == uri);
+        let row = index.and_then(|index| self.list.row_at_index(index as i32));
+        if row != self.list.selected_row() {
+            match row {
+                Some(row) => self.list.select_row(Some(&row)),
+                None => self.list.unselect_all(),
+            }
         }
     }
 
@@ -381,14 +417,41 @@ fn device_row(entry: &VolumeEntry, volumes: &Rc<Volumes>) -> gtk::ListBoxRow {
     let icon = gtk::Image::from_gicon(icon);
     icon.set_pixel_size(18);
     icon.add_css_class("sidebar-device-icon");
+    icon.add_css_class("sidebar-row-icon");
     let label = gtk::Label::builder()
         .label(entry.name())
         .xalign(0.0)
-        .hexpand(true)
         .ellipsize(gtk::pango::EllipsizeMode::End)
         .build();
+    let text = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(4)
+        .hexpand(true)
+        .valign(gtk::Align::Center)
+        .build();
+    text.append(&label);
+    if let VolumeEntry::Mounted(volume) = entry
+        && let (Some(size), Some(used)) = (volume.size, volume.used)
+        && size > 0
+    {
+        let fraction = used as f64 / size as f64;
+        let usage = gtk::ProgressBar::builder()
+            .fraction(fraction)
+            .css_classes(["sidebar-device-usage"])
+            .build();
+        if fraction >= 0.9 {
+            usage.add_css_class("usage-critical");
+        }
+        text.append(&usage);
+        row.set_tooltip_text(Some(&format!(
+            "{} - {} free of {}",
+            volume.mount_path.display(),
+            format_bytes(size.saturating_sub(used)),
+            format_bytes(size)
+        )));
+    }
     item.append(&icon);
-    item.append(&label);
+    item.append(&text);
 
     // Eject takes the whole drive away safely, so it wins over a plain unmount
     // whenever the drive supports it.
@@ -430,7 +493,11 @@ fn place_row(place: &SidebarPlace) -> gtk::ListBoxRow {
     let row = gtk::ListBoxRow::builder()
         .activatable(true)
         .selectable(true)
+        .tooltip_text(place.uri.display_path())
         .build();
+    if place.is_bookmark {
+        row.add_css_class(BOOKMARK_ROW_CLASS);
+    }
     row.set_child(Some(&place_content(&place.label, place.icon_name, 18)));
     row
 }
@@ -447,11 +514,13 @@ fn place_content(label: &str, icon_name: &str, pixel_size: i32) -> gtk::Box {
     let icon = gtk::Image::builder()
         .icon_name(icon_name)
         .pixel_size(pixel_size)
+        .css_classes(["sidebar-row-icon"])
         .build();
     let label = gtk::Label::builder()
         .label(label)
         .xalign(0.0)
         .hexpand(true)
+        .ellipsize(gtk::pango::EllipsizeMode::End)
         .build();
 
     item.append(&icon);

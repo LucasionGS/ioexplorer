@@ -516,9 +516,14 @@ button.tab-new-button:hover {
 
 /* ============================================================
    File manager: sidebar
+
+   Rows sit straight on the window wash. This PC, the places, bookmarks
+   and drives all share one row shape; the selected row takes the
+   selection fill and an accent icon.
    ============================================================ */
 
 .sidebar {
+  padding: 2px 0 8px;
   background: transparent;
 }
 
@@ -526,10 +531,21 @@ button.tab-new-button:hover {
   background: transparent;
 }
 
-button.sidebar-nav-button {
-  margin: 6px 8px 0;
+button.sidebar-nav-button,
+.sidebar-list row {
+  min-height: 0;
+  margin: 1px 6px 1px 8px;
+  padding: 0;
   border-radius: var(--io-radius);
   background: transparent;
+  color: var(--io-text-dim);
+  font-weight: 500;
+}
+
+button.sidebar-nav-button:hover,
+.sidebar-list row:hover {
+  background: var(--io-hover-bg);
+  color: var(--io-text);
 }
 
 button.sidebar-nav-button:checked,
@@ -543,36 +559,73 @@ button.sidebar-nav-button:checked:hover,
   background: var(--io-selection-hover);
 }
 
-.sidebar-separator {
-  margin: 8px 12px 4px;
-  background: var(--io-separator);
-}
-
-.sidebar-list row {
-  margin: 1px 8px;
-  border-radius: var(--io-radius);
-}
-
-.sidebar-list row:hover {
-  background: var(--io-hover-bg);
-}
-
-.sidebar-section-title {
-  margin: 14px 18px 4px;
-  font-size: 0.8em;
-  font-weight: 700;
+.sidebar-row-icon {
   color: var(--io-text-faint);
 }
 
+button.sidebar-nav-button:checked .sidebar-row-icon,
+.sidebar-list row:selected .sidebar-row-icon {
+  color: var(--io-accent-text);
+}
+
+/* Drive icons come from the volume monitor in full colour; only the
+   symbolic place icons take the tint. */
+.sidebar-device-icon {
+  color: inherit;
+}
+
+.sidebar-section-title {
+  margin: 16px 18px 6px;
+  font-size: 0.78em;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--io-text-faint);
+}
+
+.sidebar-footer {
+  padding-top: 6px;
+  border-top: 1px solid var(--io-separator);
+  margin: 0 8px;
+}
+
+.sidebar-footer button.sidebar-nav-button {
+  margin: 1px 0;
+}
+
 /* Unmounted drives read as available-but-idle next to the mounted ones. */
-.sidebar-device-unmounted .sidebar-device-icon {
+.sidebar-device-unmounted .sidebar-device-icon,
+.sidebar-device-unmounted label {
   opacity: 0.55;
 }
 
+progressbar.sidebar-device-usage > trough {
+  min-height: 3px;
+  border-radius: 999px;
+  background: var(--io-active-bg);
+}
+
+progressbar.sidebar-device-usage > trough > progress {
+  min-height: 3px;
+  border-radius: 999px;
+  background: alpha(var(--io-accent), 0.8);
+}
+
+progressbar.sidebar-device-usage.usage-critical > trough > progress {
+  background: var(--io-danger);
+}
+
 button.sidebar-eject-button {
-  min-width: 0;
-  min-height: 0;
-  padding: 2px;
+  min-width: 24px;
+  min-height: 24px;
+  padding: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--io-text-faint);
+}
+
+button.sidebar-eject-button:hover {
+  background: var(--io-active-bg);
+  color: var(--io-text);
 }
 
 /* ============================================================

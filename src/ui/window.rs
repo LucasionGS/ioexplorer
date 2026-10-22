@@ -2192,6 +2192,7 @@ impl AppWindow {
                 }
 
                 *self.current_uri.borrow_mut() = uri.clone();
+                self.sidebar.select_place_for(&uri);
                 self.media_details_cache.borrow_mut().clear();
                 self.watch_current_folder(&uri);
                 // Cancel any pending debounce timer and clear filter on navigation
