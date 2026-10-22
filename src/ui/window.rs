@@ -728,9 +728,7 @@ pub struct AppWindow {
     selection_changed: SelectionChangedHandler,
     anchor_index: Rc<Cell<Option<usize>>>,
     status_label: gtk::Label,
-    filter_bar: gtk::Box,
-    filter_label: gtk::Label,
-    filter_clear_button: gtk::Button,
+    free_space_label: gtk::Label,
     all_entries: RefCell<Vec<FileItem>>,
     filter_text: RefCell<String>,
     pending_filter: RefCell<Option<glib::SourceId>>,
@@ -914,41 +912,47 @@ impl AppWindow {
 
         let status_label = gtk::Label::builder()
             .xalign(0.0)
+            .hexpand(true)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
             .css_classes(["status-label"])
+            .build();
+        let free_space_label = gtk::Label::builder()
+            .xalign(1.0)
+            .css_classes(["status-free-space"])
             .build();
         let chooser_controls = chooser_request
             .as_ref()
             .map(|request| chooser_action_bar(&request.options, &status_label));
 
-        let filter_icon = gtk::Image::builder()
-            .icon_name("edit-find-symbolic")
-            .build();
-        let filter_label = gtk::Label::builder()
-            .xalign(0.0)
+        // The browser sits on a card of its own, so the header and sidebar can
+        // stay on the bare window wash around it.
+        let main_card = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(0)
             .hexpand(true)
-            .css_classes(["filter-label"])
+            .vexpand(true)
+            .overflow(gtk::Overflow::Hidden)
+            .css_classes(["main-card"])
             .build();
-        let filter_clear_button = gtk::Button::builder()
-            .icon_name("window-close-symbolic")
-            .css_classes(["flat"])
-            .build();
-        filter_clear_button.set_focusable(false);
-        let filter_bar = gtk::Box::builder()
-            .orientation(gtk::Orientation::Horizontal)
-            .spacing(8)
-            .css_classes(["filter-bar"])
-            .visible(false)
-            .build();
-        filter_bar.append(&filter_icon);
-        filter_bar.append(&filter_label);
-        filter_bar.append(&filter_clear_button);
+        main_card.append(&browser_area);
+        if chooser_controls.is_none() {
+            let status_bar = gtk::Box::builder()
+                .orientation(gtk::Orientation::Horizontal)
+                .spacing(12)
+                .css_classes(["status-bar"])
+                .build();
+            status_bar.append(&status_label);
+            status_bar.append(&free_space_label);
+            main_card.append(&status_bar);
+        }
 
         let body = gtk::Paned::builder()
             .orientation(gtk::Orientation::Horizontal)
             .start_child(&sidebar.root)
-            .end_child(&browser_area)
+            .end_child(&main_card)
             .resize_start_child(false)
             .shrink_start_child(false)
+            .css_classes(["browser-body"])
             .build();
 
         let root = gtk::Box::builder()
@@ -960,11 +964,8 @@ impl AppWindow {
         }
         root.append(&topbar.root);
         root.append(&body);
-        root.append(&filter_bar);
         if let Some(controls) = &chooser_controls {
             root.append(&controls.root);
-        } else {
-            root.append(&status_label);
         }
 
         let window_title = chooser_request
@@ -1027,9 +1028,7 @@ impl AppWindow {
             selection_changed,
             anchor_index,
             status_label,
-            filter_bar,
-            filter_label,
-            filter_clear_button,
+            free_space_label,
             all_entries: RefCell::new(Vec::new()),
             filter_text: RefCell::new(String::new()),
             pending_filter: RefCell::new(None),
@@ -1360,10 +1359,87 @@ impl AppWindow {
         self.install_mouse_history_actions();
         self.install_keyboard_actions();
 
+        self.install_search_callbacks();
+        self.install_address_callbacks();
+    }
+
+    /// The header's search field filters the folder, through the same filter
+    /// that typing over the files builds up.
+    fn install_search_callbacks(self: &Rc<Self>) {
+        let search = &self.topbar.search_entry;
+
         let this = Rc::clone(self);
-        self.filter_clear_button.connect_clicked(move |_| {
-            this.clear_filter();
+        search.connect_search_changed(move |entry| {
+            let text = entry.text().to_string();
+            // Typing over the files mirrors the filter into the entry, and the
+            // change that fires a moment later is that same text coming back.
+            if text == *this.filter_text.borrow() {
+                return;
+            }
+            this.cancel_pending_filter();
+            if text.is_empty() {
+                this.clear_filter();
+            } else {
+                *this.filter_text.borrow_mut() = text;
+                this.trigger_filter();
+            }
         });
+
+        let this = Rc::clone(self);
+        search.connect_activate(move |_| {
+            let item = this
+                .selected_indices
+                .try_borrow()
+                .ok()
+                .and_then(|selection| selection.iter().next().copied())
+                .and_then(|index| this.entries.borrow().get(index).cloned());
+            this.focus_content();
+            if let Some(item) = item {
+                this.clear_filter();
+                this.activate_entry(item);
+            }
+        });
+
+        let this = Rc::clone(self);
+        search.connect_stop_search(move |_| {
+            this.clear_filter();
+            this.focus_content();
+        });
+
+        // Down leaves the field for the matches, so a search can be finished
+        // from the keyboard without reaching for the mouse.
+        let keys = gtk::EventControllerKey::new();
+        let this = Rc::clone(self);
+        keys.connect_key_pressed(move |_, key, _, _| match key {
+            gtk::gdk::Key::Down | gtk::gdk::Key::KP_Down => {
+                this.focus_content();
+                glib::Propagation::Stop
+            }
+            _ => glib::Propagation::Proceed,
+        });
+        search.add_controller(keys);
+    }
+
+    /// Clicking the bare part of the address bar edits the path, and leaving
+    /// the path entry puts the breadcrumbs back.
+    fn install_address_callbacks(self: &Rc<Self>) {
+        let click = gtk::GestureClick::new();
+        let this = Rc::clone(self);
+        click.connect_released(move |_, _, x, y| {
+            let breadcrumbs = &this.topbar.breadcrumbs;
+            let on_bare_bar = breadcrumbs
+                .pick(x, y, gtk::PickFlags::DEFAULT)
+                .is_none_or(|widget| &widget == breadcrumbs.upcast_ref::<gtk::Widget>());
+            if on_bare_bar && this.active_page.get() == AppPage::Files {
+                this.show_location_entry();
+            }
+        });
+        self.topbar.breadcrumbs.add_controller(click);
+
+        let focus = gtk::EventControllerFocus::new();
+        let this = Rc::clone(self);
+        focus.connect_leave(move |_| this.show_breadcrumbs());
+        self.topbar.path_entry.add_controller(focus);
     }
 
     fn setup_chooser_callbacks(self: &Rc<Self>) {
@@ -1529,6 +1605,12 @@ impl AppWindow {
                 }
                 gtk::gdk::Key::l if ctrl && this.active_page.get() == AppPage::Files => {
                     this.show_location_entry();
+                    glib::Propagation::Stop
+                }
+                gtk::gdk::Key::f | gtk::gdk::Key::F
+                    if ctrl && this.active_page.get() == AppPage::Files =>
+                {
+                    this.topbar.search_entry.grab_focus();
                     glib::Propagation::Stop
                 }
                 gtk::gdk::Key::Escape => {
@@ -1876,9 +1958,30 @@ impl AppWindow {
             .spacing(0)
             .css_classes(["file-tab"])
             .build();
+        if active {
+            tab_box.add_css_class("file-tab-active");
+        }
 
+        let title = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(7)
+            .build();
+        title.append(
+            &gtk::Image::builder()
+                .icon_name(tab_icon_name(&tab.uri))
+                .pixel_size(14)
+                .css_classes(["file-tab-icon"])
+                .build(),
+        );
+        title.append(
+            &gtk::Label::builder()
+                .label(tab_title(&tab.uri))
+                .max_width_chars(18)
+                .ellipsize(gtk::pango::EllipsizeMode::End)
+                .build(),
+        );
         let select_button = gtk::ToggleButton::builder()
-            .label(tab_title(&tab.uri))
+            .child(&title)
             .active(active)
             .hexpand(false)
             .tooltip_text(tab.uri.display_path())
@@ -1889,16 +1992,24 @@ impl AppWindow {
         select_button.connect_clicked(move |_| this.switch_to_tab(index));
         tab_box.append(&select_button);
 
-        let close_button = gtk::Button::builder()
-            .icon_name("window-close-symbolic")
-            .tooltip_text("Close Tab")
-            .css_classes(["file-tab-close"])
-            .build();
-        close_button.set_focusable(false);
-        close_button.set_sensitive(self.tabs.borrow().len() > 1);
-        let this = Rc::clone(self);
-        close_button.connect_clicked(move |_| this.close_tab(index));
-        tab_box.append(&close_button);
+        // A lone tab has nothing to close into, so it shows no close button.
+        if self.tabs.borrow().len() > 1 {
+            let close_button = gtk::Button::builder()
+                .icon_name("window-close-symbolic")
+                .tooltip_text("Close Tab")
+                .css_classes(["file-tab-close"])
+                .build();
+            close_button.set_focusable(false);
+            let this = Rc::clone(self);
+            close_button.connect_clicked(move |_| this.close_tab(index));
+            tab_box.append(&close_button);
+
+            let middle_click = gtk::GestureClick::new();
+            middle_click.set_button(gtk::gdk::BUTTON_MIDDLE);
+            let this = Rc::clone(self);
+            middle_click.connect_released(move |_, _, _, _| this.close_tab(index));
+            tab_box.add_controller(middle_click);
+        }
 
         tab_box
     }
@@ -1969,13 +2080,13 @@ impl AppWindow {
         self.update_filter_bar();
     }
 
+    /// Shows the current filter in the search field, however it was typed.
     fn update_filter_bar(&self) {
-        let filter = self.filter_text.borrow();
-        if filter.is_empty() {
-            self.filter_bar.set_visible(false);
-        } else {
-            self.filter_label.set_text(&format!("Filter: {}", *filter));
-            self.filter_bar.set_visible(true);
+        let filter = self.filter_text.borrow().clone();
+        let search = &self.topbar.search_entry;
+        if search.text() != filter {
+            search.set_text(&filter);
+            search.set_position(-1);
         }
     }
 
@@ -2017,16 +2128,18 @@ impl AppWindow {
     }
 
     fn update_full_status(&self) {
-        let uri = self.current_uri.borrow().clone();
-        let count = self.all_entries.borrow().len();
-        let current_kind = self
-            .provider
-            .metadata(&uri)
+        self.status_label
+            .set_text(&folder_summary(&self.all_entries.borrow()));
+    }
+
+    /// The free space on the drive holding `uri`, beside the status text.
+    fn update_free_space(&self, uri: &ProviderUri) {
+        let text = uri
+            .local_path()
             .ok()
-            .map(|item| format!(" - {}", item.kind_label()))
+            .and_then(|path| free_space_text(&path))
             .unwrap_or_default();
-        let status = format!("{count} items - {}", uri.display_path()) + &current_kind;
-        self.status_label.set_text(&status);
+        self.free_space_label.set_text(&text);
     }
 
     fn navigate_from_input(self: &Rc<Self>, input: &str) {
@@ -2090,19 +2203,8 @@ impl AppWindow {
                 self.render_breadcrumbs();
                 self.apply_filter_to_entries();
                 self.update_navigation_buttons();
-                let current_kind = self
-                    .provider
-                    .metadata(&uri)
-                    .ok()
-                    .map(|item| format!(" - {}", item.kind_label()))
-                    .unwrap_or_default();
-
-                let status = format!(
-                    "{} items - {}",
-                    self.all_entries.borrow().len(),
-                    uri.display_path()
-                ) + &current_kind;
-                self.status_label.set_text(&status);
+                self.update_full_status();
+                self.update_free_space(&uri);
                 self.save_active_tab_state();
                 self.render_tab_bar();
                 self.focus_content();
@@ -2467,37 +2569,107 @@ impl AppWindow {
         views::clear_box_children(&self.topbar.breadcrumbs);
 
         let current = self.current_uri.borrow().clone();
-        let mut uri = ProviderUri::root(current.provider());
-        self.append_breadcrumb("/", uri.clone());
+        let home = directories::UserDirs::new().map(|dirs| dirs.home_dir().to_path_buf());
+        let crumbs = breadcrumb_trail(&current, home.as_deref());
+        let last = crumbs.len().saturating_sub(1);
 
-        for component in current
-            .path()
-            .split('/')
-            .filter(|component| !component.is_empty())
-        {
-            uri = uri.child(component);
-            self.append_breadcrumb(component, uri.clone());
+        // A deep path keeps its first crumb and the last few, with the ones in
+        // between behind a menu, rather than squeezing every name to "cla…".
+        let (head, hidden, tail) = if crumbs.len() > MAX_VISIBLE_CRUMBS {
+            let tail_start = crumbs.len() - (MAX_VISIBLE_CRUMBS - 1);
+            (&crumbs[..1], &crumbs[1..tail_start], &crumbs[tail_start..])
+        } else {
+            (&crumbs[..], &crumbs[..0], &crumbs[..0])
+        };
+
+        for (index, crumb) in head.iter().enumerate() {
+            if index > 0 {
+                self.append_breadcrumb_separator();
+            }
+            self.append_breadcrumb(crumb, index == last);
+        }
+        if !hidden.is_empty() {
+            self.append_breadcrumb_separator();
+            self.append_breadcrumb_overflow(hidden);
+        }
+        for (offset, crumb) in tail.iter().enumerate() {
+            self.append_breadcrumb_separator();
+            let index = crumbs.len() - tail.len() + offset;
+            self.append_breadcrumb(crumb, index == last);
         }
     }
 
-    fn append_breadcrumb(self: &Rc<Self>, label: &str, uri: ProviderUri) {
+    fn append_breadcrumb(self: &Rc<Self>, crumb: &Breadcrumb, current: bool) {
         let button = gtk::Button::builder()
             .css_classes(["breadcrumb-button"])
+            .tooltip_text(crumb.uri.display_path())
             .build();
+        if current {
+            button.add_css_class("breadcrumb-current");
+        }
         button.set_focusable(false);
-        button.set_child(Some(&breadcrumb_content(label)));
+        button.set_child(Some(&breadcrumb_content_with_icon(
+            &crumb.label,
+            crumb.icon_name,
+        )));
 
         let this = Rc::clone(self);
-        let click_uri = uri.clone();
+        let click_uri = crumb.uri.clone();
         button.connect_clicked(move |_| this.load_uri(click_uri.clone(), true));
 
-        if let Ok(target_dir) = uri.local_path() {
+        if let Ok(target_dir) = crumb.uri.local_path() {
             let this = Rc::clone(self);
             dnd::install_drop_target(&button, move |payload| {
                 this.transfer_drop_payload_into_target(payload, target_dir.clone());
             });
         }
 
+        self.topbar.breadcrumbs.append(&button);
+    }
+
+    fn append_breadcrumb_separator(&self) {
+        self.topbar.breadcrumbs.append(
+            &gtk::Image::builder()
+                .icon_name("pan-end-symbolic")
+                .pixel_size(12)
+                .css_classes(["breadcrumb-separator"])
+                .build(),
+        );
+    }
+
+    /// The "…" crumb standing in for the middle of a deep path.
+    fn append_breadcrumb_overflow(self: &Rc<Self>, hidden: &[Breadcrumb]) {
+        let menu = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(2)
+            .build();
+        let popover = gtk::Popover::builder()
+            .has_arrow(false)
+            .child(&menu)
+            .css_classes(["context-menu"])
+            .build();
+        for crumb in hidden {
+            let item = gtk::Button::builder()
+                .css_classes(["context-menu-item"])
+                .child(&breadcrumb_content_with_icon(&crumb.label, crumb.icon_name))
+                .build();
+            let this = Rc::clone(self);
+            let uri = crumb.uri.clone();
+            let popover = popover.clone();
+            item.connect_clicked(move |_| {
+                popover.popdown();
+                this.load_uri(uri.clone(), true);
+            });
+            menu.append(&item);
+        }
+
+        let button = gtk::MenuButton::builder()
+            .icon_name("view-more-horizontal-symbolic")
+            .tooltip_text("Show the rest of the path")
+            .popover(&popover)
+            .css_classes(["breadcrumb-overflow"])
+            .build();
+        button.set_focusable(false);
         self.topbar.breadcrumbs.append(&button);
     }
 
@@ -4561,6 +4733,41 @@ impl AppWindow {
     }
 }
 
+/// "12 items: 3 folders, 9 files", or just the count where there is one kind.
+fn folder_summary(items: &[FileItem]) -> String {
+    let folders = count_kind(items, FileKind::Directory);
+    let others = items.len() - folders;
+    let total = plural(items.len(), "item", "items");
+    match (folders, others) {
+        (0, _) | (_, 0) => total,
+        _ => format!(
+            "{total}: {}, {}",
+            plural(folders, "folder", "folders"),
+            plural(others, "file", "files")
+        ),
+    }
+}
+
+fn plural(count: usize, singular: &str, plural: &str) -> String {
+    format!("{count} {}", if count == 1 { singular } else { plural })
+}
+
+/// "412.3 GB free of 937.3 GB", read from the filesystem holding `path`.
+fn free_space_text(path: &Path) -> Option<String> {
+    let info = gio::File::for_path(path)
+        .query_filesystem_info("filesystem::free,filesystem::size", gio::Cancellable::NONE)
+        .ok()?;
+    let free = info.attribute_uint64("filesystem::free");
+    let size = info.attribute_uint64("filesystem::size");
+    (size > 0).then(|| {
+        format!(
+            "{} free of {}",
+            views::format_bytes(free),
+            views::format_bytes(size)
+        )
+    })
+}
+
 fn home_uri() -> Option<ProviderUri> {
     directories::UserDirs::new().map(|dirs| ProviderUri::local(dirs.home_dir()))
 }
@@ -5449,13 +5656,31 @@ fn is_previewable_image_file(item: &FileItem) -> bool {
 fn tab_title(uri: &ProviderUri) -> String {
     let path = uri.path();
     if path == "/" {
-        return "/".to_string();
+        return "Filesystem".to_string();
+    }
+    if is_home(uri) {
+        return "Home".to_string();
     }
 
     path.rsplit('/')
         .find(|component| !component.is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| uri.display_path())
+}
+
+fn tab_icon_name(uri: &ProviderUri) -> &'static str {
+    if uri.path() == "/" {
+        "drive-harddisk-symbolic"
+    } else if is_home(uri) {
+        "user-home-symbolic"
+    } else {
+        "folder-symbolic"
+    }
+}
+
+fn is_home(uri: &ProviderUri) -> bool {
+    directories::UserDirs::new()
+        .is_some_and(|dirs| uri.local_path().is_ok_and(|path| path == dirs.home_dir()))
 }
 
 fn next_tab_index_after_close(active: usize, closing: usize, tab_count: usize) -> usize {
@@ -5868,17 +6093,53 @@ fn wrapped_image_index(len: usize, current_index: usize, delta: isize) -> usize 
     (current_index as isize + delta).rem_euclid(len) as usize
 }
 
-fn breadcrumb_content(label: &str) -> gtk::Box {
-    if label == "/" {
-        return breadcrumb_content_with_icon("", "drive-harddisk-symbolic");
-    }
+/// Crumbs past this many fold the middle of the path into a menu.
+const MAX_VISIBLE_CRUMBS: usize = 5;
 
-    let icon_name = if label == "home" {
-        "user-home-symbolic"
-    } else {
-        "folder-symbolic"
+/// One step of the address bar's path.
+#[derive(Debug, Clone, PartialEq)]
+struct Breadcrumb {
+    label: String,
+    icon_name: &'static str,
+    uri: ProviderUri,
+}
+
+/// The crumbs from the root down to `uri`. A path inside the home folder
+/// starts at Home rather than walking `/`, `home` and the user's name.
+fn breadcrumb_trail(uri: &ProviderUri, home: Option<&Path>) -> Vec<Breadcrumb> {
+    let path = PathBuf::from(uri.path());
+    let (mut crumbs, rest) = match home.and_then(|home| Some((home, path.strip_prefix(home).ok()?)))
+    {
+        Some((home, rest)) => (
+            vec![Breadcrumb {
+                label: "Home".to_string(),
+                icon_name: "user-home-symbolic",
+                uri: ProviderUri::local(home),
+            }],
+            rest.to_path_buf(),
+        ),
+        None => (
+            vec![Breadcrumb {
+                label: String::new(),
+                icon_name: "drive-harddisk-symbolic",
+                uri: ProviderUri::root(uri.provider()),
+            }],
+            path.strip_prefix("/")
+                .map(Path::to_path_buf)
+                .unwrap_or(path),
+        ),
     };
-    breadcrumb_content_with_icon(label, icon_name)
+
+    let mut current = crumbs[0].uri.clone();
+    for component in rest.iter().filter_map(|component| component.to_str()) {
+        current = current.child(component);
+        crumbs.push(Breadcrumb {
+            label: component.to_string(),
+            icon_name: "",
+            uri: current.clone(),
+        });
+    }
+    crumbs
 }
 
 fn breadcrumb_content_with_icon(label: &str, icon_name: &str) -> gtk::Box {
@@ -5888,12 +6149,14 @@ fn breadcrumb_content_with_icon(label: &str, icon_name: &str) -> gtk::Box {
         .valign(gtk::Align::Center)
         .build();
 
-    content.append(
-        &gtk::Image::builder()
-            .icon_name(icon_name)
-            .pixel_size(16)
-            .build(),
-    );
+    if !icon_name.is_empty() {
+        content.append(
+            &gtk::Image::builder()
+                .icon_name(icon_name)
+                .pixel_size(16)
+                .build(),
+        );
+    }
 
     if !label.is_empty() {
         content.append(
@@ -5911,13 +6174,28 @@ fn breadcrumb_content_with_icon(label: &str, icon_name: &str) -> gtk::Box {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use crate::providers::ProviderUri;
+    use crate::providers::{FileItem, FileKind, ProviderUri};
 
     use super::{
-        dropped_file_name_for_bytes, dropped_file_name_for_uri, format_media_duration,
-        is_gif_image_path, next_tab_index_after_close, parse_ffprobe_output, partition_drop_uris,
-        tab_title,
+        breadcrumb_trail, dropped_file_name_for_bytes, dropped_file_name_for_uri, folder_summary,
+        format_media_duration, is_gif_image_path, next_tab_index_after_close, parse_ffprobe_output,
+        partition_drop_uris, tab_title,
     };
+
+    fn test_item(name: &str) -> FileItem {
+        FileItem {
+            uri: ProviderUri::local(format!("/tmp/{name}")),
+            name: name.to_string(),
+            display_name: None,
+            icon: None,
+            kind: FileKind::File,
+            size: None,
+            modified: None,
+            created: None,
+            hidden: false,
+            link: None,
+        }
+    }
 
     #[test]
     fn detects_gif_paths_for_animation_viewer() {
@@ -5950,8 +6228,64 @@ mod tests {
     }
 
     #[test]
+    fn a_path_in_home_starts_its_breadcrumbs_at_home() {
+        let trail = breadcrumb_trail(
+            &ProviderUri::local("/home/user/Pictures/Wallpapers"),
+            Some(Path::new("/home/user")),
+        );
+
+        let labels: Vec<_> = trail.iter().map(|crumb| crumb.label.as_str()).collect();
+        assert_eq!(labels, ["Home", "Pictures", "Wallpapers"]);
+        assert_eq!(trail[0].uri, ProviderUri::local("/home/user"));
+        assert_eq!(
+            trail[2].uri,
+            ProviderUri::local("/home/user/Pictures/Wallpapers")
+        );
+    }
+
+    #[test]
+    fn a_path_outside_home_starts_its_breadcrumbs_at_the_root() {
+        let trail = breadcrumb_trail(
+            &ProviderUri::local("/usr/share"),
+            Some(Path::new("/home/user")),
+        );
+
+        let labels: Vec<_> = trail.iter().map(|crumb| crumb.label.as_str()).collect();
+        assert_eq!(labels, ["", "usr", "share"]);
+        assert_eq!(trail[0].icon_name, "drive-harddisk-symbolic");
+        assert_eq!(trail[1].uri, ProviderUri::local("/usr"));
+    }
+
+    #[test]
+    fn the_home_folder_itself_is_a_single_crumb() {
+        let trail = breadcrumb_trail(
+            &ProviderUri::local("/home/user"),
+            Some(Path::new("/home/user")),
+        );
+
+        assert_eq!(trail.len(), 1);
+        assert_eq!(trail[0].label, "Home");
+    }
+
+    #[test]
+    fn a_folder_summary_counts_folders_and_files() {
+        let folder = |name: &str| FileItem {
+            kind: FileKind::Directory,
+            ..test_item(name)
+        };
+
+        assert_eq!(folder_summary(&[]), "0 items");
+        assert_eq!(folder_summary(&[test_item("a")]), "1 item");
+        assert_eq!(
+            folder_summary(&[folder("a"), folder("b"), test_item("c")]),
+            "3 items: 2 folders, 1 file"
+        );
+        assert_eq!(folder_summary(&[folder("a"), folder("b")]), "2 items");
+    }
+
+    #[test]
     fn tab_titles_use_last_path_component() {
-        assert_eq!(tab_title(&ProviderUri::local("/")), "/");
+        assert_eq!(tab_title(&ProviderUri::local("/")), "Filesystem");
         assert_eq!(
             tab_title(&ProviderUri::local("/home/user/Projects")),
             "Projects"

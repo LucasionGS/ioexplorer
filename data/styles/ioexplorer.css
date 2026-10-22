@@ -282,12 +282,14 @@ tooltip > box {
 
 /* ============================================================
    File manager: header
+
+   Sits on the bare window wash. Toolbar buttons are flat until hovered;
+   the address bar and the search field are the only filled controls.
    ============================================================ */
 
 .topbar {
-  padding: 8px 10px;
+  padding: 8px 10px 8px 8px;
   background: transparent;
-  border-bottom: 1px solid var(--io-separator);
 }
 
 .toolbar-group {
@@ -296,46 +298,146 @@ tooltip > box {
 }
 
 .toolbar-group > button,
-.toolbar-group > togglebutton,
 .toolbar-group > menubutton > button {
   min-width: 34px;
-  min-height: 32px;
-  padding: 0 8px;
+  min-height: 34px;
+  padding: 0;
   background: transparent;
+  color: var(--io-text-dim);
 }
 
 .toolbar-group > button:hover,
-.toolbar-group > togglebutton:hover,
 .toolbar-group > menubutton > button:hover {
   background: var(--io-hover-bg);
+  color: var(--io-text);
 }
 
-.toolbar-group > togglebutton:checked {
+.toolbar-group > button:checked {
   background: var(--io-accent-soft);
   color: var(--io-accent-text);
 }
 
-.breadcrumbs,
-.path-stack {
-  min-width: 260px;
+/* List and icon view read as one switch: a shared well with the active
+   half lifted out of it. */
+.toolbar-group.view-switcher {
+  padding: 2px;
+  background: var(--io-control-bg);
+}
+
+.toolbar-group.view-switcher > button {
+  min-width: 32px;
+  min-height: 30px;
+  border-radius: var(--io-radius-sm);
+}
+
+.toolbar-group.view-switcher > button:checked {
+  background: var(--io-accent);
+  color: var(--io-accent-fg);
+  box-shadow: 0 1px 3px alpha(black, 0.25);
+}
+
+.address-bar {
+  min-height: 34px;
+  padding: 0 3px 0 4px;
+  border: 1px solid var(--io-separator);
   border-radius: var(--io-radius);
   background: var(--io-control-bg);
 }
 
-button.breadcrumb-button {
-  min-height: 32px;
-  padding: 0 8px;
+.address-bar:focus-within {
+  border-color: alpha(var(--io-accent), 0.7);
+  box-shadow: 0 0 0 2px alpha(var(--io-accent), 0.22);
+}
+
+.breadcrumbs,
+.path-stack {
+  min-width: 200px;
   background: transparent;
-  font-weight: 600;
+}
+
+button.breadcrumb-button {
+  min-height: 26px;
+  padding: 0 7px;
+  border-radius: var(--io-radius-sm);
+  background: transparent;
+  color: var(--io-text-dim);
+  font-weight: 500;
 }
 
 button.breadcrumb-button:hover {
   background: var(--io-hover-bg);
+  color: var(--io-text);
 }
 
-.path-entry {
-  min-height: 32px;
-  min-width: 260px;
+button.breadcrumb-button.breadcrumb-current {
+  color: var(--io-text);
+  font-weight: 700;
+}
+
+.breadcrumb-separator {
+  margin: 0 1px;
+  color: var(--io-text-faint);
+}
+
+.breadcrumb-overflow > button {
+  min-width: 28px;
+  min-height: 26px;
+  padding: 0;
+  border-radius: var(--io-radius-sm);
+  background: transparent;
+  color: var(--io-text-dim);
+}
+
+.address-bar button.address-button {
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0;
+  border-radius: var(--io-radius-sm);
+  background: transparent;
+  color: var(--io-text-faint);
+}
+
+.address-bar button.address-button:hover {
+  background: var(--io-hover-bg);
+  color: var(--io-text);
+}
+
+/* The entry borrows the bar's own frame while editing. */
+.address-bar entry.path-entry {
+  min-height: 28px;
+  padding: 0 6px;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+}
+
+.address-bar entry.path-entry:focus-within {
+  box-shadow: none;
+}
+
+entry.header-search {
+  min-height: 34px;
+  min-width: 200px;
+}
+
+/* ============================================================
+   File manager: content card
+
+   The browser (tabs, files, details and status) floats on one card over
+   the window wash.
+   ============================================================ */
+
+.main-card {
+  margin: 0 10px 10px 0;
+  border: 1px solid var(--io-border);
+  border-radius: var(--io-radius-lg);
+  background: var(--io-view-bg);
+  box-shadow: 0 6px 22px alpha(black, 0.22);
+}
+
+.browser-body > separator {
+  min-width: 6px;
+  background: transparent;
 }
 
 /* ============================================================
@@ -343,41 +445,73 @@ button.breadcrumb-button:hover {
    ============================================================ */
 
 .tab-strip {
-  min-height: 38px;
-  padding: 6px 8px 0;
+  min-height: 40px;
+  padding: 6px 8px;
   background: transparent;
   border-bottom: 1px solid var(--io-separator);
 }
 
 .file-tab {
-  border-radius: var(--io-radius) var(--io-radius) 0 0;
+  border-radius: var(--io-radius);
   background: transparent;
+}
+
+.file-tab:hover {
+  background: var(--io-hover-bg);
+}
+
+.file-tab.file-tab-active {
+  background: var(--io-active-bg);
+  box-shadow: inset 0 -2px var(--io-accent);
 }
 
 button.file-tab-button {
-  min-height: 32px;
-  min-width: 96px;
+  min-height: 28px;
+  min-width: 0;
   padding: 0 12px;
-  border-radius: var(--io-radius) 0 0 0;
+  border-radius: var(--io-radius);
   background: transparent;
+  color: var(--io-text-dim);
 }
 
-button.file-tab-button:checked {
-  background: var(--io-accent-soft);
+button.file-tab-button:checked,
+button.file-tab-button:hover {
+  background: transparent;
   color: var(--io-text);
 }
 
-button.file-tab-close,
-button.tab-new-button {
-  min-height: 32px;
-  min-width: 32px;
+.file-tab-active .file-tab-icon {
+  color: var(--io-accent-text);
+}
+
+button.file-tab-close {
+  min-height: 22px;
+  min-width: 22px;
+  margin: 0 4px 0 -6px;
   padding: 0;
-  border-radius: 0 var(--io-radius) 0 0;
+  border-radius: 999px;
   background: transparent;
+  color: var(--io-text-faint);
+  -gtk-icon-size: 12px;
+}
+
+button.file-tab-close:hover {
+  background: var(--io-hover-bg);
+  color: var(--io-text);
 }
 
 button.tab-new-button {
+  min-height: 28px;
+  min-width: 28px;
+  padding: 0;
   border-radius: var(--io-radius);
+  background: transparent;
+  color: var(--io-text-faint);
+}
+
+button.tab-new-button:hover {
+  background: var(--io-hover-bg);
+  color: var(--io-text);
 }
 
 /* ============================================================
@@ -386,7 +520,6 @@ button.tab-new-button {
 
 .sidebar {
   background: transparent;
-  border-right: 1px solid var(--io-separator);
 }
 
 .sidebar-list {
@@ -448,7 +581,7 @@ button.sidebar-eject-button {
 
 .content-scroll,
 .content-scroll > viewport {
-  background: var(--io-view-bg);
+  background: transparent;
 }
 
 .content-list,
@@ -550,7 +683,7 @@ button.list-header-button.list-header-active {
    ============================================================ */
 
 .details-panel {
-  background: var(--io-view-bg);
+  background: transparent;
   border-left: 1px solid var(--io-separator);
 }
 
@@ -602,11 +735,22 @@ button.list-header-button.list-header-active {
    File manager: status and filter bars
    ============================================================ */
 
-.status-label {
-  padding: 6px 12px;
-  background: transparent;
+.status-bar {
+  min-height: 30px;
+  padding: 0 14px;
   border-top: 1px solid var(--io-separator);
+  font-size: 0.9em;
+}
+
+.status-label,
+.status-free-space {
+  background: transparent;
   color: var(--io-text-dim);
+}
+
+.status-free-space {
+  color: var(--io-text-faint);
+  font-feature-settings: "tnum";
 }
 
 .filter-bar {
@@ -662,7 +806,7 @@ button.context-menu-item.destructive-action:hover {
 
 .computer-page-scroll,
 .computer-page-scroll > viewport {
-  background: var(--io-view-bg);
+  background: transparent;
 }
 
 .computer-page-title {
@@ -749,7 +893,7 @@ button.computer-volume-action {
 
 .settings-page-scroll,
 .settings-page-scroll > viewport {
-  background: var(--io-view-bg);
+  background: transparent;
 }
 
 .settings-title {
